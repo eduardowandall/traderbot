@@ -1,18 +1,18 @@
-import time
-import traceback
+from abc import ABC, abstractmethod
 from datetime import datetime
 from decimal import Decimal
 
 from report.report_method import BaseReport
+from trader.account import Account
+from trader.api import MercadoBitcoinPublicAPI
+from trader.colored_logger import get_trading_logger
+from trader.models.position import Position
+from trader.trading_strategy import TradingStrategy
 
-from .account import Account
-from .api import MercadoBitcoinPublicAPI
-from .colored_logger import get_trading_logger
-from .models import Position
-from .trading_strategy import TradingStrategy
 
+class BaseBot(ABC):
+    """Classe base para bots de trading e backtesting"""
 
-class TradingBot:
     def __init__(
         self,
         api: MercadoBitcoinPublicAPI,
@@ -29,95 +29,84 @@ class TradingBot:
 
         self.price_history: list[Decimal] = []
         self.last_position: Position | None = None
+
         # Configurar logging colorido
-        self.trading_logger = get_trading_logger("TradingBot")
+        self.trading_logger = get_trading_logger(self.__class__.__name__)
         self.logger = self.trading_logger.get_logger()
 
-    def get_current_price(self) -> Decimal:
-        """Obtém preço atual do par"""
-        ticker = self.api.get_ticker(self.symbol)
-        return Decimal(ticker.last)
+    @abstractmethod
+    def run(self, **kwargs):
+        """Método abstrato para executar o bot"""
+        pass
 
-    def run(self, interval: int = 60):
-        self.is_running = True
+    def process_market_data(
+        self, current_price: Decimal, timestamp: datetime | None = None
+    ):
+        """Processa dados de mercado e executa lógica de trading comum"""
+        self.price_history.append(current_price)
 
-        self.trading_logger.log_bot_start(self.symbol)
+        position_signal = self.strategy.on_market_refresh(
+            current_price,
+            self.account.get_position(),
+            self.account.position_history,
+        )
 
-        while self.is_running:
-            try:
-                current_price = self.get_current_price()
-                self.price_history.append(current_price)
-                self.trading_logger.log_price(self.symbol, float(current_price))
+        if position_signal:
+            order = self.account.place_order(
+                current_price,
+                position_signal.side,
+                position_signal.quantity,
+            )
+            self.trading_logger.log_order_placed(
+                order.order_id,
+                order.side,
+                order.price,
+                order.quantity,
+            )
 
-                position_signal = self.strategy.on_market_refresh(
-                    current_price,
-                    self.account.get_position(),
-                    self.account.position_history,
-                )
-
-                if position_signal:
-                    order = self.account.place_order(
-                        current_price,
-                        position_signal.side,
-                        position_signal.quantity,
+        # Log de informações da conta
+        position = self.account.get_position()
+        if position:
+            self.trading_logger.log_position(
+                position.type,
+                float(position.entry_order.quantity),
+                float(position.entry_order.price),
+            )
+        elif self.account.position_history:
+            # Log colorido baseado no resultado
+            last_position = self.account.position_history[-1]
+            if last_position != self.last_position:
+                self.last_position = last_position
+                realized_pnl = last_position.realized_pnl
+                if realized_pnl > 0:
+                    self.logger.info(
+                        f"💰 Posição fechada com LUCRO - PnL: R$ {realized_pnl:.2f}"
                     )
-                    self.trading_logger.log_order_placed(
-                        order.order_id,
-                        order.side,
-                        order.price,
-                        order.quantity,
+                else:
+                    self.logger.info(
+                        f"💸 Posição fechada com PREJUÍZO - PnL: R$ {realized_pnl:.2f}"
                     )
 
-                # Log de informações da conta
-                position = self.account.get_position()
-                if position:
-                    self.trading_logger.log_position(
-                        position.type,
-                        float(position.entry_order.quantity),
-                        float(position.entry_order.price),
-                    )
-                elif self.account.position_history:
-                    # Log colorido baseado no resultado
-                    last_position = self.account.position_history[-1]
-                    if last_position != self.last_position:
-                        self.last_position = last_position
-                        realized_pnl = last_position.realized_pnl
-                        if realized_pnl > 0:
-                            self.logger.info(
-                                f"💰 Posição fechada com LUCRO - PnL: R$ {realized_pnl:.2f}"
-                            )
-                        else:
-                            self.logger.info(
-                                f"💸 Posição fechada com PREJUÍZO - PnL: R$ {realized_pnl:.2f}"
-                            )
+        # Log de PnL
+        unrealized_pnl = (
+            position.unrealized_pnl(current_price) if position else Decimal("0.0")
+        )
+        if position:
+            self.trading_logger.log_unrealized_pnl(float(unrealized_pnl))
 
-                # Log de PnL
-                if position:
-                    unrealized_pnl = position.unrealized_pnl(current_price)
-                    self.trading_logger.log_unrealized_pnl(float(unrealized_pnl))
-                total_pnl = self.account.get_total_realized_pnl()
-                self.trading_logger.log_realized_pnl(float(total_pnl))
+        total_pnl = self.account.get_total_realized_pnl()
+        self.trading_logger.log_realized_pnl(float(total_pnl))
 
-                # Salvar dados da iteração
-                self.report.save_iteration_data(
-                    timestamp=datetime.now(),
-                    symbol=self.symbol,
-                    current_price=current_price,
-                    position=self.account.get_position(),
-                    unrealized_pnl=unrealized_pnl,
-                    realized_pnl=total_pnl,
-                    position_signal=position_signal.side if position_signal else None,
-                )
-
-                time.sleep(interval)
-
-            except KeyboardInterrupt:
-                self.logger.info("🛑 Bot interrompido pelo usuário")
-                self.stop()
-            except Exception as e:
-                self.trading_logger.log_error("Erro no loop principal", e)
-                traceback.print_exc()
-                time.sleep(interval)
+        # Salvar dados da iteração
+        self.report.save_iteration_data(
+            timestamp=timestamp or datetime.now(),
+            symbol=self.symbol,
+            current_price=current_price,
+            position=self.account.get_position(),
+            unrealized_pnl=unrealized_pnl,
+            realized_pnl=total_pnl,
+            position_signal=position_signal.side if position_signal else None,
+        )
 
     def show_execution_report(self):
         """Mostra relatório de execução"""
@@ -174,23 +163,15 @@ class TradingBot:
             + self.account.get_unrealized_pnl(final_price)
         )
 
-        # Calcular diferença
+        # Calcular percentuais de retorno
+        initial_investment = first_position_entry_price * first_position_quantity
+        hold_return_pct = (hold_pnl / initial_investment) * 100
+        actual_return_pct = (actual_pnl / initial_investment) * 100
+
         difference = hold_pnl - actual_pnl
 
-        # Calcular percentual de retorno
-        hold_return_pct = (
-            hold_pnl / (first_position_entry_price * first_position_quantity)
-        ) * 100
-        actual_return_pct = (
-            (actual_pnl / (first_position_entry_price * first_position_quantity)) * 100
-            if first_position_entry_price * first_position_quantity != 0
-            else 0
-        )
-
-        self.logger.info("🔍 ===== ANÁLISE HOLD STRATEGY =====")
-        self.logger.info(
-            f"📌 Primeira posição: {first_position_quantity:.8f} @ R$ {first_position_entry_price:.2f}"
-        )
+        self.logger.info("🔍 ===== ANÁLISE HOLD vs TRADING =====")
+        self.logger.info(f"💰 Investimento inicial: R$ {initial_investment:.2f}")
         self.logger.info(f"💰 Preço inicial: R$ {first_position_entry_price:.2f}")
         self.logger.info(f"💰 Preço final: R$ {final_price:.2f}")
 

@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 
 from dotenv import load_dotenv
 
@@ -7,17 +8,21 @@ from trader import NotImplementedStrategy, get_strategy_cls
 from trader.account import Account
 from trader.api import FakeMercadoBitcoinPrivateAPI, MercadoBitcoinPublicAPI
 from trader.api.private_api import MercadoBitcoinPrivateAPI
-from trader.bot import TradingBot
+from trader.backtesting.bot import BacktestingBot
+from trader.trading.bot import TradingBot
 
 
 def main(
     currency: str,
     strategy: str,
     interval: int,
-    fake: bool,
+    fake: bool = False,
+    backtest: bool = False,
     report: str = "null",
     api_key: str | None = None,
     api_secret: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     **strategy_args,
 ):
     """
@@ -29,11 +34,14 @@ def main(
         --strategy          Nome da estratégia de trading a ser utilizada
         --interval          Intervalo em segundos entre verificações de mercado
         --fake              Se True, usa API fake para simulação; se False, usa API real
+        --backtest          Se True, executa backtesting em vez de trading real
         --report            Methodo de report:
                               - 'null' (padrão): Não gera report
                               - 'csv': Salva dados em CSV na pasta report/data/
         --api_key           Chave da API do Mercado Bitcoin (obrigatória se fake=False)
         --api_secret        Segredo da API do Mercado Bitcoin (obrigatório se fake=False)
+        --start_date        Data de início do backtesting (obrigatório se backtest=True)
+        --end_date          Data de fim do backtesting (obrigatório se backtest=True)
         **strategy_args     Argumentos específicos da estratégia selecionada (execute main.py --strategy=<nome> --help para mais informações)
 
     Exemplos:
@@ -44,7 +52,7 @@ def main(
         python main.py --strategy=iteration --currency=BTC-BRL --interval=1 --fake --report=file
     """
     # Configurar credenciais (use variáveis de ambiente)
-    if fake:
+    if fake or backtest:
         account_api = FakeMercadoBitcoinPrivateAPI()
     else:
         if not api_key or not api_secret:
@@ -78,13 +86,27 @@ def main(
         print(f"Erro na configuração de persistência: {e}")
         return
 
-    # Criar e executar bot
-    bot = TradingBot(public_api, strategy_obj, report_obj, account)
-
-    try:
-        bot.run(interval=int(interval))
-    except KeyboardInterrupt:
-        bot.stop()
+    if backtest:
+        bot = BacktestingBot(public_api, strategy_obj, report_obj, account)
+        if not start_date or not end_date:
+            print("Datas de início e fim são obrigatórias para backtesting")
+            return
+        try:
+            start_date_datetime = datetime.fromisoformat(start_date)
+            end_date_datetime = datetime.fromisoformat(end_date)
+        except ValueError:
+            print("Datas de início e fim devem ser no formato ISO 8601")
+            return
+        try:
+            bot.run(start_date_datetime, end_date_datetime, interval=int(interval))
+        except KeyboardInterrupt:
+            bot.stop()
+    else:
+        bot = TradingBot(public_api, strategy_obj, report_obj, account)
+        try:
+            bot.run(interval=int(interval))
+        except KeyboardInterrupt:
+            bot.stop()
 
 
 def parse_kwargs(argv):
