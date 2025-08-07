@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from decimal import Decimal
 
+from trader.models.public_data import TickerData
+
 from .models import OrderSide, OrderSignal, Position
 
 
@@ -10,7 +12,8 @@ class TradingStrategy(ABC):
     @abstractmethod
     def on_market_refresh(
         self,
-        market_price: Decimal,
+        ticker: TickerData,
+        balance: Decimal,
         current_position: Position | None,
         position_history: list[Position],
     ) -> OrderSignal | None:
@@ -58,21 +61,22 @@ class SimpleMovingAverageStrategy(TradingStrategy):
 
     def on_market_refresh(
         self,
-        market_price: Decimal,
+        ticker: TickerData,
+        balance: Decimal,
         current_position: Position | None,
         position_history: list[Position],
     ) -> OrderSignal | None:
-        self.price_history.append(market_price)
+        self.price_history.append(ticker.last)
         if len(self.price_history) > self.long_period:
             self.price_history.pop(0)
 
         if not current_position:
-            if self.should_buy(market_price):
+            if self.should_buy(ticker.last):
                 return OrderSignal(
-                    OrderSide.BUY, self.calculate_quantity(Decimal("0.0"), market_price)
+                    OrderSide.BUY, self.calculate_quantity(balance, ticker.last)
                 )
         else:
-            if self.should_sell(market_price, current_position):
+            if self.should_sell(ticker.last, current_position):
                 return OrderSignal(
                     OrderSide.SELL, current_position.entry_order.quantity
                 )
@@ -105,17 +109,18 @@ class IterationStrategy(TradingStrategy):
 
     def on_market_refresh(
         self,
-        market_price: Decimal,
+        ticker: TickerData,
+        balance: Decimal,
         current_position: Position | None,
         position_history: list[Position],
     ) -> OrderSignal | None:
-        self.price_history.append(market_price)
+        self.price_history.append(ticker.last)
         if not current_position:
             if len(self.price_history) > self.buy_on_iteration:
                 self.price_history = []
                 return OrderSignal(
                     OrderSide.BUY,
-                    self.calculate_quantity(Decimal("10000.0"), market_price),
+                    self.calculate_quantity(balance, ticker.last),
                 )
         else:
             if len(self.price_history) > self.sell_on_iteration:

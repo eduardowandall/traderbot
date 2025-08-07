@@ -7,17 +7,21 @@ from trader import NotImplementedStrategy, get_strategy_cls
 from trader.account import Account
 from trader.api import FakeMercadoBitcoinPrivateAPI, MercadoBitcoinPublicAPI
 from trader.api.private_api import MercadoBitcoinPrivateAPI
-from trader.bot import TradingBot
+from trader.backtesting.bot import BacktestingBot
+from trader.trading.bot import TradingBot
 
 
 def main(
     currency: str,
     strategy: str,
     interval: int,
-    fake: bool,
+    fake: bool = False,
+    backtest: bool = False,
     report: str = "null",
     api_key: str | None = None,
     api_secret: str | None = None,
+    start_datetime: str | None = None,
+    end_datetime: str | None = None,
     **strategy_args,
 ):
     """
@@ -29,11 +33,14 @@ def main(
         --strategy          Nome da estratégia de trading a ser utilizada
         --interval          Intervalo em segundos entre verificações de mercado
         --fake              Se True, usa API fake para simulação; se False, usa API real
+        --backtest          Se True, executa backtesting em vez de trading real
         --report            Methodo de report:
                               - 'null' (padrão): Não gera report
                               - 'csv': Salva dados em CSV na pasta report/data/
         --api_key           Chave da API do Mercado Bitcoin (obrigatória se fake=False)
         --api_secret        Segredo da API do Mercado Bitcoin (obrigatório se fake=False)
+        --start_datetime        Data de início do backtesting (obrigatório se backtest=True)
+        --end_datetime          Data de fim do backtesting (obrigatório se backtest=True)
         **strategy_args     Argumentos específicos da estratégia selecionada (execute main.py --strategy=<nome> --help para mais informações)
 
     Exemplos:
@@ -44,7 +51,7 @@ def main(
         python main.py --strategy=iteration --currency=BTC-BRL --interval=1 --fake --report=file
     """
     # Configurar credenciais (use variáveis de ambiente)
-    if fake:
+    if fake or backtest:
         account_api = FakeMercadoBitcoinPrivateAPI()
     else:
         if not api_key or not api_secret:
@@ -78,8 +85,12 @@ def main(
         print(f"Erro na configuração de persistência: {e}")
         return
 
-    # Criar e executar bot
-    bot = TradingBot(public_api, strategy_obj, report_obj, account)
+    if backtest:
+        bot = BacktestingBot(
+            public_api, strategy_obj, report_obj, account, start_datetime, end_datetime
+        )
+    else:
+        bot = TradingBot(public_api, strategy_obj, report_obj, account)
 
     try:
         bot.run(interval=int(interval))
@@ -121,4 +132,19 @@ if __name__ == "__main__":
     if kwargs.get("help"):
         _help(kwargs.get("strategy"))
     else:
-        main(**kwargs)
+        # Separar argumentos específicos do main dos argumentos da estratégia
+        main_args = {
+            "currency": kwargs.pop("currency", None),
+            "strategy": kwargs.pop("strategy", None),
+            "interval": kwargs.pop("interval", None),
+            "fake": kwargs.pop("fake", False),
+            "backtest": kwargs.pop("backtest", False),
+            "report": kwargs.pop("report", "null"),
+            "api_key": kwargs.pop("api_key", None),
+            "api_secret": kwargs.pop("api_secret", None),
+            "start_datetime": kwargs.pop("start-date", None),
+            "end_datetime": kwargs.pop("end-date", None),
+        }
+        # Os argumentos restantes são para a estratégia
+        main_args.update(kwargs)  # strategy_args
+        main(**main_args)

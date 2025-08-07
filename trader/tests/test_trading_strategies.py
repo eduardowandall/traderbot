@@ -6,7 +6,7 @@ Validam comportamento de compra e venda com mínimo de mocking.
 from datetime import datetime
 from decimal import Decimal
 
-from trader.models import Position, PositionType
+from trader.models import Position, PositionType, TickerData
 from trader.models.order import Order, OrderSide
 from trader.trading_strategy import (
     SimpleMovingAverageStrategy,
@@ -36,6 +36,21 @@ def create_position(
     )
 
 
+def create_ticker(price: Decimal) -> TickerData:
+    """Helper para criar objetos TickerData de teste"""
+    return TickerData(
+        buy=price - Decimal("1"),
+        date=int(datetime.now().timestamp()),
+        high=price + Decimal("5"),
+        last=price,
+        low=price - Decimal("5"),
+        open=price,
+        pair="BTC-BRL",
+        sell=price + Decimal("1"),
+        vol=Decimal("100"),
+    )
+
+
 def test_simple_moving_average_strategy_buy_signal():
     """Testa se SMA strategy compra quando SMA curta cruza acima da longa"""
     strategy = SimpleMovingAverageStrategy(short_period=3, long_period=5)
@@ -53,10 +68,12 @@ def test_simple_moving_average_strategy_buy_signal():
     ]
 
     position = create_position()
+    balance = Decimal("1000")
 
     # Alimenta histórico de preços
     for price in prices:
-        strategy.on_market_refresh(price, position, [])
+        ticker = create_ticker(price)
+        strategy.on_market_refresh(ticker, balance, position, [])
 
     # Deve comprar quando SMA curta > SMA longa
     assert strategy.should_buy(Decimal("95")) is True
@@ -83,10 +100,12 @@ def test_simple_moving_average_strategy_sell_signal():
     ]
 
     position = create_position()
+    balance = Decimal("1000")
 
     # Alimenta histórico de preços
     for price in prices:
-        strategy.on_market_refresh(price, position, [])
+        ticker = create_ticker(price)
+        strategy.on_market_refresh(ticker, balance, position, [])
 
     # Deve vender quando SMA curta < SMA longa
     assert strategy.should_sell(Decimal("85"), position) is True
@@ -96,10 +115,12 @@ def test_simple_moving_average_strategy_insufficient_data():
     """Testa se SMA strategy não opera sem dados suficientes"""
     strategy = SimpleMovingAverageStrategy(short_period=10, long_period=30)
     position = create_position()
+    balance = Decimal("1000")
 
     # Apenas alguns preços (insuficientes para long_period)
     for price in [Decimal("100"), Decimal("101"), Decimal("102")]:
-        strategy.on_market_refresh(price, position, [])
+        ticker = create_ticker(price)
+        strategy.on_market_refresh(ticker, balance, position, [])
 
     # Não deve comprar nem vender sem dados suficientes
     assert strategy.should_buy(Decimal("103")) is False

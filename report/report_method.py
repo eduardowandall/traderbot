@@ -32,6 +32,10 @@ class BaseReport(ABC):
 class Nullreport(BaseReport):
     """Implementação de persistência que não salva dados (padrão)"""
 
+    def __init__(self, currency: str = "BTC-BRL"):  # noqa: ARG002
+        """Inicializa o Nullreport - não faz nada"""
+        pass
+
     def save_iteration_data(
         self,
         timestamp: datetime,  # noqa: ARG002

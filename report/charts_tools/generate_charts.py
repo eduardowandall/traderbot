@@ -222,9 +222,9 @@ def plot_position_chart(df: pd.DataFrame, output_file: str | None = None):
     # Criar dados para o gráfico de posições
     position_data = []
     for _, row in df.iterrows():
-        if row["position_side"] == "long":
+        if row["position_type"] == "long":
             position_data.append(1)
-        elif row["position_side"] == "short":
+        elif row["position_type"] == "short":
             position_data.append(-1)
         else:
             position_data.append(0)

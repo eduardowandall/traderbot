@@ -92,7 +92,7 @@ O arquivo CSV gerado pelo bot contém as seguintes colunas:
 | `timestamp` | Data e hora da iteração |
 | `symbol` | Par de moedas (ex: BTC-BRL) |
 | `price` | Preço atual (arredondado para 2 casas decimais) |
-| `position_side` | Lado da posição (long/short ou vazio) |
+| `position_type` | Lado da posição (long/short ou vazio) |
 | `position_quantity` | Quantidade da posição |
 | `position_entry_price` | Preço de entrada da posição (arredondado para 2 casas decimais) |
 | `unrealized_pnl` | PnL não realizado (arredondado para 2 casas decimais) |
