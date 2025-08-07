@@ -36,3 +36,27 @@ class TickerData:
             sell=Decimal(data["sell"]),
             vol=Decimal(data["vol"]),
         )
+
+
+@dataclass
+class Candles:
+    """Representa os dados de candles do Mercado Bitcoin"""
+
+    close: list[Decimal]
+    high: list[Decimal]
+    low: list[Decimal]
+    open: list[Decimal]
+    timestamp: list[int]
+    volume: list[Decimal]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Candles":
+        """Cria uma instância Candles a partir de um dicionário"""
+        return cls(
+            close=[Decimal(v) for v in data["c"]],
+            high=[Decimal(v) for v in data["h"]],
+            low=[Decimal(v) for v in data["l"]],
+            open=[Decimal(v) for v in data["o"]],
+            volume=[Decimal(v) for v in data["v"]],
+            timestamp=data["t"],
+        )

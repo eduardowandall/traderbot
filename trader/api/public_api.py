@@ -4,11 +4,12 @@ Esta interface não requer autenticação e pode ser usada para acessar dados p�
 """
 
 import logging
+from datetime import datetime
 from typing import Any, Dict, List
 
 import requests
 
-from ..models.public_data import TickerData
+from ..models.public_data import Candles, TickerData
 
 
 class MercadoBitcoinPublicAPI:
@@ -71,3 +72,28 @@ class MercadoBitcoinPublicAPI:
         """
         response: list[dict[str, Any]] = self._make_public_request("GET", "/tickers")
         return [TickerData.from_dict(ticker) for ticker in response]
+
+    def get_candles(
+        self, symbol: str, start_date: datetime, end_date: datetime, resolution: str
+    ) -> Candles:
+        """
+        Obtém candles de um par específico.
+
+        Args:
+            symbol: Símbolo do par (ex: 'BTC-BRL')
+            start_date: Data de início
+            end_date: Data de fim
+            resolution: Resolução do candle (ex: '1m', '15m', '1h', '3h', '1d', '1w', '1M')
+
+        Returns:
+            dict[str, list[Any]]: Dicionário com os candles
+        """
+
+        params = {
+            "symbol": symbol,
+            "from": int(start_date.timestamp()),
+            "to": int(end_date.timestamp()),
+            "resolution": resolution,
+        }
+        response = self._make_public_request("GET", "/candles", params=params)
+        return Candles.from_dict(response)
