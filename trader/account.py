@@ -90,7 +90,7 @@ class Account:
                 quantity=quantity,
                 price=price,
                 side=side,
-                time=datetime.now(),
+                timestamp=datetime.now(),
             )
             if not self.current_position:
                 # Criar nova posição

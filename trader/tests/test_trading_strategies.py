@@ -30,7 +30,7 @@ def create_position(
             quantity=quantity,
             price=entry_price,
             side=OrderSide.BUY,
-            time=datetime.now(),
+            timestamp=datetime.now(),
         ),
         exit_order=None,
     )

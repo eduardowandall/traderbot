@@ -4,6 +4,7 @@ Estes dados não requerem autenticação para serem acessados.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict
 
@@ -13,7 +14,7 @@ class TickerData:
     """Representa os dados de um ticker do Mercado Bitcoin"""
 
     buy: Decimal
-    date: int
+    timestamp: datetime
     high: Decimal
     last: Decimal
     low: Decimal
@@ -27,7 +28,7 @@ class TickerData:
         """Cria uma instância TickerData a partir de um dicionário"""
         return cls(
             buy=Decimal(data["buy"]),
-            date=data["date"],
+            timestamp=datetime.fromtimestamp(data["date"]),
             high=Decimal(data["high"]),
             last=Decimal(data["last"]),
             low=Decimal(data["low"]),
@@ -65,7 +66,7 @@ class Candles:
         """Cria um TickerData a partir de um candle de índice `index`"""
         return TickerData(
             buy=self.close[index],
-            date=self.timestamp[index],
+            timestamp=datetime.fromtimestamp(self.timestamp[index]),
             high=self.high[index],
             last=self.close[index],
             low=self.low[index],

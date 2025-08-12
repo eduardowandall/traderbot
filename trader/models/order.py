@@ -22,7 +22,7 @@ class Order:
     quantity: Decimal
     price: Decimal
     side: OrderSide
-    time: datetime
+    timestamp: datetime
 
     def __eq__(self, value):
         return (
@@ -32,5 +32,5 @@ class Order:
             and self.quantity == value.quantity
             and self.price == value.price
             and self.side == value.side
-            and self.time == value.time
+            and self.timestamp == value.timestamp
         )

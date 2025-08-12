@@ -170,12 +170,6 @@ class TradingLogger:
         unrealized_emoji = "📈" if pnl >= 0 else "📉"
         self.logger.info(f"{unrealized_emoji} PnL não realizado: R$ {pnl:.2f}")
 
-    def log_balance(self, brl_balance: float, btc_balance: float):
-        """Log específico para saldos"""
-        self.logger.info(
-            f"💳 Saldos - BRL: R$ {brl_balance:.2f}, BTC: {btc_balance:.8f}"
-        )
-
     def log_bot_start(self, symbol: str):
         """Log específico para início do bot"""
         self.logger.info(f"🚀 Bot iniciado para {symbol}")
@@ -183,17 +177,6 @@ class TradingLogger:
     def log_bot_stop(self):
         """Log específico para parada do bot"""
         self.logger.info("🛑 Bot parado")
-
-    def log_error(self, message: str, exception: Exception | None = None):
-        """Log específico para erros"""
-        if exception:
-            self.logger.error(f"❌ {message}: {str(exception)}")
-        else:
-            self.logger.error(f"❌ {message}")
-
-    def log_warning(self, message: str):
-        """Log específico para avisos"""
-        self.logger.warning(f"⚠️ {message}")
 
 
 def setup_colored_logging(
