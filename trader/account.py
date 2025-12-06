@@ -5,8 +5,8 @@ from typing import List
 
 from trader.models.order import Order
 
-from .api.base_api import PrivateAPIBase
 from .models import OrderSide, Position, PositionType
+from .providers.base_api import PrivateAPIBase
 
 
 class Account:

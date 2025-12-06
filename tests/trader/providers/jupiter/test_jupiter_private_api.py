@@ -21,8 +21,8 @@ from solders.solders import (
 )
 from solders.transaction import VersionedTransaction
 
-from trader.api.jupiter_adapter import JupiterPrivateAPI
 from trader.models.account_data import AccountBalanceData
+from trader.providers.jupiter.jupiter_adapter import JupiterPrivateAPI
 
 
 @pytest.fixture()

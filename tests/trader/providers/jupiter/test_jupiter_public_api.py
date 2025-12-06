@@ -1,11 +1,11 @@
 from unittest import mock
 
-from trader.api.jupiter_public_api import JupiterPublicAPI
-from trader.models.jupiter_data import (
+from trader.providers.jupiter.jupiter_data import (
     JupiterQuoteResponse,
     JupiterRoutePlan,
     JupiterSwapInfo,
 )
+from trader.providers.jupiter.jupiter_public_api import JupiterPublicAPI
 
 
 class TestJupiterPublicAPI:

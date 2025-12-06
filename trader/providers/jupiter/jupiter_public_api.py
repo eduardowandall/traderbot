@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from ..models.jupiter_data import (
+from .jupiter_data import (
     JupiterPriceData,
     JupiterQuoteResponse,
     JupiterTokenInfo,

@@ -16,12 +16,12 @@ from spl.token.instructions import (
     TOKEN_PROGRAM_ID,  # type: ignore
 )
 
-from trader.api.jupiter_public_api import (
+from trader.models.account_data import AccountBalanceData
+from trader.providers.jupiter.jupiter_public_api import (
     SOLANA_TOKENS,
     SOLANA_TOKENS_BY_MINT,
     SOLANA_TOKENS_DECIMALS,
 )
-from trader.models.account_data import AccountBalanceData
 
 wallet_public_key = os.getenv("WALLET_KEY")
 assert wallet_public_key, "Chave pública da wallet não definida"

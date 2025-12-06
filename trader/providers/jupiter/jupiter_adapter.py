@@ -25,9 +25,9 @@ from spl.token.instructions import (
     TOKEN_PROGRAM_ID,  # type: ignore
 )
 
-from ..models.account_data import AccountBalanceData, AccountData
-from ..models.public_data import Candles, TickerData
-from .base_api import PrivateAPIBase, PublicAPIBase
+from ...models.account_data import AccountBalanceData, AccountData
+from ...models.public_data import Candles, TickerData
+from ..base_api import PrivateAPIBase, PublicAPIBase
 from .jupiter_public_api import (
     SOLANA_TOKENS,
     SOLANA_TOKENS_BY_MINT,

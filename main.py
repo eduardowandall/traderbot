@@ -2,15 +2,15 @@ import typer
 
 from trader import get_strategy_cls
 from trader.account import Account
-from trader.api import (
-    FakeJupiterPrivateAPI,
-    JupiterPrivateAPI,
-    JupiterPublicAPIAdapter,
-)
 from trader.bot import BacktestingBot, BaseBot, TradingBot, WebsocketTradingBot
 from trader.notification.notification_service import (
     NullNotificationService,
     TelegramNotificationService,
+)
+from trader.providers import (
+    FakeJupiterPrivateAPI,
+    JupiterPrivateAPI,
+    JupiterPublicAPIAdapter,
 )
 
 app = typer.Typer()

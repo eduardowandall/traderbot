@@ -2,8 +2,7 @@
 Módulo de modelos de dados para a API do Mercado Bitcoin e Jupiter.
 """
 
-from .account_data import AccountBalanceData, AccountData
-from .jupiter_data import (
+from ..providers.jupiter.jupiter_data import (
     JupiterPriceData,
     JupiterQuoteResponse,
     JupiterRoutePlan,
@@ -11,6 +10,7 @@ from .jupiter_data import (
     JupiterSwapResponse,
     JupiterTokenInfo,
 )
+from .account_data import AccountBalanceData, AccountData
 from .order import Order, OrderSide, OrderSignal
 from .position import Position, PositionType
 from .public_data import TickerData

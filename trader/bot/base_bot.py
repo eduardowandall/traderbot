@@ -2,10 +2,10 @@ import logging
 from abc import ABC, abstractmethod
 
 from trader.account import Account
-from trader.api.base_api import PublicAPIBase
 from trader.models.position import Position
 from trader.models.public_data import TickerData
 from trader.notification.notification_service import NotificationService
+from trader.providers.base_api import PublicAPIBase
 from trader.trading_strategy import TradingStrategy
 
 

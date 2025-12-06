@@ -4,10 +4,10 @@ from unittest import mock
 
 import pytest
 
-from trader.api.jupiter_adapter import JupiterPublicAPIAdapter
-from trader.api.jupiter_public_api import JupiterPublicAPI
-from trader.models.jupiter_data import JupiterQuoteResponse
 from trader.models.public_data import TickerData
+from trader.providers.jupiter.jupiter_adapter import JupiterPublicAPIAdapter
+from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.providers.jupiter.jupiter_public_api import JupiterPublicAPI
 
 
 class TestParseSymbol:

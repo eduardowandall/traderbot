@@ -3,12 +3,12 @@ Módulo de interfaces da API do Mercado Bitcoin e Jupiter.
 """
 
 from .base_api import PrivateAPIBase, PublicAPIBase
-from .jupiter_adapter import (
+from .jupiter.jupiter_adapter import (
     FakeJupiterPrivateAPI,
     JupiterPrivateAPI,
     JupiterPublicAPIAdapter,
 )
-from .jupiter_public_api import SOLANA_TOKENS, JupiterPublicAPI
+from .jupiter.jupiter_public_api import SOLANA_TOKENS, JupiterPublicAPI
 
 __all__ = [
     # Base interfaces

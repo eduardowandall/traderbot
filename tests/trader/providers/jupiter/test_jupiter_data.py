@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from trader.models.jupiter_data import (
+from trader.providers.jupiter.jupiter_data import (
     JupiterPriceData,
     JupiterQuoteResponse,
     JupiterRoutePlan,
