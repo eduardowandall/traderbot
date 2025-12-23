@@ -5,7 +5,7 @@ import requests
 
 class NotificationService:
     def __init__(self):
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger(self.__module__)
 
     def send_message(self, message: str) -> None:
         pass

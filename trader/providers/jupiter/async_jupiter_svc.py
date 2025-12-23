@@ -25,7 +25,7 @@ class AsyncJupiterProvider:
 
         self.rpc_client = rpc_client or AsyncRPCClient(is_dryrun=is_dryrun)
         self.jupiter_client = jupiter_client or AsyncJupiterClient()
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(self.__module__)
         self.logger.info(f"Starting bot on {is_dryrun=}")
 
     def __repr__(self):
@@ -155,7 +155,6 @@ class AsyncJupiterProvider:
         if not quote.routePlan:
             raise Exception("Nenhuma rota encontrada!")
 
-        self.logger.info("✓ Rota encontrada.")
         return quote
 
     async def _get_swap_transaction(
@@ -176,13 +175,10 @@ class AsyncJupiterProvider:
         await self.rpc_client.simulate_transaction(new_tx)
 
         resp = await self.rpc_client.send_transaction(new_tx)
-        signature = resp.value
 
-        self.logger.info(f"✓ Transação enviada: {signature}")
         return resp
 
     async def _wait_for_confirmation(self, signature, timeout=30):
-        self.logger.info("→ Aguardando confirmação...")
         # if self.is_dryrun:
         #     return True
 

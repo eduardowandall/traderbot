@@ -16,7 +16,24 @@ from websockets.asyncio.client import ClientConnection
 
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 
-_use_new = False
+
+def logger_wrapper(func):
+    async def wrapper(*args, **kwargs):
+        logger = logging.getLogger(func.__module__)
+        try:
+            result = await func(*args, **kwargs)
+            logger.debug(
+                f"{func.__name__} with args={args}, kwargs={kwargs} with result={result}"
+            )
+            return result
+        except Exception as e:
+            logger.error(
+                f"{func.__name__}  with args={args}, kwargs={kwargs} error={str(e)}",
+                exc_info=True,
+            )
+            raise
+
+    return wrapper
 
 
 class Interval(StrEnum):
@@ -27,7 +44,7 @@ class Interval(StrEnum):
 
 class AsyncJupiterClient:
     def __init__(self, client=None, websocket=None):
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(self.__module__)
 
         self.websocket = websocket
         if client:
@@ -41,6 +58,7 @@ class AsyncJupiterClient:
                 }
             )
 
+    @logger_wrapper
     async def get_quote(
         self,
         input_mint: str,
@@ -78,6 +96,7 @@ class AsyncJupiterClient:
                 ex.add_note(f"Response: {response.text}")
             raise ex
 
+    @logger_wrapper
     async def get_candles(
         self, mint: str, interval: Interval = Interval.SECOND_15, candle_qty: int = 100
     ) -> list[Dict[str, Any]]:
@@ -108,6 +127,7 @@ class AsyncJupiterClient:
                 ex.add_note(f"Response: {response.text}")
             raise ex
 
+    @logger_wrapper
     async def get_price(self, mint: str) -> Decimal:
         try:
             if not self.websocket:
@@ -122,6 +142,7 @@ class AsyncJupiterClient:
             self.logger.error(f"Erro ao conectar WebSocket: {str(ex)}", exc_info=ex)
             raise ex
 
+    @logger_wrapper
     async def _get_price(self, ws: ClientConnection) -> Decimal:
         msg = await ws.recv()
         # '{"type":"prices","data":[{"assetId":"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263","price":0.000010537070513205161,"blockId":380968492}]}'
@@ -129,6 +150,7 @@ class AsyncJupiterClient:
         price = Decimal(json_msg["data"][0]["price"])
         return price
 
+    @logger_wrapper
     async def _connect_price_ws(self, mint: str):
         ws = await websockets.connect(
             "wss://trench-stream.jup.ag/ws",
@@ -140,6 +162,7 @@ class AsyncJupiterClient:
         self.websocket = ws
         return ws
 
+    @logger_wrapper
     async def get_swap_transaction(
         self, quote: JupiterQuoteResponse, pubkey: Pubkey
     ) -> VersionedTransaction:

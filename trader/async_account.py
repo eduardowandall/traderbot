@@ -21,7 +21,7 @@ class AsyncAccount:
         self.output_mint = output_mint
 
         self.current_position: Position | None = None
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger(self.__module__)
         self.total_pnl = Decimal("0.0")
 
         self.balances = None

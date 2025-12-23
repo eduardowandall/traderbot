@@ -15,7 +15,7 @@ class TradingStrategy(ABC):
     """Classe base para estratégias de trading"""
 
     def __init__(self):
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger(self.__module__)
 
     @abstractmethod
     def on_market_refresh(

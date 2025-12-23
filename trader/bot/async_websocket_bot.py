@@ -7,6 +7,7 @@ from functools import cached_property
 from rich.console import Console
 from solders.pubkey import Pubkey
 
+# import logging_config  # pyright: ignore[reportMissingImports]
 from trader.async_account import AsyncAccount
 from trader.models import SOLANA_MINTS
 from trader.models.bot_config import BotConfig
@@ -23,8 +24,10 @@ class AsyncWebsocketTradingBot:
     ):
         self.last_position: Position | None = None
         self.is_running = False
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.debug(f"start bot with config: {str(config)}")
+        self.logger = logging.getLogger(self.__module__)
+        self.logger.debug(
+            f"start bot {config.name}-{config.currency} with config: {str(config)}"
+        )
 
         self.input_mint = Pubkey.from_string(config.input_mint)
         self.output_mint = Pubkey.from_string(config.output_mint)

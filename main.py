@@ -1,9 +1,6 @@
-import datetime
-import logging
-
 import typer
-from rich.logging import RichHandler
 
+import logging_config  # pyright: ignore[reportMissingImports]
 from trader import get_strategy_cls
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.models.bot_config import (
@@ -46,7 +43,6 @@ def run(
         uv run python main.py run SOL-USDC dynamic_target 60 --api jupiter --wallet-key=WALLET_PUBLIC_KEY 'ema_period=20'
     """
 
-    configure_logging(f"{mode}-{currency}")
     provider = AsyncJupiterProvider(
         keypair=get_keypair_from_env(), is_dryrun=(mode == RunningMode.DRY)
     )
@@ -71,8 +67,6 @@ def start(
     ),
     symbol: str = typer.Argument("SOL-USDC", help="The trading symbol"),
 ):
-    configure_logging(f"{mode}-{symbol}")
-
     provider = AsyncJupiterProvider(
         keypair=get_keypair_from_env(), is_dryrun=(mode == RunningMode.DRY)
     )
@@ -130,21 +124,6 @@ def __parse_kwargs(argv: list[str]) -> dict[str, str]:
     return kwargs
 
 
-def configure_logging(filename):
-    LOG_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
-
-    fh = logging.FileHandler(
-        f".logs/{filename}-{datetime.datetime.now().timestamp()}.log"
-    )
-    fh.setLevel(logging.DEBUG)
-    ch = RichHandler()
-    ch.setLevel(logging.INFO)
-    formatter = logging.Formatter(LOG_FORMAT)
-    fh.setFormatter(formatter)
-    ch.setFormatter(logging.Formatter("%(name)s - %(message)s"))
-
-    logging.basicConfig(level=logging.NOTSET, handlers=[fh, ch])
-
-
 if __name__ == "__main__":
+    logging_config.setup_logging()
     app()
