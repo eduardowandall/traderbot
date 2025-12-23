@@ -28,7 +28,7 @@ def logger_wrapper(func):
             )
             return result
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"{func.__name__}  with args={args}, kwargs={kwargs} error={str(e)}",
                 exc_info=True,
             )

@@ -30,13 +30,13 @@ def logger_wrapper(func):
             )
             return result
         except SolanaRpcException as e:
-            logger.error(
+            logger.debug(
                 f"{func.__name__}  with args={args}, kwargs={kwargs} error={str(e.error_msg)}",
                 exc_info=True,
             )
             raise
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"{func.__name__}  with args={args}, kwargs={kwargs} error={str(e)}",
                 exc_info=True,
             )
