@@ -2,6 +2,7 @@ import logging
 import os
 from decimal import Decimal
 
+import httpx
 from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import TokenAccountOpts
@@ -16,6 +17,7 @@ from solders.solders import (
     VersionedTransaction,
 )
 from spl.token.constants import TOKEN_2022_PROGRAM_ID
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 
 def logger_wrapper(func):
@@ -27,6 +29,12 @@ def logger_wrapper(func):
                 f"{func.__name__} with args={args}, kwargs={kwargs} with result={result}"
             )
             return result
+        except SolanaRpcException as e:
+            logger.error(
+                f"{func.__name__}  with args={args}, kwargs={kwargs} error={str(e.error_msg)}",
+                exc_info=True,
+            )
+            raise
         except Exception as e:
             logger.error(
                 f"{func.__name__}  with args={args}, kwargs={kwargs} error={str(e)}",
@@ -122,6 +130,12 @@ class AsyncRPCClient:
         return resp
 
     @logger_wrapper
+    @retry(
+        wait=wait_fixed(2),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type(httpx.ReadTimeout),
+        reraise=True,
+    )
     async def get_lamports(self, pubkey: Pubkey) -> Decimal:
         await self.is_connected()
         resp = await self.client.get_account_info(pubkey)

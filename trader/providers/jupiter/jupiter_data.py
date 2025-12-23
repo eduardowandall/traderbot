@@ -17,8 +17,8 @@ class JupiterSwapInfo:
     outputMint: str
     inAmount: str
     outAmount: str
-    feeAmount: str
-    feeMint: str
+    feeAmount: str | None
+    feeMint: str | None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "JupiterSwapInfo":
@@ -30,8 +30,8 @@ class JupiterSwapInfo:
             outputMint=data["outputMint"],
             inAmount=data["inAmount"],
             outAmount=data["outAmount"],
-            feeAmount=data["feeAmount"],
-            feeMint=data["feeMint"],
+            feeAmount=data.get("feeAmount"),
+            feeMint=data.get("feeMint"),
         )
 
 

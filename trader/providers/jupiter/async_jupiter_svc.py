@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime
@@ -218,8 +219,5 @@ class AsyncJupiterProvider:
         tx = await self._get_swap_transaction(quote)
         new_tx = await self._get_signed_transaction(tx)
         resp = await self._send_transaction_and_wait_for_confirmation(new_tx)
-        # try:
-        #     return json.loads(resp.value.to_bytes())["result"]
-        # except Exception as ex:
-        #     self.logger.error(f"ERROR.send_transaction.convert_result: {str(ex)}")
-        return resp.to_json()
+
+        return json.loads(resp.to_json())["result"]

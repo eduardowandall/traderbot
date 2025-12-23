@@ -12,6 +12,7 @@ import httpx
 import websockets
 from solders.pubkey import Pubkey
 from solders.solders import VersionedTransaction
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 from websockets.asyncio.client import ClientConnection
 
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
@@ -97,6 +98,12 @@ class AsyncJupiterClient:
             raise ex
 
     @logger_wrapper
+    @retry(
+        wait=wait_fixed(2),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type(httpx.ReadTimeout),
+        reraise=True,
+    )
     async def get_candles(
         self, mint: str, interval: Interval = Interval.SECOND_15, candle_qty: int = 100
     ) -> list[Dict[str, Any]]:
@@ -115,6 +122,7 @@ class AsyncJupiterClient:
                     "Accept": "application/json",
                     "User-Agent": "Mozilla/5.0",
                 },
+                timeout=20,
             )
             response.raise_for_status()
             response_json = response.json()
@@ -142,7 +150,6 @@ class AsyncJupiterClient:
             self.logger.error(f"Erro ao conectar WebSocket: {str(ex)}", exc_info=ex)
             raise ex
 
-    @logger_wrapper
     async def _get_price(self, ws: ClientConnection) -> Decimal:
         msg = await ws.recv()
         # '{"type":"prices","data":[{"assetId":"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263","price":0.000010537070513205161,"blockId":380968492}]}'

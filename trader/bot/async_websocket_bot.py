@@ -4,7 +4,6 @@ import traceback
 from decimal import Decimal
 from functools import cached_property
 
-from rich.console import Console
 from solders.pubkey import Pubkey
 
 # import logging_config  # pyright: ignore[reportMissingImports]
@@ -14,7 +13,7 @@ from trader.models.bot_config import BotConfig
 from trader.models.order import Order
 from trader.models.position import Position
 
-console = Console()
+bot_logger = logging.getLogger("bot")
 
 
 class AsyncWebsocketTradingBot:
@@ -28,6 +27,7 @@ class AsyncWebsocketTradingBot:
         self.logger.debug(
             f"start bot {config.name}-{config.currency} with config: {str(config)}"
         )
+        bot_logger.debug(f"start bot {config.name}-{config.currency}")
 
         self.input_mint = Pubkey.from_string(config.input_mint)
         self.output_mint = Pubkey.from_string(config.output_mint)
@@ -118,18 +118,15 @@ class AsyncWebsocketTradingBot:
                 has_error = True
 
 
-bot_logger = logging.getLogger("bot")
-
-
 def log_ticker(symbol: str, price: Decimal, realized_pnl: Decimal | None = None):
     fiat_symbol = symbol.split("-")[1]
     if realized_pnl is not None:
-        bot_logger.info(
+        bot_logger.debug(
             f"[blue]{symbol}[/blue] @ {fiat_symbol} {price:.9f}. PNL Realizado: R$ {realized_pnl:.9f}",
             extra={"markup": True},
         )
     else:
-        bot_logger.info(
+        bot_logger.debug(
             f"[blue]{symbol}[/blue] @ {fiat_symbol} {price:.9f}.",
             extra={"markup": True},
         )
@@ -137,7 +134,7 @@ def log_ticker(symbol: str, price: Decimal, realized_pnl: Decimal | None = None)
 
 def log_placed_order(order: Order):
     msg = f"[gray]{order.side.upper()}[/gray] {order.quantity:.8f} @ ${order.price:.8f} [gray]({order.order_id})[gray]"
-    bot_logger.info(
+    bot_logger.debug(
         msg,
         extra={"markup": True},
     )
@@ -152,7 +149,7 @@ def log_position(position: Position, current_price: Decimal):
     pnl_style = "green" if pnl > 0 else "red"
     pnl_str = f"[{pnl_style}]{pnl:.2f}%[/{pnl_style}]"
 
-    bot_logger.info(
+    bot_logger.debug(
         f"{position.type.name} {position.entry_order.quantity:.8f} @ ${position.entry_order.price:.8f}. PNL: {pnl_str}",
         extra={"markup": True},
     )

@@ -56,25 +56,44 @@ class BotLoggerFileHandler(logging.FileHandler):
     #         self.handleError(record)
 
 
+class ConsoleFilter(logging.Filter):
+    ALLOWED_LOGGERS = ["bot"]
+
+    def __init__(self, param=None):
+        self.param = param
+
+    def filter(self, record):
+        if record.name in ConsoleFilter.ALLOWED_LOGGERS:
+            return True
+        else:
+            return record.levelno >= logging.WARNING
+
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "consolefilter": {
+            "()": ConsoleFilter,
+        }
+    },
     "formatters": {
         "default": {
             "format": "%(asctime)s %(levelname)s %(name)s.%(funcName)s %(message)s",
         },
         "console": {
-            "format": "%(name)s.%(funcName)s - %(message)s",
+            "format": "%(message)s",
         },
     },
     "handlers": {
         "console": {
             "class": "rich.logging.RichHandler",
             "formatter": "console",
-            "level": "INFO",
+            "level": "DEBUG",
+            "filters": ["consolefilter"],
         },
         "file": {
-            "class": "logging_config.BotLoggerFileHandler",
+            "class": BotLoggerFileHandler,
             "formatter": "default",
             "level": "DEBUG",
         },
