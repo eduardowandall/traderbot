@@ -12,7 +12,7 @@ from solders.solders import (
 
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.models import SOLANA_MINTS, OrderSide, OrderSignal, Position
-from trader.models.bot_config import BotConfig
+from trader.models.bot_config import BotConfig, RunningMode
 from trader.notification import NullNotificationService
 from trader.providers import (
     AsyncJupiterProvider,
@@ -234,6 +234,7 @@ async def test_async_websocket_bot_complete(
         name="name-bot-config-teste-complete",
         input_mint=usdc.mint,
         output_mint=bonk.mint,
+        mode=RunningMode.DRY,
         wallet=keypair,
         provider=AsyncJupiterProvider(
             keypair=keypair,

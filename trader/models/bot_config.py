@@ -17,7 +17,6 @@ from trader.trading_strategy import TradingStrategy
 class RunningMode(StrEnum):
     REAL = auto()
     DRY = auto()
-    # FAKE = auto()
 
 
 @dataclass
@@ -27,7 +26,7 @@ class BotConfig:
 
     input_mint: str  # a moeda que eu tenho
     output_mint: str  # a moeda que eu vou comprar
-    # mode: RunningMode
+    mode: RunningMode
     wallet: InitVar[Keypair]
     provider: AsyncJupiterProvider
     strategy: TradingStrategy
@@ -40,7 +39,7 @@ class BotConfig:
         return f"{_out}-{_in}"
 
 
-def create_bot_config(name: str, symbol: str, provider, strategy, notifier):
+def create_bot_config(mode: str, name: str, symbol: str, provider, strategy, notifier):
     keypair = get_keypair_from_env()
     _out, _in = symbol.split("-")
     SOLANA_MINTS.get_by_symbol(_in)
@@ -50,6 +49,7 @@ def create_bot_config(name: str, symbol: str, provider, strategy, notifier):
         name=name,
         input_mint=SOLANA_MINTS.get_by_symbol(_in).mint,
         output_mint=SOLANA_MINTS.get_by_symbol(_out).mint,
+        mode=RunningMode[mode.upper()],
         wallet=keypair,
         provider=provider,
         strategy=strategy,

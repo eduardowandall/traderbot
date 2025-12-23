@@ -6,6 +6,8 @@ from functools import cached_property
 
 from solders.pubkey import Pubkey
 
+import logging_config  # pyright: ignore[reportMissingImports]
+
 # import logging_config  # pyright: ignore[reportMissingImports]
 from trader.async_account import AsyncAccount
 from trader.models import SOLANA_MINTS
@@ -21,20 +23,21 @@ class AsyncWebsocketTradingBot:
         self,
         config: BotConfig,
     ):
+        logging_config.botname.set(f"{config.mode}-{config.name}-{config.currency}")
         self.last_position: Position | None = None
         self.is_running = False
         self.logger = logging.getLogger(self.__module__)
         self.logger.debug(
-            f"start bot {config.name}-{config.currency} with config: {str(config)}"
+            f"start bot {config.mode}-{config.name}-{config.currency} with config: {str(config)}"
         )
-        bot_logger.debug(f"start bot {config.name}-{config.currency}")
+        bot_logger.debug(f"start bot {config.mode}-{config.name}-{config.currency}")
 
         self.input_mint = Pubkey.from_string(config.input_mint)
         self.output_mint = Pubkey.from_string(config.output_mint)
 
         self.strategy = config.strategy
         self.account = AsyncAccount(
-            config.provider,  # type: ignore
+            config.provider,
             self.input_mint,
             self.output_mint,
         )

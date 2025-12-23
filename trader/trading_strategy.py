@@ -62,18 +62,18 @@ class RandomStrategy(TradingStrategy):
         if not current_position:
             if random.randint(1, 100) <= int(self.buy_chance):
                 self.price_history = []
+                self.logger.debug("buying at random")
                 return OrderSignal(
                     OrderSide.BUY,
                     quantity=self.calculate_quantity(balance, price),
                 )
-                self.logger.debug("buying at random")
         else:
             if random.randint(1, 100) <= int(self.sell_chance):
+                self.logger.debug("selling at random")
                 self.price_history = []
                 return OrderSignal(
                     OrderSide.SELL, current_position.entry_order.quantity
                 )
-                self.logger.debug("selling at random")
         return None
 
 
@@ -549,7 +549,7 @@ class StrategyComposer(TradingStrategy):
         if not sell_strategies:
             self.sell_strategies = [
                 TrailingStopLossStrategy(stop_loss_percent="3.1"),
-                TargetPercentStrategy(target_percent="6.01"),
+                # TargetPercentStrategy(target_percent="6.01"),
             ]
 
     def __repr__(self):

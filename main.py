@@ -50,7 +50,12 @@ def run(
     notification_svc = _get_notification_svc(notification_service, notification_args)
 
     config = create_bot_config(
-        f"run-{strategy}", currency, provider, strategy_obj, notification_svc
+        mode,
+        f"run-{strategy}",
+        currency,
+        provider,
+        strategy_obj,
+        notification_svc,
     )
 
     bot = AsyncWebsocketTradingBot(config)
@@ -72,6 +77,7 @@ def start(
     )
 
     config = create_bot_config(
+        mode,
         "my_config",
         symbol,
         provider,
