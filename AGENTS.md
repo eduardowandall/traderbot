@@ -7,6 +7,7 @@ Solana trading bot (Jupiter DEX). Python 3.14, `uv`-managed.
 - Test: `uv run pytest .` · single test: `uv run pytest tests/trader/bot/test_async_websocket_bot.py::test_name`
 - Lint: `uv run ruff check .` / auto-fix: `uv run ruff check --fix .`
 - Format: `uv run ruff format .` · Types: `uv run pyright .`
+- CI: `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, `pyright`, `pytest` on push/PR.
 
 ## Running the bot
 ```bash

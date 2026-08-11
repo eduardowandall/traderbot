@@ -59,6 +59,8 @@ uv run ruff format .         # format
 uv run pyright .             # type check
 ```
 
+CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every push/PR: lint, format check, type check, and the full test suite.
+
 ### Architecture
 
 - `main.py` — CLI entry point (`run`, `start`)

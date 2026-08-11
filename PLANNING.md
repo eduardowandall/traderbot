@@ -112,10 +112,16 @@ Housekeeping before refactoring or building new features. Ordered by risk: confi
 - YAML validated (PyYAML 1.1 parses the `on:` key as boolean `True` — a quirk; GitHub Actions' YAML 1.2 parser reads it correctly)
 - Every command in the workflow passes locally, so the first CI run should be green
 
-## Phase 6 — Docs
+## Phase 6 — Docs ✅ DONE
 
 - Update `AGENTS.md`: drop Makefile/pre-commit notes; update stale-code section after deletions
-- Update `README.md`: document the new `swap` command
+- Update `README.md`: document the new `swap` command → **deferred to Phase 7** (user decision: swap command doesn't exist yet; Phase 7 wires it into README/AGENTS)
+
+### Completed notes
+
+- Makefile/pre-commit notes and the stale-code section were already dropped during Phase 2 deletions — nothing left to remove
+- Added CI workflow reference to `AGENTS.md` (Commands) and `README.md` (Contributing) so the Phase 5 deliverable is documented
+- README `swap` command doc explicitly deferred to Phase 7 (see Phase 7 bullet: "Wire it into README (`swap` usage) and AGENTS.md")
 
 ## Phase 7 — New feature: `main.py swap` command
 
