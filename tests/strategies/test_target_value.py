@@ -8,7 +8,7 @@ from trader.models.position import Position, PositionType
 from trader.trading_strategy import TargetValueStrategy
 
 
-class TestTarketValueBuy:
+class TestTargetValueBuy:
     def test_target_price_not_reached(self):
         strategy = TargetValueStrategy(
             target_buy_price=Decimal("10.0000"),
@@ -79,7 +79,7 @@ class TestTarketValueBuy:
         assert order_signal is None
 
 
-class TestTarketValueSell:
+class TestTargetValueSell:
     @pytest.fixture(autouse=True)
     def mock_position(self):
         self.current_position = Position(

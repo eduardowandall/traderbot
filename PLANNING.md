@@ -72,7 +72,7 @@ Housekeeping before refactoring or building new features. Ordered by risk: confi
 - `async_account.get_balance` slang comments replaced with a concise note
 - Final state: `ruff check` ✅ · `ruff format --check` ✅ · `pytest` 44/44 ✅ · `pyright` 0 errors ✅
 
-## Phase 4 — Tests
+## Phase 4 — Tests ✅ DONE
 
 - Rename `test_jupiter_private_api.py` → `test_async_jupiter_svc.py` (it tests `AsyncJupiterProvider`; no "private API" module exists) ✅
 - Merge `test_jupiter_adapter.py` into the provider tests (it tests `get_price_ticker_data`; no "adapter" module exists) ✅
@@ -81,9 +81,9 @@ Housekeeping before refactoring or building new features. Ordered by risk: confi
   - `test_async_jupiter_client.py`: constructs a real `httpx.AsyncClient()` but every HTTP method is patched — no network actually happens. Safe, but could inject `client=mock` if ever touched.
   - `test_async_rpc_client.py` + bot test: offline (`LiteSVM`, `AsyncMock(spec=...)`).
   - All other modules (`test_main`, strategies, account, notification, `test_jupiter_data`): no external calls.
-- Fix typo `TestTarketValue*` → `TestTargetValue*`
-- Add `conftest.py` for shared fixtures (`mock_jupiter_client`, `mock_rpc_client`, `mock_sleep`)
-- Add missing coverage: CLI arg parsing (incl. no-args case), `NullNotificationService`, `AsyncAccount.can_buy`/`can_sell` edge cases
+- Fix typo `TestTarketValue*` → `TestTargetValue*` ✅
+- Add `conftest.py` for shared fixtures (`mock_jupiter_client`, `mock_rpc_client`, `mock_sleep`) ✅
+- Add missing coverage: CLI arg parsing (incl. no-args case), `NullNotificationService`, `AsyncAccount.can_buy`/`can_sell` edge cases ✅
 
 ### Completed notes
 
@@ -91,6 +91,14 @@ Housekeeping before refactoring or building new features. Ordered by risk: confi
 - Removed the real-client dependency: `setenvvar` fixture gone (no test default-constructs a client, so `HELIUS_RPC_URL`/`SOLANA_PRIVATE_KEY` are moot), `httpx`-patching dropped, `test_init` now asserts client wiring (`api.rpc_client is rpc_client`) instead of `isinstance(api.rpc_client.client, SolanaClient)`
 - New `fake_solana_client` fixture: `AsyncMock(spec=SolanaClient)` with canned `is_connected`/`get_account_info`/`get_token_accounts_by_owner`/`get_latest_blockhash`/`simulate_transaction`/`send_raw_transaction`; follows the repo's `AsyncMock`-attribute-reassignment pattern (pyright-clean)
 - Single-file run of `test_async_jupiter_svc.py` (the scenario that used to fail with `ssl.SSLError 0xa080024`) now passes 8/8
+- `tests/conftest.py` created; `mock_jupiter_client`/`mock_rpc_client`/`mock_sleep` moved there from the bot test (bot test still green; its now-unused `Signature`/`SendTransactionResp`/`VersionedTransaction`/`AsyncJupiterClient`/`AsyncRPCClient`/`pytest` imports pruned)
+- `TestTarketValue*` → `TestTargetValue*` in `tests/strategies/test_target_value.py`
+- New coverage (+12 tests):
+  - CLI end-to-end via `typer.testing.CliRunner`: `run dry SOL-USDC composer` (no `strategy_args` — the original NameError regression) and `run dry SOL-USDC random 'sell_chance=20 buy_chance=40'`, with `main.AsyncJupiterProvider`/`AsyncWebsocketTradingBot`/`get_keypair_from_env` (+ the `bot_config` one, since `create_bot_config` re-reads env) patched; asserts exit 0, bot invoked, config strategy/mode correct
+  - `_get_notification_svc`: `null` → `NullNotificationService`; `telegram` without args raises; `telegram` with args builds the service
+  - `NullNotificationService` is a `NotificationService` no-op
+  - `AsyncAccount.can_buy`/`can_sell`: 6 edge cases (LONG position blocks buy, low input balance blocks buy, no position blocks sell, low output balance blocks sell, happy paths)
+- Final state: `ruff check` ✅ · `ruff format --check` ✅ · `pytest` 56/56 ✅ · `pyright` 0 errors ✅
 - Final state: `ruff check` ✅ · `ruff format --check` ✅ · `pytest` 44/44 ✅ · `pyright` 0 errors ✅
 
 ## Phase 5 — CI

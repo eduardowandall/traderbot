@@ -1,9 +1,17 @@
 from decimal import Decimal
+from unittest import mock
 
 import pytest
+from typer.testing import CliRunner
 
-from main import __parse_kwargs, _get_strategy_obj
+import main as main_module
+from main import __parse_kwargs, _get_notification_svc, _get_strategy_obj
 from trader import NotImplementedStrategy
+from trader.models.bot_config import RunningMode
+from trader.notification.notification_service import (
+    NullNotificationService,
+    TelegramNotificationService,
+)
 from trader.trading_strategy import (
     RandomStrategy,
     StrategyComposer,
@@ -45,3 +53,65 @@ def test_get_strategy_obj_target_value_with_args():
 def test_get_strategy_obj_unknown_strategy_raises():
     with pytest.raises(NotImplementedStrategy):
         _get_strategy_obj("does_not_exist", None)
+
+
+def test_run_composer_without_strategy_args():
+    mock_bot = mock.Mock()
+    with (
+        mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
+        mock.patch("main.AsyncJupiterProvider", return_value=mock.Mock()),
+        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
+        mock.patch(
+            "trader.models.bot_config.get_keypair_from_env",
+            return_value=mock.Mock(),
+        ),
+    ):
+        result = CliRunner().invoke(
+            main_module.app, ["run", "dry", "SOL-USDC", "composer"]
+        )
+
+    assert result.exit_code == 0
+    mock_bot.run.assert_called_once()
+    config = bot_cls.call_args.args[0]
+    assert isinstance(config.strategy, StrategyComposer)
+    assert config.mode == RunningMode.DRY
+
+
+def test_run_random_with_strategy_args():
+    mock_bot = mock.Mock()
+    with (
+        mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
+        mock.patch("main.AsyncJupiterProvider", return_value=mock.Mock()),
+        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
+        mock.patch(
+            "trader.models.bot_config.get_keypair_from_env",
+            return_value=mock.Mock(),
+        ),
+    ):
+        result = CliRunner().invoke(
+            main_module.app,
+            ["run", "dry", "SOL-USDC", "random", "sell_chance=20 buy_chance=40"],
+        )
+
+    assert result.exit_code == 0
+    config = bot_cls.call_args.args[0]
+    assert isinstance(config.strategy, RandomStrategy)
+    assert config.strategy.sell_chance == "20"
+    assert config.strategy.buy_chance == "40"
+
+
+def test_get_notification_svc_null():
+    svc = _get_notification_svc("null", None)
+    assert isinstance(svc, NullNotificationService)
+
+
+def test_get_notification_svc_telegram_without_args_raises():
+    with pytest.raises(ValueError, match="chat_id e token"):
+        _get_notification_svc("telegram", None)
+
+
+def test_get_notification_svc_telegram_with_args():
+    svc = _get_notification_svc("telegram", "chat_id=123 token=abc")
+    assert isinstance(svc, TelegramNotificationService)
+    assert svc.chat_id == "123"
+    assert svc.token == "abc"

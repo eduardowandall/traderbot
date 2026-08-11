@@ -2,8 +2,16 @@ import logging
 from unittest.mock import patch
 
 from trader.notification.notification_service import (
+    NotificationService,
+    NullNotificationService,
     TelegramNotificationService,
 )
+
+
+def test_null_notification_service_is_noop():
+    service = NullNotificationService()
+    assert isinstance(service, NotificationService)
+    assert service.send_message("ignored") is None
 
 
 def test_telegram_init():
