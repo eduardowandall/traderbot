@@ -8,7 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
-uv.lock
+
+# Runtime logs
+.logs/
 
 .coverage
 .env

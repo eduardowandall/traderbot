@@ -6,7 +6,7 @@ from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Dict
+from typing import Any
 
 import httpx
 import websockets
@@ -69,7 +69,7 @@ class AsyncJupiterClient:
         only_direct_routes: bool = False,
         max_accounts: int | None = None,
     ) -> JupiterQuoteResponse:
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": str(amount),
@@ -106,7 +106,7 @@ class AsyncJupiterClient:
     )
     async def get_candles(
         self, mint: str, interval: Interval = Interval.SECOND_15, candle_qty: int = 100
-    ) -> list[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         end_time = int(datetime.now().timestamp() * 1000)
         url = (
             f"https://datapi.jup.ag/v2/charts/{mint}"

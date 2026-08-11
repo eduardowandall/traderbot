@@ -5,7 +5,7 @@ from decimal import Decimal
 import httpx
 from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
-from solana.rpc.types import TokenAccountOpts
+from solana.rpc.models import TokenAccountOpts
 from solders.keypair import Keypair
 from solders.message import MessageV0, to_bytes_versioned
 from solders.pubkey import Pubkey

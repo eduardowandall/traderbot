@@ -319,7 +319,8 @@ class WeightedMovingAverageStrategy(TradingStrategy):
 
         weights = list(range(1, window + 1))
         weighted_prices = [
-            price * Decimal(weight) for price, weight in zip(prices[-window:], weights)
+            price * Decimal(weight)
+            for price, weight in zip(prices[-window:], weights, strict=False)
         ]
         return sum(weighted_prices) / Decimal(sum(weights))
 

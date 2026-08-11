@@ -39,8 +39,8 @@ def run(
     Executa o bot em modo produção.
 
     Exemplos:
-        # Jupiter
-        uv run python main.py run SOL-USDC dynamic_target 60 --api jupiter --wallet-key=WALLET_PUBLIC_KEY 'ema_period=20'
+        uv run main.py run dry SOL-USDC random 'sell_chance=20 buy_chance=40'
+        uv run main.py run dry SOL-USDC composer 'buy_mode=all sell_mode=any'
     """
 
     provider = AsyncJupiterProvider(

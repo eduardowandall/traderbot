@@ -4,7 +4,6 @@ import logging
 import time
 from datetime import datetime
 from decimal import Decimal
-from typing import List
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -60,7 +59,7 @@ class AsyncJupiterProvider:
         price = await self.jupiter_client.get_price(str(mint))
         return price
 
-    async def get_account_balance(self) -> List[MintBalance]:
+    async def get_account_balance(self) -> list[MintBalance]:
         balances = []
 
         # Saldo de SOL (lamports)

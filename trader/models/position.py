@@ -1,14 +1,12 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum, auto
-from typing import Optional
 
 from trader.models.order import Order
 
 
 class PositionType(StrEnum):
     LONG = auto()
-    SHORT = auto()
 
 
 @dataclass
@@ -17,7 +15,7 @@ class Position:
 
     type: PositionType
     entry_order: Order
-    exit_order: Optional[Order]
+    exit_order: Order | None
 
     def unrealized_pnl(self, current_price: Decimal) -> Decimal:
         """Calcula o PnL não realizado"""

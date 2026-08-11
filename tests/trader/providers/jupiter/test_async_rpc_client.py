@@ -33,7 +33,8 @@ class FakeSolanaClient:
         result = FakeSolanaClient.client.simulate_transaction(tx)
         if isinstance(result, FailedTransactionMetadata):
             return SimulateTransactionResp(
-                value=RpcSimulateTransactionResult(err=result.err())
+                RpcSimulateTransactionResult(err=result.err()),
+                RpcResponseContext(slot=0),  # type: ignore
             )
 
         return SimulateTransactionResp(
@@ -52,7 +53,7 @@ def mock_signed_transaction():
             {
                 "from_pubkey": keypair.pubkey(),
                 "to_pubkey": receiver,
-                "lamports": 100_000,
+                "lamports": 1_000_000,
             }
         )
     ]

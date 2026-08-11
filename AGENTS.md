@@ -3,11 +3,10 @@
 Solana trading bot (Jupiter DEX). Python 3.14, `uv`-managed.
 
 ## Commands
-- Setup: `uv sync --extra dev`
+- Setup: `uv sync --system-certs` (always pass `--system-certs`; this machine uses a corporate TLS cert store that `uv`'s bundled CA bundle doesn't trust). Dev tools live in the `dev` dependency group, installed by default.
 - Test: `uv run pytest .` · single test: `uv run pytest tests/trader/bot/test_async_websocket_bot.py::test_name`
 - Lint: `uv run ruff check .` / auto-fix: `uv run ruff check --fix .`
 - Format: `uv run ruff format .` · Types: `uv run pyright .`
-- The `Makefile` is deprecated (expect removal); prefer raw `uv` commands. The README also documents `make format-check`/`make ruff`, which don't exist.
 
 ## Running the bot
 ```bash
@@ -19,9 +18,6 @@ uv run --env-file .env main.py run <mode> <SYMBOL> <strategy> '<key=value ...>'
 - CLI strategies resolve via `STRATEGIES` in `trader/__init__.py` (random, target_value, composer) — register new top-level strategies there. `WeightedMovingAverageStrategy`/`TrailingStopLossStrategy`/`TargetPercentStrategy` are only usable inside `StrategyComposer`.
 - `botconfigs.example.yaml` is a WIP not wired into the code (no YAML loader exists); config comes from CLI args only.
 
-## Stale code (do not use as reference)
-- `desk.py`, `manual_swap.py`, and the `main.py` `run` docstring use old CLI flags (`--wallet-key`, `--api=`, `--websocket`, `--notification-*`); `manual_swap.py` imports the removed `trader/providers/jupiter/jupiter_public_api`.
-
 ## Architecture
 - `main.py` — Typer CLI (`run`, `start`).
 - `trader/bot/async_websocket_bot.py` — loop: price → `strategy.on_market_refresh` → place order; logs under the `bot` logger.
@@ -30,7 +26,6 @@ uv run --env-file .env main.py run <mode> <SYMBOL> <strategy> '<key=value ...>'
 - `logging_config.py` — console filter shows only `bot`/`trader.trading_strategy` at DEBUG (others WARNING); file logs → `.logs/`.
 
 ## Known issues / quirks
-- `uv.lock` is gitignored (mistake; to be fixed later — don't address it now).
 - Ruff: line-length 88, double quotes, ignores E501/B008. Pyright: `include=["trader/*"]`, basic mode.
 - pytest: `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed).
 - `tests/trader/bot/test_async_websocket_bot.py` asserts exact mock call sequences — reordering provider calls breaks it.

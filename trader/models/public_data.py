@@ -1,5 +1,5 @@
 """
-Dataclasses para dados públicos da API do Mercado Bitcoin.
+Dataclasses para dados públicos da API Jupiter.
 Estes dados não requerem autenticação para serem acessados.
 """
 

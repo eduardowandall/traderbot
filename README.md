@@ -17,7 +17,7 @@ on Solana.
 ### Setup
 
 ```bash
-uv sync --extra dev
+uv sync
 cp .env.example .env
 ```
 
