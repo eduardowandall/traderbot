@@ -101,9 +101,16 @@ Housekeeping before refactoring or building new features. Ordered by risk: confi
 - Final state: `ruff check` ✅ · `ruff format --check` ✅ · `pytest` 56/56 ✅ · `pyright` 0 errors ✅
 - Final state: `ruff check` ✅ · `ruff format --check` ✅ · `pytest` 44/44 ✅ · `pyright` 0 errors ✅
 
-## Phase 5 — CI
+## Phase 5 — CI ✅ DONE
 
 - Add `.github/workflows/ci.yml`: `uv` setup, `ruff check`, `ruff format --check`, `pyright`, `pytest` on push/PR
+
+### Completed notes
+
+- Workflow `.github/workflows/ci.yml`: triggers on push to `main` + all PRs; `ubuntu-latest`; `actions/checkout@v4` → `astral-sh/setup-uv@v5` (caching on) → `uv python install 3.14` → `uv sync` → `uv run ruff check .` → `uv run ruff format --check .` → `uv run pyright .` → `uv run pytest .`
+- No machine-specific `--system-certs` flag (that's only needed on the dev box; GitHub runners use normal CA bundles)
+- YAML validated (PyYAML 1.1 parses the `on:` key as boolean `True` — a quirk; GitHub Actions' YAML 1.2 parser reads it correctly)
+- Every command in the workflow passes locally, so the first CI run should be green
 
 ## Phase 6 — Docs
 
