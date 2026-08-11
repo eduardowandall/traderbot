@@ -47,6 +47,27 @@ uv run --env-file .env main.py run dry SOL-USDC random 'sell_chance=20 buy_chanc
 uv run --env-file .env main.py run dry SOL-USDC composer 'buy_mode=all sell_mode=any'
 ```
 
+### Swap
+
+Execute a one-shot swap between any two known symbols:
+
+```bash
+uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [--slippage-bps N]
+```
+
+- **Mode**: `dry` builds the swap but never sends a real transaction. `real` ⚠️ trades real money.
+- **Symbols**: any pair from `SOLANA_MINTS` (SOL, USDC, USDT, BONK, JUP, ...).
+- **Quantity**: amount of `SYMBOL_IN` to spend (in UI units).
+- **Slippage**: tolerance in basis points (default 50; max 10000).
+
+```bash
+# Dry run: swap 1000 JUP for USDC
+uv run --env-file .env main.py swap dry JUP USDC 1000
+
+# Real swap: sell 0.5 SOL for USDC with 1% slippage
+uv run --env-file .env main.py swap real SOL USDC 0.5 --slippage-bps 100
+```
+
 ## Contributing
 
 ### Development
@@ -63,7 +84,7 @@ CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every p
 
 ### Architecture
 
-- `main.py` — CLI entry point (`run`, `start`)
+- `main.py` — CLI entry point (`run`, `start`, `swap`)
 - `trader/bot/` — main loop: fetch price → run strategy → place order
 - `trader/trading_strategy.py` — strategy base + implementations + `StrategyComposer`
 - `trader/providers/jupiter/` — Jupiter HTTP client, Solana/Helius RPC, swap service

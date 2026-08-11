@@ -147,6 +147,68 @@ class TestPlaceOrder:
             jupiter_client=self.jupiter_client,
         )
 
+    async def test_swap_forwards_slippage(self):
+        do_swap_with_retry = AsyncMock(return_value="sig")
+        self.api._do_swap_with_retry = do_swap_with_retry
+
+        result = await self.api.swap("mint_in", "mint_out", 1000, slippage_bps=100)
+        assert result == "sig"
+        do_swap_with_retry.assert_awaited_once_with(
+            "mint_in", "mint_out", 1000, slippage_bps=100
+        )
+
+    async def test_buy_forwards_slippage(self):
+        sol = SOLANA_MINTS.get_by_symbol("SOL").pubkey
+        usdc = SOLANA_MINTS.get_by_symbol("USDC").pubkey
+        swap = AsyncMock(return_value="sig")
+        self.api.swap = swap
+
+        result = await self.api.buy(
+            usdc, sol, "market", Decimal("10"), slippage_bps=100
+        )
+        assert result == "sig"
+        swap.assert_awaited_once_with(str(usdc), str(sol), 10_000_000, slippage_bps=100)
+
+    async def test_sell_forwards_slippage(self):
+        sol = SOLANA_MINTS.get_by_symbol("SOL").pubkey
+        usdc = SOLANA_MINTS.get_by_symbol("USDC").pubkey
+        swap = AsyncMock(return_value="sig")
+        self.api.swap = swap
+
+        result = await self.api.sell(
+            sol, usdc, "market", Decimal("1"), slippage_bps=100
+        )
+        assert result == "sig"
+        swap.assert_awaited_once_with(
+            str(usdc), str(sol), 1_000_000_000, slippage_bps=100
+        )
+
+    async def test_do_swap_with_retry_escalates_slippage(self):
+        do_swap = AsyncMock(
+            side_effect=[Exception("erro 1"), Exception("erro 2"), "sig"]
+        )
+        self.api._do_swap = do_swap
+
+        result = await self.api._do_swap_with_retry(
+            "mint_in", "mint_out", 1000, slippage_bps=100
+        )
+        assert result == "sig"
+        do_swap.assert_has_calls(
+            [
+                mock.call("mint_in", "mint_out", 1000, 100),
+                mock.call("mint_in", "mint_out", 1000, 100),
+                mock.call("mint_in", "mint_out", 1000, 125),
+            ]
+        )
+
+    async def test_do_swap_with_retry_default_slippage(self):
+        do_swap = AsyncMock(return_value="sig")
+        self.api._do_swap = do_swap
+
+        result = await self.api._do_swap_with_retry("mint_in", "mint_out", 1000)
+        assert result == "sig"
+        do_swap.assert_awaited_once_with("mint_in", "mint_out", 1000, 50)
+
     async def test_get_quote_with_route(self):
         quote_response = JupiterQuoteResponse(
             inputMint="So11111111111111111111111111111111111111112",

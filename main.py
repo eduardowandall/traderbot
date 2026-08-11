@@ -1,8 +1,12 @@
+import asyncio
+from decimal import Decimal
+
 import typer
 
 import logging_config  # pyright: ignore[reportMissingImports]
 from trader import get_strategy_cls
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
+from trader.models import SOLANA_MINTS
 from trader.models.bot_config import (
     RunningMode,
     create_bot_config,
@@ -91,6 +95,53 @@ def start(
         bot.run()
     except KeyboardInterrupt:
         bot.stop()
+
+
+@app.command()
+def swap(
+    mode: RunningMode = typer.Argument(
+        RunningMode.REAL, help="Modo de execucão do bot."
+    ),
+    symbol_in: str = typer.Argument(..., help="Symbol to spend (ex: SOL)"),
+    symbol_out: str = typer.Argument(..., help="Symbol to receive (ex: USDC)"),
+    quantity: float = typer.Argument(..., help="Amount of symbol_in to swap"),
+    slippage_bps: int = typer.Option(
+        50, min=0, max=10000, help="Slippage tolerance in basis points"
+    ),
+):
+    """
+    Executa um swap manual entre dois símbolos.
+
+    Exemplos:
+        uv run main.py swap dry JUP USDC 1000
+        uv run main.py swap real SOL USDC 0.5 --slippage-bps 100
+    """
+
+    if quantity <= 0:
+        raise typer.BadParameter("quantity deve ser maior que zero")
+
+    provider = AsyncJupiterProvider(
+        keypair=get_keypair_from_env(), is_dryrun=(mode == RunningMode.DRY)
+    )
+    signature = asyncio.run(
+        _execute_swap(provider, symbol_in, symbol_out, quantity, slippage_bps)
+    )
+    typer.echo(f"Swap executado: {signature}")
+
+
+async def _execute_swap(
+    provider: AsyncJupiterProvider,
+    symbol_in: str,
+    symbol_out: str,
+    quantity: float,
+    slippage_bps: int,
+) -> str:
+    mint_in = SOLANA_MINTS.get_by_symbol(symbol_in).mint
+    mint_out = SOLANA_MINTS.get_by_symbol(symbol_out).mint
+    raw_quantity = SOLANA_MINTS.get_by_symbol(symbol_in).ui_to_raw(
+        Decimal(str(quantity))
+    )
+    return await provider.swap(mint_in, mint_out, raw_quantity, slippage_bps)
 
 
 def _get_strategy_obj(strategy: str, strategy_args: str | None = None):

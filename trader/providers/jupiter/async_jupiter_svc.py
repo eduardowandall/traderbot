@@ -89,6 +89,7 @@ class AsyncJupiterProvider:
         type_order: str,
         quantity: Decimal,
         price: Decimal | None = None,
+        slippage_bps: int = 50,
     ) -> str:
         amount_in = quantity * price if price else quantity
         raw_quantity = SOLANA_MINTS[input_mint].ui_to_raw(amount_in)
@@ -96,6 +97,7 @@ class AsyncJupiterProvider:
             str(input_mint),
             str(output_mint),
             raw_quantity,
+            slippage_bps=slippage_bps,
         )
 
     async def sell(
@@ -104,6 +106,7 @@ class AsyncJupiterProvider:
         output_mint: Pubkey,
         type_order: str,
         quantity: Decimal,
+        slippage_bps: int = 50,
     ) -> str:
         raw_quantity = SOLANA_MINTS[input_mint].ui_to_raw(quantity)
         # venda inverte os mints
@@ -111,6 +114,7 @@ class AsyncJupiterProvider:
             str(output_mint),
             str(input_mint),
             raw_quantity,
+            slippage_bps=slippage_bps,
         )
 
     async def swap(
@@ -118,21 +122,28 @@ class AsyncJupiterProvider:
         input_mint: str,
         output_mint: str,
         raw_quantity: int,
+        slippage_bps: int = 50,
     ) -> str:
         return await self._do_swap_with_retry(
             input_mint,
             output_mint,
             raw_quantity,
+            slippage_bps=slippage_bps,
         )
 
     async def _do_swap_with_retry(
-        self, input_mint: str, output_mint: str, amount_in: int
+        self,
+        input_mint: str,
+        output_mint: str,
+        amount_in: int,
+        slippage_bps: int = 50,
     ) -> str:
         last_error: Exception | None = None
+        slippages = [slippage_bps, slippage_bps, slippage_bps + 25]
         for i in range(3):
             try:
                 return await self._do_swap(
-                    input_mint, output_mint, amount_in, [50, 50, 75][i]
+                    input_mint, output_mint, amount_in, slippages[i]
                 )
             except Exception as e:
                 last_error = e

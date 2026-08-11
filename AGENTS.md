@@ -19,8 +19,17 @@ uv run --env-file .env main.py run <mode> <SYMBOL> <strategy> '<key=value ...>'
 - CLI strategies resolve via `STRATEGIES` in `trader/__init__.py` (random, target_value, composer) — register new top-level strategies there. `WeightedMovingAverageStrategy`/`TrailingStopLossStrategy`/`TargetPercentStrategy` are only usable inside `StrategyComposer`.
 - `botconfigs.example.yaml` is a WIP not wired into the code (no YAML loader exists); config comes from CLI args only.
 
+## One-shot swap
+```bash
+uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [--slippage-bps N]
+# e.g. swap dry JUP USDC 1000  |  swap real SOL USDC 0.5 --slippage-bps 100
+```
+- `quantity` is in UI units of `SYMBOL_IN` (the token being spent); converted via `ui_to_raw`.
+- `slippage_bps` (default 50) is forwarded to `AsyncJupiterProvider.swap`; retries escalate to `slippage_bps + 25`.
+- Replaces the deleted `manual_swap.py` capability; built on `trader/providers/jupiter/async_jupiter_svc.py`.
+
 ## Architecture
-- `main.py` — Typer CLI (`run`, `start`).
+- `main.py` — Typer CLI (`run`, `start`, `swap`).
 - `trader/bot/async_websocket_bot.py` — loop: price → `strategy.on_market_refresh` → place order; logs under the `bot` logger.
 - `trader/providers/jupiter/` — `async_jupiter_svc.py` (facade: swap/buy/sell), `async_jupiter_client.py` (Jupiter HTTP), `async_rpc_client.py` (Solana/Helius RPC). Tests inject `AsyncMock(spec=...)` clients.
 - `trader/trading_strategy.py` — strategy base + implementations + `StrategyComposer`.
@@ -30,3 +39,5 @@ uv run --env-file .env main.py run <mode> <SYMBOL> <strategy> '<key=value ...>'
 - Ruff: line-length 88, double quotes, ignores E501/B008. Pyright: `include=["trader/*"]`, basic mode.
 - pytest: `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed).
 - `tests/trader/bot/test_async_websocket_bot.py` asserts exact mock call sequences — reordering provider calls breaks it.
+- `logging_config.py` `BotLoggerFileHandler` + `DictConfigurator` are legacy/complex — flag for a future refactor.
+- `main.py start` is a near-duplicate of `run` — flag for a future broader strategy-wiring refactor.

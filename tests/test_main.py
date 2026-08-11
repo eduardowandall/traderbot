@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 import main as main_module
 from main import __parse_kwargs, _get_notification_svc, _get_strategy_obj
 from trader import NotImplementedStrategy
+from trader.models import SOLANA_MINTS
 from trader.models.bot_config import RunningMode
 from trader.notification.notification_service import (
     NullNotificationService,
@@ -115,3 +116,59 @@ def test_get_notification_svc_telegram_with_args():
     assert isinstance(svc, TelegramNotificationService)
     assert svc.chat_id == "123"
     assert svc.token == "abc"
+
+
+def _invoke_swap(argv):
+    mock_provider = mock.Mock()
+    mock_provider.swap = mock.AsyncMock(return_value="sig123")
+    with (
+        mock.patch(
+            "main.AsyncJupiterProvider", return_value=mock_provider
+        ) as provider_cls,
+        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
+    ):
+        result = CliRunner().invoke(main_module.app, ["swap", *argv])
+    return result, mock_provider, provider_cls
+
+
+def test_swap_command_dry_with_slippage():
+    result, mock_provider, provider_cls = _invoke_swap(
+        ["dry", "SOL", "USDC", "0.5", "--slippage-bps", "100"]
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "Swap executado: sig123"
+    provider_cls.assert_called_once_with(keypair=mock.ANY, is_dryrun=True)
+    mock_provider.swap.assert_awaited_once_with(
+        SOLANA_MINTS.get_by_symbol("SOL").mint,
+        SOLANA_MINTS.get_by_symbol("USDC").mint,
+        500000000,
+        100,
+    )
+
+
+def test_swap_command_real_mode_default_slippage():
+    result, mock_provider, provider_cls = _invoke_swap(["real", "JUP", "USDC", "10"])
+
+    assert result.exit_code == 0
+    provider_cls.assert_called_once_with(keypair=mock.ANY, is_dryrun=False)
+    mock_provider.swap.assert_awaited_once_with(
+        SOLANA_MINTS.get_by_symbol("JUP").mint,
+        SOLANA_MINTS.get_by_symbol("USDC").mint,
+        10_000_000,
+        50,
+    )
+
+
+def test_swap_command_unknown_symbol_fails():
+    result, mock_provider, _ = _invoke_swap(["dry", "FOO", "USDC", "1"])
+
+    assert result.exit_code != 0
+    mock_provider.swap.assert_not_awaited()
+
+
+def test_swap_command_zero_quantity_fails():
+    result, mock_provider, _ = _invoke_swap(["dry", "SOL", "USDC", "0"])
+
+    assert result.exit_code != 0
+    mock_provider.swap.assert_not_awaited()
