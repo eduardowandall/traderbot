@@ -31,8 +31,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["trader"]
 
-
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -41,15 +39,9 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 asyncio_mode = "auto"
 
-# Configuração do Ruff
 [tool.ruff]
-# Mesmo comprimento de linha que o Black
-line-length = 88
-
-# Assume Python 3.14+
 target-version = "py314"
 
-# Exclui arquivos/diretórios
 exclude = [
     ".bzr",
     ".direnv",
@@ -74,9 +66,7 @@ exclude = [
     "venv",
 ]
 
-# Configuração do linter
 [tool.ruff.lint]
-# Habilita regras de linting
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -87,27 +77,11 @@ select = [
     "UP",  # pyupgrade
 ]
 
-# Ignora regras específicas se necessário
 ignore = [
     "E501",  # line too long, handled by black
     "B008",  # do not perform function calls in argument defaults
 ]
 
-# Configuração do formatter
-[tool.ruff.format]
-# Como o black, usa aspas duplas
-quote-style = "double"
-
-# Como o black, indenta com espaços
-indent-style = "space"
-
-# Como o black, respeita magic trailing commas
-skip-magic-trailing-comma = false
-
-# Como o black, quebra automaticamente strings longas
-line-ending = "auto"
-
-# Configuração do isort (importações)
 [tool.ruff.lint.isort]
 known-first-party = ["trader"]
 

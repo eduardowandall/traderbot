@@ -96,8 +96,7 @@ def start(
 def _get_strategy_obj(strategy: str, strategy_args: str | None = None):
     strategy_cls = get_strategy_cls(strategy)
     try:
-        if strategy_args:
-            args = __parse_kwargs(strategy_args.split())
+        args = __parse_kwargs(strategy_args.split()) if strategy_args else {}
         return strategy_cls(**args)
     except ValueError as ex:
         raise Exception(f"Erro ao configurar estratégia: {ex}") from ex

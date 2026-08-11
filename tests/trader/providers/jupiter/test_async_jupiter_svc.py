@@ -1,0 +1,321 @@
+from decimal import Decimal
+from unittest import mock
+from unittest.mock import AsyncMock
+
+import pytest
+from solana.rpc.async_api import AsyncClient as SolanaClient
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.rpc.responses import RpcBlockhash
+from solders.signature import Signature
+from solders.solders import (
+    Account,
+    GetAccountInfoResp,
+    GetLatestBlockhashResp,
+    GetTokenAccountsByOwnerResp,
+    LiteSVM,
+    Message,
+    MessageV0,
+    RpcKeyedAccount,
+    RpcResponseContext,
+    RpcSimulateTransactionResult,
+    SendTransactionResp,
+    SimulateTransactionResp,
+    to_bytes_versioned,
+    transfer,
+)
+from solders.transaction import VersionedTransaction
+
+from trader.models import SOLANA_MINTS
+from trader.models.account_data import MintBalance
+from trader.providers import JupiterQuoteResponse, JupiterRoutePlan, JupiterSwapInfo
+from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
+from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
+
+
+@pytest.fixture()
+def fake_solana_client():
+    client = AsyncMock(spec=SolanaClient)
+    lite_svm = LiteSVM()
+    client.is_connected = AsyncMock(return_value=True)
+    client.get_account_info = AsyncMock(
+        return_value=GetAccountInfoResp(
+            value=Account(
+                lamports=123456789,
+                owner=Pubkey.from_string("E6W4RLUxZLQN5mjVfTAv7hTrdLR5Y6nrNvFiW8p1Q1m"),
+                data=b"",
+                executable=False,
+            ),
+            context=RpcResponseContext(slot=0),
+        )
+    )
+    client.get_token_accounts_by_owner = AsyncMock(
+        return_value=GetTokenAccountsByOwnerResp(
+            value=[
+                RpcKeyedAccount(
+                    pubkey=Pubkey.from_string(
+                        "E6W4RLUxZLQN5mjVfTAv7hTrdLR5Y6nrNvFiW8p1Q1m"
+                    ),
+                    account=Account(
+                        lamports=123456789,
+                        owner=Pubkey.from_string(
+                            "E6W4RLUxZLQN5mjVfTAv7hTrdLR5Y6nrNvFiW8p1Q1m"
+                        ),
+                        data=b"4YFq9y5f5hi77Bq8kDCE6VgqoAqKGSQN87yW9YeGybpNfqKUG4WxnwhboHGUeXjY7g8262mhL1kCCM9yy8uGvdj7",
+                        executable=False,
+                    ),
+                )
+            ],
+            context=RpcResponseContext(slot=0),
+        )
+    )
+    client.get_latest_blockhash = AsyncMock(
+        return_value=GetLatestBlockhashResp(
+            RpcBlockhash(lite_svm.latest_blockhash(), 1),
+            context=RpcResponseContext(slot=0),
+        )
+    )
+    client.simulate_transaction = AsyncMock(
+        return_value=SimulateTransactionResp(
+            RpcSimulateTransactionResult(),
+            RpcResponseContext(slot=123),  # type: ignore
+        )
+    )
+    client.send_raw_transaction = AsyncMock(
+        return_value=SendTransactionResp(value=Signature.new_unique())
+    )
+    return client
+
+
+class TestAsyncJupiterProvider:
+    def test_init(self):
+        keypair = Keypair()
+        rpc_client = AsyncMock(spec=AsyncRPCClient)
+        jupiter_client = AsyncMock(spec=AsyncJupiterClient)
+        api = AsyncJupiterProvider(
+            keypair, rpc_client=rpc_client, jupiter_client=jupiter_client
+        )
+
+        assert isinstance(api.keypair, Keypair)
+        assert api.keypair == keypair
+        assert api.rpc_client is rpc_client
+        assert api.jupiter_client is jupiter_client
+
+    async def test_get_account_balance(self, fake_solana_client):
+        api = AsyncJupiterProvider(
+            Keypair(),
+            rpc_client=AsyncRPCClient(client=fake_solana_client),
+            jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+        )
+
+        balance = await api.get_account_balance()
+        assert balance == [
+            MintBalance(
+                available=Decimal("0.123456789"),
+                mint=Pubkey.from_string("So11111111111111111111111111111111111111112"),
+            )
+        ]
+
+
+class TestGetPriceTicker:
+    async def test_get_price_ticker_data(self):
+        jupiter_client = AsyncMock(spec=AsyncJupiterClient)
+        get_price = AsyncMock(return_value=Decimal("2"))
+        jupiter_client.get_price = get_price
+        provider = AsyncJupiterProvider(
+            Keypair(),
+            rpc_client=AsyncMock(spec=AsyncRPCClient),
+            jupiter_client=jupiter_client,
+        )
+        price = await provider.get_price_ticker_data(
+            SOLANA_MINTS.get_by_symbol("SOL").pubkey
+        )
+        assert price == Decimal("2")
+        get_price.assert_has_calls(
+            [mock.call("So11111111111111111111111111111111111111112")]
+        )
+
+
+class TestPlaceOrder:
+    @pytest.fixture(autouse=True)
+    def setup_tests(self):
+        self.jupiter_client = AsyncMock(spec=AsyncJupiterClient)
+        self.api = AsyncJupiterProvider(
+            Keypair(),
+            rpc_client=AsyncMock(spec=AsyncRPCClient),
+            jupiter_client=self.jupiter_client,
+        )
+
+    async def test_get_quote_with_route(self):
+        quote_response = JupiterQuoteResponse(
+            inputMint="So11111111111111111111111111111111111111112",
+            inAmount="1000000000",
+            outputMint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            outAmount="50000000",
+            otherAmountThreshold="49500000",
+            swapMode="ExactIn",
+            slippageBps=50,
+            platformFee=None,
+            priceImpactPct="0.5",
+            routePlan=[
+                JupiterRoutePlan(
+                    swapInfo=JupiterSwapInfo(
+                        ammKey="key",
+                        label="Raydium",
+                        inputMint="mint1",
+                        outputMint="mint2",
+                        inAmount="1000",
+                        outAmount="500",
+                        feeAmount="10",
+                        feeMint="mint1",
+                    ),
+                    percent=100,
+                )
+            ],
+            contextSlot=123456789,
+            timeTaken=0.5,
+        )
+        get_quote = AsyncMock(return_value=quote_response)
+        self.jupiter_client.get_quote = get_quote
+
+        quote = await self.api._get_quote_with_route(
+            input_mint="So11111111111111111111111111111111111111112",
+            output_mint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            amount_in=1000000000,
+            slippage_bps=50,
+        )
+        assert quote == quote_response
+        get_quote.assert_called_once_with(
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            1000000000,
+            50,
+        )
+
+    async def test_get_quote_with_route_no_route(self):
+        quote_response = JupiterQuoteResponse(
+            inputMint="So11111111111111111111111111111111111111112",
+            inAmount="1000000000",
+            outputMint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            outAmount="50000000",
+            otherAmountThreshold="49500000",
+            swapMode="ExactIn",
+            slippageBps=50,
+            platformFee=None,
+            priceImpactPct="0.5",
+            routePlan=[],
+            contextSlot=123456789,
+            timeTaken=0.5,
+        )
+        self.jupiter_client.get_quote = AsyncMock(return_value=quote_response)
+
+        with pytest.raises(Exception, match="Nenhuma rota encontrada!"):
+            await self.api._get_quote_with_route(
+                input_mint="So11111111111111111111111111111111111111112",
+                output_mint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                amount_in=1000000000,
+                slippage_bps=50,
+            )
+
+    async def test_get_swap_transaction(self):
+        quote = JupiterQuoteResponse(
+            inputMint="So11111111111111111111111111111111111111112",
+            inAmount="1000000000",
+            outputMint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            outAmount="50000000",
+            otherAmountThreshold="49500000",
+            swapMode="ExactIn",
+            slippageBps=50,
+            platformFee=None,
+            priceImpactPct="0.5",
+            routePlan=[
+                JupiterRoutePlan(
+                    swapInfo=JupiterSwapInfo(
+                        ammKey="FksffEqnBRixYGR791Qw2MgdU7zNCpHVFYBL4Fa4qVuH",
+                        label="HumidiFi",
+                        inputMint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        outputMint="So11111111111111111111111111111111111111112",
+                        inAmount="1000000000",
+                        outAmount="7106793162",
+                        feeAmount="0",
+                        feeMint="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    ),
+                    percent=100,
+                )
+            ],
+            contextSlot=123456789,
+            timeTaken=0.5,
+        )
+        get_swap_transaction = AsyncMock(
+            return_value=AsyncMock(spec=VersionedTransaction)
+        )
+        self.jupiter_client.get_swap_transaction = get_swap_transaction
+
+        tx = await self.api._get_swap_transaction(quote=quote)
+        assert isinstance(tx, VersionedTransaction)
+        get_swap_transaction.assert_called_once_with(quote, self.api.keypair.pubkey())
+
+    async def test_get_signed_transaction(self, fake_solana_client):
+        keypair = Keypair()
+        receiver = Pubkey.new_unique()
+
+        api = AsyncJupiterProvider(
+            keypair=keypair,
+            rpc_client=AsyncRPCClient(client=fake_solana_client),
+            jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+        )
+        ixs = [
+            transfer(
+                {
+                    "from_pubkey": keypair.pubkey(),
+                    "to_pubkey": receiver,
+                    "lamports": 100_000,
+                }
+            )
+        ]
+
+        lite_svm = LiteSVM()
+        blockhash = lite_svm.latest_blockhash()
+        msg = Message.new_with_blockhash(ixs, keypair.pubkey(), blockhash)
+        message = MessageV0(
+            header=msg.header,
+            account_keys=msg.account_keys,
+            recent_blockhash=blockhash,
+            instructions=msg.instructions,
+            address_table_lookups=[],
+        )
+        tx = VersionedTransaction(message, [keypair])
+        signed_tx = await api._get_signed_transaction(tx=tx)
+        assert isinstance(signed_tx, VersionedTransaction)
+        assert signed_tx.signatures[0].verify(
+            keypair.pubkey(), to_bytes_versioned(signed_tx.message)
+        )
+
+    async def test_send_signed_transaction(self, fake_solana_client):
+        keypair = Keypair()
+        receiver = Pubkey.new_unique()
+
+        service = AsyncJupiterProvider(
+            keypair=keypair,
+            rpc_client=AsyncRPCClient(client=fake_solana_client),
+            jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+        )
+        ixs = [
+            transfer(
+                {
+                    "from_pubkey": keypair.pubkey(),
+                    "to_pubkey": receiver,
+                    "lamports": 100_000,
+                }
+            )
+        ]
+
+        lite_svm = LiteSVM()
+        blockhash = lite_svm.latest_blockhash()
+        msg = Message.new_with_blockhash(ixs, keypair.pubkey(), blockhash)
+        tx = VersionedTransaction(msg, [keypair])
+        tx.signatures = [keypair.sign_message(to_bytes_versioned(msg))]
+
+        resp = await service._send_signed_transaction(tx)
+        assert resp.value is not None

@@ -38,8 +38,8 @@ class AsyncAccount:
         return await self.provider.get_candles(mint)
 
     async def get_balance(self, mint: Pubkey) -> Decimal:
-        # cachezinho babaca pra não ficar comendo token do RPC
-        # temporario até achar um jeito mais eficiente
+        # Cache para evitar chamadas repetidas ao RPC; expira a cada 3 minutos
+        # ou quando a posição é atualizada
         if (
             not self.balances
             or self.balances_last_update < datetime.now() - timedelta(minutes=3)
