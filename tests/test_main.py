@@ -172,3 +172,21 @@ def test_swap_command_zero_quantity_fails():
 
     assert result.exit_code != 0
     mock_provider.swap.assert_not_awaited()
+
+
+def test_start_defaults_to_dry_mode():
+    mock_bot = mock.Mock()
+    with (
+        mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
+        mock.patch("main.AsyncJupiterProvider", return_value=mock.Mock()) as prov,
+        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
+        mock.patch(
+            "trader.models.bot_config.get_keypair_from_env",
+            return_value=mock.Mock(),
+        ),
+    ):
+        result = CliRunner().invoke(main_module.app, ["start"])
+
+    assert result.exit_code == 0
+    prov.assert_called_once_with(keypair=mock.ANY, is_dryrun=True)
+    assert bot_cls.call_args.args[0].mode == RunningMode.DRY

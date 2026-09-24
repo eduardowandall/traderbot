@@ -1,5 +1,6 @@
 from decimal import Decimal
 from unittest import mock
+from unittest.mock import AsyncMock
 
 from solders.keypair import Keypair
 
@@ -73,7 +74,7 @@ async def test_async_websocket_bot_complete(
 
 def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
     expected_calls = [
-        mock.call.get_candles(bonk.mint),
+        mock.call.get_candles(bonk.mint, interval=mock.ANY, candle_qty=100),
         mock.call.get_price(bonk.mint),
         mock.call.get_quote(
             usdc.mint,
@@ -113,10 +114,11 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
             keypair.pubkey(),
         ),
         mock.call.get_price(bonk.mint),
+        # venda de 50 BONK (5 decimais) = 5_000_000 raw
         mock.call.get_quote(
             bonk.mint,
             usdc.mint,
-            50000000,
+            5000000,
             50,
         ),
         mock.call.get_swap_transaction(
@@ -152,9 +154,9 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
         ),
         mock.call.get_price(bonk.mint),
     ]
-    for idx, _call in enumerate(
-        [c for c in mock_jupiter_client.mock_calls if c[0] != "__str__"]
-    ):
+    actual_calls = [c for c in mock_jupiter_client.mock_calls if c[0] != "__str__"]
+    assert len(actual_calls) == len(expected_calls)
+    for idx, _call in enumerate(actual_calls):
         assert _call == expected_calls[idx], f"call[{idx}] diferente do esperado"
 
 
@@ -175,7 +177,64 @@ def assert_rpc_client_mock_calls(mock_rpc_client, keypair, usdc, bonk):
         mock.call.get_lamports(keypair.pubkey()),
         mock.call.get_account_balance(keypair.pubkey()),
     ]
-    for idx, _call in enumerate(
-        [c for c in mock_rpc_client.mock_calls if c[0] != "__str__"]
-    ):
+    actual_calls = [c for c in mock_rpc_client.mock_calls if c[0] != "__str__"]
+    assert len(actual_calls) == len(expected_calls)
+    for idx, _call in enumerate(actual_calls):
         assert _call == expected_calls[idx], f"call[{idx}] diferente do esperado"
+
+
+def _bot(provider, strategy):
+    usdc = SOLANA_MINTS.get_by_symbol("USDC")
+    bonk = SOLANA_MINTS.get_by_symbol("BONK")
+    keypair = Keypair()
+    return AsyncWebsocketTradingBot(
+        BotConfig(
+            id="id",
+            name="name",
+            input_mint=usdc.mint,
+            output_mint=bonk.mint,
+            mode=RunningMode.DRY,
+            wallet=keypair,
+            provider=provider,
+            strategy=strategy,
+            notifier=NullNotificationService(),
+        )
+    )
+
+
+async def test_errors_back_off_exponentially_and_reset():
+    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider.get_candles = AsyncMock(return_value=[])
+    provider.get_account_balance = AsyncMock(return_value=[])
+    provider.get_price_ticker_data = AsyncMock(
+        side_effect=[
+            Exception("ws down"),
+            Exception("ws down"),
+            Exception("ws down"),
+            Decimal("1"),
+            Exception("ws down"),
+            KeyboardInterrupt(),
+        ]
+    )
+    strategy = mock.Mock(spec=TradingStrategy)
+    strategy.on_market_refresh.return_value = None
+    bot = _bot(provider, strategy)
+
+    with mock.patch("asyncio.sleep") as sleep:
+        await bot._run()
+
+    assert [c.args[0] for c in sleep.await_args_list] == [1.0, 2.0, 4.0, 1.0]
+
+
+async def test_stop_ends_the_loop():
+    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider.get_candles = AsyncMock(return_value=[])
+    provider.get_account_balance = AsyncMock(return_value=[])
+    provider.get_price_ticker_data = AsyncMock(return_value=Decimal("1"))
+    strategy = mock.Mock(spec=TradingStrategy)
+    bot = _bot(provider, strategy)
+    strategy.on_market_refresh.side_effect = lambda *a: bot.stop()
+
+    await bot._run()
+
+    strategy.on_market_refresh.assert_called_once()

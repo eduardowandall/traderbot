@@ -1,9 +1,11 @@
+import functools
 import logging
 
 from solana.exceptions import SolanaRpcException
 
 
 def logger_wrapper(func):
+    @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         logger = logging.getLogger(func.__module__)
         try:

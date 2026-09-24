@@ -419,9 +419,13 @@ class TrailingStopLossStrategy(TradingStrategy):
                 OrderSide.BUY, quantity=self.calculate_quantity(balance, price)
             )
         else:
-            # Atualiza o preço mais alto após atingir o ganho alvo
-            if current_price > self.highest_price_after_target:
-                self.highest_price_after_target = current_price
+            # Atualiza o preço mais alto desde a entrada (o pico começa no
+            # preço de entrada, para que a perda máxima respeite o stop)
+            self.highest_price_after_target = max(
+                self.highest_price_after_target,
+                current_position.entry_order.price,
+                current_price,
+            )
 
             # Calcula a queda percentual desde o pico
             drop_percent = (
@@ -514,8 +518,10 @@ class StrategyComposer(TradingStrategy):
         sell_strategies: list[TradingStrategy] | None = None,
     ):
         super().__init__()
-        assert sell_mode in ("all", "any")
-        assert buy_mode in ("all", "any")
+        if sell_mode not in ("all", "any"):
+            raise ValueError(f"sell_mode inválido: {sell_mode!r}")
+        if buy_mode not in ("all", "any"):
+            raise ValueError(f"buy_mode inválido: {buy_mode!r}")
         self.sell_mode = sell_mode
         self.buy_mode = buy_mode
         self.buy_strategies = buy_strategies or []
@@ -631,8 +637,11 @@ class StrategyComposer(TradingStrategy):
             signals.append(signal)
 
         if self._check_signals(signals, mode, side):
-            return OrderSignal(
-                side,
-                quantity=self.calculate_quantity(balance, price),
-            )
+            if side == OrderSide.SELL and current_position:
+                # venda encerra a posição inteira; calculate_quantity é
+                # dimensionado para compra (saldo do input_mint)
+                quantity = current_position.entry_order.quantity
+            else:
+                quantity = self.calculate_quantity(balance, price)
+            return OrderSignal(side, quantity=quantity)
         return None

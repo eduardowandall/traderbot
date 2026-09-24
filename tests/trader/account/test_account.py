@@ -58,7 +58,7 @@ async def test_buy():
 
 async def test_sell():
     mi, mo = SOLANA_MINTS.get_by_symbol("SOL"), SOLANA_MINTS.get_by_symbol("USDC")
-    acc = AsyncAccount(AsyncMock(spec=AsyncJupiterProvider), mi.pubkey, mo.pubkey)
+    acc, _, _ = _make_account()
     position = Position(
         PositionType.LONG,
         Order(
@@ -139,3 +139,23 @@ async def test_can_sell_allows_with_long_position_and_sufficient_balance():
     acc.current_position = _long_position(mi, mo)
 
     await acc.can_sell()
+
+
+async def test_sell_is_capped_at_wallet_balance():
+    # a compra recebeu menos que o pedido (slippage): vende só o que existe
+    mi, mo = SOLANA_MINTS.get_by_symbol("SOL"), SOLANA_MINTS.get_by_symbol("USDC")
+    acc, _, _ = _make_account(
+        [
+            MintBalance(mint=mi.pubkey, available=Decimal("10.0")),
+            MintBalance(mint=mo.pubkey, available=Decimal("0.098")),
+        ]
+    )
+    acc.current_position = _long_position(mi, mo)
+
+    order = await acc.sell(Decimal("100.0"), Decimal("0.1"))
+
+    assert order.quantity == Decimal("0.098")
+    provider_sell: AsyncMock = acc.provider.sell  # type: ignore[assignment]
+    provider_sell.assert_awaited_once_with(
+        mi.pubkey, mo.pubkey, type_order="market", quantity=Decimal("0.098")
+    )

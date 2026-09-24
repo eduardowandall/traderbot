@@ -22,6 +22,10 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fi
 from trader.providers.jupiter.logging_utils import logger_wrapper
 
 
+class TransactionFailedError(Exception):
+    """A transação foi processada pela rede, mas falhou (status.err)."""
+
+
 class AsyncRPCClient:
     def __init__(self, client=None, is_dryrun=False):
         self.logger = logging.getLogger(self.__module__)
@@ -48,17 +52,17 @@ class AsyncRPCClient:
         result = await self.client.get_signature_statuses([signature])
         status = result.value[0]
 
-        if status is not None:
-            # Se a transação foi processada
-            if status.confirmation_status in [
-                TransactionConfirmationStatus.Confirmed,
-                TransactionConfirmationStatus.Finalized,
-            ]:
-                return True
-            if status.err is not None:
-                raise Exception(f"Transação falhou: {status.err}")
-
-        raise Exception(f"Transação falhou: {result.value}")
+        if status is None:
+            # ainda não visível para o RPC
+            return False
+        # transações que falham também são incluídas no bloco (e confirmadas),
+        # por isso o erro precisa ser checado antes do status de confirmação
+        if status.err is not None:
+            raise TransactionFailedError(f"Transação falhou: {status.err}")
+        return status.confirmation_status in [
+            TransactionConfirmationStatus.Confirmed,
+            TransactionConfirmationStatus.Finalized,
+        ]
 
     @logger_wrapper
     async def sign_transaction(

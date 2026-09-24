@@ -46,6 +46,9 @@ class AsyncWebsocketTradingBot:
         self.total_pnl = Decimal("0.0")
 
         self.stop_when_error = False
+        # espera entre iterações após erro; cresce até error_backoff_max
+        self.error_backoff_initial = 1.0
+        self.error_backoff_max = 60.0
 
     async def process_market_data(self, current_price):
         _bal = await self.account.get_balance(self.input_mint)
@@ -72,7 +75,6 @@ class AsyncWebsocketTradingBot:
         self.is_running = False
 
     def run(self, **kwargs):
-        self.is_running = True
         asyncio.run(self._run())
 
     @cached_property
@@ -80,12 +82,18 @@ class AsyncWebsocketTradingBot:
         return f"{SOLANA_MINTS[self.output_mint].symbol}-{SOLANA_MINTS[self.input_mint].symbol}"
 
     async def _run(self):
+        self.is_running = True
         self.strategy.setup(await self.account.get_candles(self.output_mint))
         should_stop = False
         self.notification_service.send_message(f"Bot iniciado para {self.symbol}")
 
         has_error = False
-        while not should_stop and not (self.stop_when_error and has_error):
+        backoff = self.error_backoff_initial
+        while (
+            self.is_running
+            and not should_stop
+            and not (self.stop_when_error and has_error)
+        ):
             try:
                 current_price = await self.account.get_price(self.output_mint)
                 log_ticker(
@@ -106,6 +114,7 @@ class AsyncWebsocketTradingBot:
                 position = self.account.get_position()
                 if position:
                     log_position(position, current_price)
+                backoff = self.error_backoff_initial
 
             except KeyboardInterrupt:
                 self.logger.warning("Bot interrompido pelo usuário")
@@ -119,6 +128,9 @@ class AsyncWebsocketTradingBot:
                 )
                 traceback.print_exc()
                 has_error = True
+                if not self.stop_when_error:
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, self.error_backoff_max)
 
 
 def log_ticker(symbol: str, price: Decimal, realized_pnl: Decimal | None = None):

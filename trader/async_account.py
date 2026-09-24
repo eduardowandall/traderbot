@@ -142,6 +142,16 @@ class AsyncAccount:
     async def sell(self, price: Decimal, quantity: Decimal) -> Order:
         await self.can_sell()
 
+        # a quantidade recebida na compra pode ser menor que a pedida
+        # (slippage/taxas); nunca tenta vender mais do que a carteira tem
+        available = await self.get_balance(self.output_mint)
+        if quantity > available:
+            self.logger.warning(
+                f"Quantidade de venda {quantity} maior que o saldo {available}; "
+                "vendendo o saldo disponível"
+            )
+            quantity = available
+
         try:
             order_id = await self.provider.sell(
                 self.input_mint,

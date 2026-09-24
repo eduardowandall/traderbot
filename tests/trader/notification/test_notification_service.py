@@ -28,6 +28,7 @@ def test_telegram_send_message_success(mock_post):
     mock_post.assert_called_once_with(
         "https://api.telegram.org/bottoken123/sendMessage",
         data={"chat_id": "12345", "text": "Hello World"},
+        timeout=10,
     )
 
 

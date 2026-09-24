@@ -25,7 +25,7 @@ app = typer.Typer()
 @app.command()
 def run(
     mode: RunningMode = typer.Argument(
-        RunningMode.REAL, help="Modo de execucão do bot."
+        RunningMode.DRY, help="Modo de execucão do bot."
     ),
     currency: str = typer.Argument(
         "SOL-USDC", help="The trading symbol tuple (ex: SOL-USDC)"
@@ -72,7 +72,7 @@ def run(
 @app.command()
 def start(
     mode: RunningMode = typer.Argument(
-        RunningMode.REAL, help="Modo de execucão do bot."
+        RunningMode.DRY, help="Modo de execucão do bot."
     ),
     symbol: str = typer.Argument("SOL-USDC", help="The trading symbol"),
 ):
@@ -100,7 +100,7 @@ def start(
 @app.command()
 def swap(
     mode: RunningMode = typer.Argument(
-        RunningMode.REAL, help="Modo de execucão do bot."
+        RunningMode.DRY, help="Modo de execucão do bot."
     ),
     symbol_in: str = typer.Argument(..., help="Symbol to spend (ex: SOL)"),
     symbol_out: str = typer.Argument(..., help="Symbol to receive (ex: USDC)"),

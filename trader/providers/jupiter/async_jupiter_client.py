@@ -118,26 +118,33 @@ class AsyncJupiterClient:
             raise ex
 
     @logger_wrapper
-    async def get_price(self, mint: str) -> Decimal:
-        try:
-            if not self.websocket:
-                self.websocket = await self._connect_price_ws(mint)
-            return await self._get_price(self.websocket)
-        except websockets.exceptions.ConnectionClosedError as ex:
-            self.logger.info(f"INFO: WebSocket Closed: {str(ex)}")
-            await asyncio.sleep(2)  # Espera antes de tentar reconectar
-            self.websocket = None
-            return await self.get_price(mint)
-        except Exception as ex:
-            self.logger.error(f"Erro ao conectar WebSocket: {str(ex)}", exc_info=ex)
-            raise ex
+    async def get_price(self, mint: str, max_reconnects: int = 5) -> Decimal:
+        for attempt in range(max_reconnects + 1):
+            try:
+                if not self.websocket:
+                    self.websocket = await self._connect_price_ws(mint)
+                return await self._get_price(self.websocket, mint)
+            except websockets.exceptions.ConnectionClosed as ex:
+                # ConnectionClosedOK (fechamento normal) também exige reconexão
+                self.logger.info(f"INFO: WebSocket Closed: {str(ex)}")
+                self.websocket = None
+                if attempt == max_reconnects:
+                    raise
+                await asyncio.sleep(2)  # Espera antes de tentar reconectar
+            except Exception as ex:
+                self.logger.error(f"Erro ao conectar WebSocket: {str(ex)}", exc_info=ex)
+                raise ex
+        raise AssertionError("unreachable")
 
-    async def _get_price(self, ws: ClientConnection) -> Decimal:
-        msg = await ws.recv()
+    async def _get_price(self, ws: ClientConnection, mint: str) -> Decimal:
         # '{"type":"prices","data":[{"assetId":"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263","price":0.000010537070513205161,"blockId":380968492}]}'
-        json_msg = json.loads(msg)
-        price = Decimal(json_msg["data"][0]["price"])
-        return price
+        # ignora mensagens que não são de preço do mint (acks, heartbeats, outros ativos)
+        while True:
+            msg = await ws.recv()
+            json_msg = json.loads(msg, parse_float=Decimal)
+            for item in json_msg.get("data") or []:
+                if item.get("assetId", mint) == mint and "price" in item:
+                    return Decimal(item["price"])
 
     @logger_wrapper
     async def _connect_price_ws(self, mint: str):

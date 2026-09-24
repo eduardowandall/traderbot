@@ -34,6 +34,7 @@ class TelegramNotificationService(NotificationService):
             response = requests.post(
                 self.url + "/sendMessage",
                 data={"chat_id": self.chat_id, "text": message},
+                timeout=10,
             )
             response.raise_for_status()
         except Exception as e:

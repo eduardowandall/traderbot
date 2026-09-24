@@ -175,12 +175,13 @@ class TestPlaceOrder:
         swap = AsyncMock(return_value="sig")
         self.api.swap = swap
 
+        # SOL-USDC: vender 1 SOL (9 decimais) em troca de USDC (6 decimais)
         result = await self.api.sell(
-            sol, usdc, "market", Decimal("1"), slippage_bps=100
+            usdc, sol, "market", Decimal("1"), slippage_bps=100
         )
         assert result == "sig"
         swap.assert_awaited_once_with(
-            str(usdc), str(sol), 1_000_000_000, slippage_bps=100
+            str(sol), str(usdc), 1_000_000_000, slippage_bps=100
         )
 
     async def test_do_swap_with_retry_escalates_slippage(self):

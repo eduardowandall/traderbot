@@ -39,5 +39,8 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - Ruff: line-length 88, double quotes, ignores E501/B008. Pyright: `include=["trader/*"]`, basic mode.
 - pytest: `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed).
 - `tests/trader/bot/test_async_websocket_bot.py` asserts exact mock call sequences — reordering provider calls breaks it.
+- CLI `mode` defaults to `dry` for `run`/`start`/`swap`; `real` must be explicit.
+- Swap retries only cover pre-broadcast failures; anything after `send_transaction` raises `TransactionSubmittedError` and is never retried (avoids double execution).
+- Agent-integration roadmap and open issues: `docs/plan.md`.
 - `logging_config.py` `BotLoggerFileHandler` + `DictConfigurator` are legacy/complex — flag for a future refactor.
 - `main.py start` is a near-duplicate of `run` — flag for a future broader strategy-wiring refactor.

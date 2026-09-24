@@ -13,8 +13,19 @@ from solders.transaction import VersionedTransaction
 from trader.models import SOLANA_MINTS, TickerData
 from trader.models.account_data import MintBalance
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient, Interval
-from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
+from trader.providers.jupiter.async_rpc_client import (
+    AsyncRPCClient,
+    TransactionFailedError,
+)
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
+
+
+class TransactionSubmittedError(Exception):
+    """Falha depois que a transação já foi enviada à rede.
+
+    Não deve ser re-tentada automaticamente: a transação pode ter sido
+    executada, e um novo envio poderia duplicar o swap.
+    """
 
 
 class AsyncJupiterProvider:
@@ -37,7 +48,9 @@ class AsyncJupiterProvider:
         interval: Interval = Interval.SECOND_15,
         candle_qty: int = 100,
     ) -> list[TickerData]:
-        candles_json = await self.jupiter_client.get_candles(str(mint))
+        candles_json = await self.jupiter_client.get_candles(
+            str(mint), interval=interval, candle_qty=candle_qty
+        )
         tickers: list[TickerData] = []
         for candle in candles_json:
             tickers.append(
@@ -108,7 +121,8 @@ class AsyncJupiterProvider:
         quantity: Decimal,
         slippage_bps: int = 50,
     ) -> str:
-        raw_quantity = SOLANA_MINTS[input_mint].ui_to_raw(quantity)
+        # venda gasta o output_mint: a conversão usa os decimais dele
+        raw_quantity = SOLANA_MINTS[output_mint].ui_to_raw(quantity)
         # venda inverte os mints
         return await self.swap(
             str(output_mint),
@@ -145,6 +159,8 @@ class AsyncJupiterProvider:
                 return await self._do_swap(
                     input_mint, output_mint, amount_in, slippages[i]
                 )
+            except TransactionSubmittedError:
+                raise
             except Exception as e:
                 last_error = e
                 if i == 2:
@@ -200,21 +216,26 @@ class AsyncJupiterProvider:
             try:
                 if await self.rpc_client.check_signature_is_confirmed(signature):
                     return True
-                else:
-                    raise Exception("Transação falhou: Esperando confirmacao")
+            except TransactionFailedError:
+                raise
             except Exception as ex:
-                if "Transação falhou" in str(ex):
-                    await asyncio.sleep(1.0)
+                self.logger.warning(f"Erro ao consultar confirmação: {ex}")
 
             if time.time() - start > timeout:
                 raise TimeoutError("Transação não foi confirmada a tempo.")
+            await asyncio.sleep(1.0)
 
     async def _send_transaction_and_wait_for_confirmation(
         self, new_tx: VersionedTransaction
     ) -> SendTransactionResp:
         resp = await self._send_signed_transaction(new_tx)
         signature = resp.value
-        await self._wait_for_confirmation(signature)
+        try:
+            await self._wait_for_confirmation(signature)
+        except Exception as ex:
+            raise TransactionSubmittedError(
+                f"Transação {signature} enviada mas não confirmada: {ex}"
+            ) from ex
         return resp
 
     async def _do_swap(
