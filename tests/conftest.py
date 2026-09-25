@@ -22,10 +22,10 @@ def mock_jupiter_client():
     _mock.get_quote = AsyncMock(
         return_value=JupiterQuoteResponse(
             inputMint=usdc.mint,
-            inAmount="1000000000",
+            inAmount="50000000",
             outputMint=bonk.mint,
-            outAmount="50000000",
-            otherAmountThreshold="49500000",
+            outAmount="5000000",
+            otherAmountThreshold="4975000",
             swapMode="ExactIn",
             slippageBps=50,
             platformFee=None,
@@ -37,7 +37,7 @@ def mock_jupiter_client():
                         label="HumidiFi",
                         inputMint=bonk.mint,
                         outputMint=usdc.mint,
-                        inAmount="1000000000",
+                        inAmount="50000000",
                         outAmount="7106793162",
                         feeAmount="0",
                         feeMint=bonk.mint,
@@ -91,3 +91,11 @@ def mock_rpc_client():
 def mock_sleep():
     with mock.patch("asyncio.sleep"):
         yield
+
+
+@pytest.fixture(autouse=True)
+def isolated_workdir(tmp_path, monkeypatch):
+    # ledger (.data/), kill switch e policy.toml são relativos ao cwd: cada
+    # teste roda num diretório vazio para nunca tocar nos arquivos reais
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TRADER_POLICY_FILE", raising=False)

@@ -25,6 +25,34 @@ class Interval(StrEnum):
     HOUR_1 = "1_HOUR"
 
 
+def _quote_params(
+    input_mint: str,
+    output_mint: str,
+    amount: int,
+    slippage_bps: int,
+    only_direct_routes: bool,
+    max_accounts: int | None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "inputMint": input_mint,
+        "outputMint": output_mint,
+        "amount": str(amount),
+        "slippageBps": str(slippage_bps),
+    }
+    if only_direct_routes:
+        params["onlyDirectRoutes"] = "true"
+    if max_accounts is not None:
+        params["maxAccounts"] = str(max_accounts)
+    return params
+
+
+def _add_response_notes(ex: Exception, url: str, response) -> None:
+    ex.add_note(f"URL: {url}")
+    if response:
+        ex.add_note(f"Status Code: {response.status_code}")
+        ex.add_note(f"Response: {response.text}")
+
+
 class AsyncJupiterClient:
     def __init__(self, client=None, websocket=None):
         self.logger = logging.getLogger(self.__module__)
@@ -51,32 +79,23 @@ class AsyncJupiterClient:
         only_direct_routes: bool = False,
         max_accounts: int | None = None,
     ) -> JupiterQuoteResponse:
-        params: dict[str, Any] = {
-            "inputMint": input_mint,
-            "outputMint": output_mint,
-            "amount": str(amount),
-            "slippageBps": str(slippage_bps),
-        }
-
-        if only_direct_routes:
-            params["onlyDirectRoutes"] = "true"
-
-        if max_accounts is not None:
-            params["maxAccounts"] = str(max_accounts)
-
+        params = _quote_params(
+            input_mint,
+            output_mint,
+            amount,
+            slippage_bps,
+            only_direct_routes,
+            max_accounts,
+        )
         url = "https://lite-api.jup.ag/swap/v1/quote"
         response = await self.client.get(url, params=params)
         try:
             response.raise_for_status()
-            response_json = response.json()
-            return JupiterQuoteResponse.from_dict(response_json)
+            return JupiterQuoteResponse.from_dict(response.json())
         except Exception as ex:
             if response.status_code == 429:
                 await asyncio.sleep(1.5)
-            ex.add_note(f"URL: {url}")
-            if response:
-                ex.add_note(f"Status Code: {response.status_code}")
-                ex.add_note(f"Response: {response.text}")
+            _add_response_notes(ex, url, response)
             raise ex
 
     @logger_wrapper
@@ -121,9 +140,7 @@ class AsyncJupiterClient:
     async def get_price(self, mint: str, max_reconnects: int = 5) -> Decimal:
         for attempt in range(max_reconnects + 1):
             try:
-                if not self.websocket:
-                    self.websocket = await self._connect_price_ws(mint)
-                return await self._get_price(self.websocket, mint)
+                return await self._read_price(mint)
             except websockets.exceptions.ConnectionClosed as ex:
                 # ConnectionClosedOK (fechamento normal) também exige reconexão
                 self.logger.info(f"INFO: WebSocket Closed: {str(ex)}")
@@ -135,6 +152,11 @@ class AsyncJupiterClient:
                 self.logger.error(f"Erro ao conectar WebSocket: {str(ex)}", exc_info=ex)
                 raise ex
         raise AssertionError("unreachable")
+
+    async def _read_price(self, mint: str) -> Decimal:
+        if not self.websocket:
+            self.websocket = await self._connect_price_ws(mint)
+        return await self._get_price(self.websocket, mint)
 
     async def _get_price(self, ws: ClientConnection, mint: str) -> Decimal:
         # '{"type":"prices","data":[{"assetId":"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263","price":0.000010537070513205161,"blockId":380968492}]}'
@@ -157,6 +179,12 @@ class AsyncJupiterClient:
         await ws.send(json.dumps({"type": "subscribe:prices", "assets": [mint]}))
         self.websocket = ws
         return ws
+
+    async def aclose(self) -> None:
+        if self.websocket is not None:
+            await self.websocket.close()
+            self.websocket = None
+        await self.client.aclose()
 
     @logger_wrapper
     async def get_swap_transaction(

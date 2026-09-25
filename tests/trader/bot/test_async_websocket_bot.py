@@ -1,7 +1,9 @@
+import asyncio
 from decimal import Decimal
 from unittest import mock
 from unittest.mock import AsyncMock
 
+import pytest
 from solders.keypair import Keypair
 
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
@@ -85,10 +87,10 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
         mock.call.get_swap_transaction(
             JupiterQuoteResponse(
                 inputMint=usdc.mint,
-                inAmount="1000000000",
+                inAmount="50000000",
                 outputMint=bonk.mint,
-                outAmount="50000000",
-                otherAmountThreshold="49500000",
+                outAmount="5000000",
+                otherAmountThreshold="4975000",
                 swapMode="ExactIn",
                 slippageBps=50,
                 platformFee=None,
@@ -100,7 +102,7 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
                             label="HumidiFi",
                             inputMint=bonk.mint,
                             outputMint=usdc.mint,
-                            inAmount="1000000000",
+                            inAmount="50000000",
                             outAmount="7106793162",
                             feeAmount="0",
                             feeMint=bonk.mint,
@@ -124,10 +126,10 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
         mock.call.get_swap_transaction(
             JupiterQuoteResponse(
                 inputMint=usdc.mint,
-                inAmount="1000000000",
+                inAmount="50000000",
                 outputMint=bonk.mint,
-                outAmount="50000000",
-                otherAmountThreshold="49500000",
+                outAmount="5000000",
+                otherAmountThreshold="4975000",
                 swapMode="ExactIn",
                 slippageBps=50,
                 platformFee=None,
@@ -139,7 +141,7 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
                             label="HumidiFi",
                             inputMint=bonk.mint,
                             outputMint=usdc.mint,
-                            inAmount="1000000000",
+                            inAmount="50000000",
                             outAmount="7106793162",
                             feeAmount="0",
                             feeMint=bonk.mint,
@@ -153,6 +155,7 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
             keypair.pubkey(),
         ),
         mock.call.get_price(bonk.mint),
+        mock.call.aclose(),
     ]
     actual_calls = [c for c in mock_jupiter_client.mock_calls if c[0] != "__str__"]
     assert len(actual_calls) == len(expected_calls)
@@ -168,16 +171,25 @@ def assert_rpc_client_mock_calls(mock_rpc_client, keypair, usdc, bonk):
         mock.call.simulate_transaction(mock.ANY),
         mock.call.send_transaction(mock.ANY),
         mock.call.check_signature_is_confirmed(mock.ANY),
+        # custos lidos da transação confirmada, depois da execução
+        mock.call.get_confirmed_transaction(mock.ANY),
         mock.call.get_lamports(keypair.pubkey()),
         mock.call.get_account_balance(keypair.pubkey()),
         mock.call.sign_transaction(mock.ANY, keypair),
         mock.call.simulate_transaction(mock.ANY),
         mock.call.send_transaction(mock.ANY),
         mock.call.check_signature_is_confirmed(mock.ANY),
+        # custos lidos da transação confirmada, depois da execução
+        mock.call.get_confirmed_transaction(mock.ANY),
         mock.call.get_lamports(keypair.pubkey()),
         mock.call.get_account_balance(keypair.pubkey()),
+        mock.call.aclose(),
     ]
-    actual_calls = [c for c in mock_rpc_client.mock_calls if c[0] != "__str__"]
+    actual_calls = [
+        c
+        for c in mock_rpc_client.mock_calls
+        if c[0].isidentifier() and c[0] != "__str__"
+    ]
     assert len(actual_calls) == len(expected_calls)
     for idx, _call in enumerate(actual_calls):
         assert _call == expected_calls[idx], f"call[{idx}] diferente do esperado"
@@ -238,3 +250,76 @@ async def test_stop_ends_the_loop():
     await bot._run()
 
     strategy.on_market_refresh.assert_called_once()
+
+
+async def test_shutdown_closes_provider_on_normal_exit():
+    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider.get_candles = AsyncMock(return_value=[])
+    provider.get_account_balance = AsyncMock(return_value=[])
+    provider.get_price_ticker_data = AsyncMock(side_effect=KeyboardInterrupt())
+    bot = _bot(provider, mock.Mock(spec=TradingStrategy))
+
+    await bot._run()
+
+    provider.aclose.assert_awaited_once()
+    assert bot.is_running is False
+
+
+async def test_cancellation_closes_provider_and_propagates():
+    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider.get_candles = AsyncMock(return_value=[])
+    provider.get_price_ticker_data = AsyncMock(side_effect=asyncio.CancelledError())
+    notifier = mock.Mock(spec=NullNotificationService)
+    bot = _bot(provider, mock.Mock(spec=TradingStrategy))
+    bot.notification_service = notifier
+
+    with pytest.raises(asyncio.CancelledError):
+        await bot._run()
+
+    provider.aclose.assert_awaited_once()
+    notifier.send_message.assert_called_with("Bot interrompido pelo usuário")
+
+
+async def test_shutdown_survives_close_errors():
+    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider.get_candles = AsyncMock(return_value=[])
+    provider.get_price_ticker_data = AsyncMock(side_effect=KeyboardInterrupt())
+    provider.aclose = AsyncMock(side_effect=RuntimeError("already closed"))
+    bot = _bot(provider, mock.Mock(spec=TradingStrategy))
+
+    await bot._run()  # não propaga o erro de fechamento
+
+
+async def test_policy_denial_pauses_orders_but_not_the_strategy():
+    from trader.execution import PolicyDeniedError
+    from trader.models.intent import IntentSide, TradeIntent
+
+    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider.get_candles = AsyncMock(return_value=[])
+    provider.get_account_balance = AsyncMock(return_value=[])
+    provider.get_price_ticker_data = AsyncMock(return_value=Decimal("1"))
+    strategy = mock.Mock(spec=TradingStrategy)
+    strategy.on_market_refresh.return_value = OrderSignal(OrderSide.BUY, Decimal("1"))
+    bot = _bot(provider, strategy)
+
+    clock = [0.0]
+    bot.monotonic = lambda: clock[0]
+    intent = TradeIntent("t", "a", IntentSide.BUY, "x", "y", Decimal("1"))
+    denied = PolicyDeniedError(intent, ("limite",))
+    place_order = AsyncMock(side_effect=denied)
+    bot.account.place_order = place_order
+
+    with pytest.raises(PolicyDeniedError):
+        await bot.process_market_data(Decimal("1"))
+    await bot._on_error(denied, 1.0)
+
+    # dentro do cooldown: a estratégia roda, mas nenhuma ordem é tentada
+    for _ in range(3):
+        assert await bot.process_market_data(Decimal("1")) is None
+    assert place_order.await_count == 1
+    assert strategy.on_market_refresh.call_count == 4
+
+    clock[0] += bot.denial_cooldown
+    with pytest.raises(PolicyDeniedError), mock.patch("asyncio.sleep"):
+        await bot.process_market_data(Decimal("1"))
+    assert place_order.await_count == 2

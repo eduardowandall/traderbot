@@ -1,0 +1,232 @@
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from trader.ledger import Ledger, order_from_json, order_to_json
+from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
+from trader.models.intent import (
+    IntentSide,
+    IntentStatus,
+    PolicyDecision,
+    TradeIntent,
+)
+
+USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
+SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
+ALLOW = PolicyDecision(True)
+
+
+def _intent(side=IntentSide.BUY, notional="10", key=None, account="dry:SOL-USDC"):
+    extra = {"idempotency_key": key} if key else {}
+    return TradeIntent(
+        source="test",
+        account=account,
+        side=side,
+        spend_mint=USDC,
+        receive_mint=SOL,
+        spend_amount=Decimal("10"),
+        notional_usd=Decimal(notional),
+        **extra,
+    )
+
+
+def _order(side=OrderSide.BUY, quantity="0.1", price="100"):
+    return Order(
+        order_id="sig",
+        input_mint=USDC,
+        output_mint=SOL,
+        quantity=Decimal(quantity),
+        price=Decimal(price),
+        side=side,
+        timestamp=datetime(2026, 9, 24, 12, 0),
+        requested_quantity=Decimal("0.1"),
+        requested_price=Decimal("100"),
+        fill_price=Decimal("99.5"),
+    )
+
+
+@pytest.fixture
+def ledger():
+    ledger = Ledger()
+    yield ledger
+    ledger.close()
+
+
+def _executed(ledger, intent, order=None, pnl=None):
+    ledger.record_intent(intent, ALLOW)
+    ledger.mark_executed(intent.intent_id, SwapResult("sig", USDC, SOL, 1, 2))
+    if order:
+        ledger.attach_order(intent.intent_id, order, pnl)
+
+
+def test_order_json_roundtrip():
+    order = _order()
+    assert order_from_json(order_to_json(order)) == order
+    assert order_from_json(order_to_json(order)).fill_price == Decimal("99.5")
+
+
+def test_records_intent_lifecycle(ledger):
+    intent = _intent()
+    ledger.record_intent(intent, ALLOW)
+    assert ledger.get(intent.intent_id).status == IntentStatus.EXECUTING
+
+    ledger.mark_executed(intent.intent_id, SwapResult("sig", USDC, SOL, 10, 20))
+    record = ledger.get(intent.intent_id)
+    assert record.status == IntentStatus.EXECUTED
+    assert (record.signature, record.in_amount, record.out_amount) == ("sig", 10, 20)
+    assert record.intent == intent
+
+
+def test_denied_intents_keep_reasons(ledger):
+    intent = _intent()
+    ledger.record_intent(intent, PolicyDecision(False, ("limite",), "v1"))
+    record = ledger.get(intent.intent_id)
+    assert record.status == IntentStatus.DENIED
+    assert record.decision_reasons == ("limite",)
+    assert record.policy_version == "v1"
+
+
+def test_update_unknown_intent_raises(ledger):
+    with pytest.raises(KeyError):
+        ledger.mark_failed("missing", "x")
+
+
+class TestIdempotency:
+    def test_executed_and_active_keys_are_found(self, ledger):
+        for status_setter in ("mark_executed", "mark_unconfirmed", None):
+            intent = _intent(key=f"k-{status_setter}")
+            ledger.record_intent(intent, ALLOW)
+            if status_setter == "mark_executed":
+                ledger.mark_executed(intent.intent_id, SwapResult("s", "a", "b", 1, 1))
+            elif status_setter == "mark_unconfirmed":
+                ledger.mark_unconfirmed(intent.intent_id, "timeout")
+            assert ledger.find_by_idempotency_key(intent.idempotency_key)
+
+    def test_failed_and_denied_keys_can_be_retried(self, ledger):
+        failed = _intent(key="k1")
+        ledger.record_intent(failed, ALLOW)
+        ledger.mark_failed(failed.intent_id, "sem rota")
+        denied = _intent(key="k2")
+        ledger.record_intent(denied, PolicyDecision(False, ("x",)))
+
+        assert ledger.find_by_idempotency_key("k1") is None
+        assert ledger.find_by_idempotency_key("k2") is None
+
+
+class TestHashChain:
+    def test_intact_chain(self, ledger):
+        _executed(ledger, _intent(), _order())
+        assert ledger.verify_chain() is None
+
+    def test_detects_tampering(self, ledger):
+        _executed(ledger, _intent(), _order())
+        ledger.conn.execute("UPDATE events SET payload = '{}' WHERE id = 2")
+        assert ledger.verify_chain() == 2
+
+    def test_detects_deleted_event(self, ledger):
+        _executed(ledger, _intent(), _order())
+        ledger.conn.execute("DELETE FROM events WHERE id = 1")
+        assert ledger.verify_chain() == 2
+
+
+class TestPositions:
+    def test_last_executed_trade_and_pnl(self, ledger):
+        _executed(ledger, _intent(), _order())
+        sell = _intent(side=IntentSide.SELL)
+        _executed(ledger, sell, _order(OrderSide.SELL, price="110"), Decimal("1"))
+        other = _intent(account="dry:JUP-USDC")
+        _executed(ledger, other, _order())
+
+        last = ledger.last_executed_trade("dry:SOL-USDC")
+        assert last and last.intent.intent_id == sell.intent_id
+        assert ledger.total_realized_pnl("dry:SOL-USDC") == Decimal("1")
+        assert ledger.total_realized_pnl("dry:JUP-USDC") == Decimal("0")
+
+    def test_swaps_are_not_positions(self, ledger):
+        _executed(ledger, _intent(side=IntentSide.SWAP), _order())
+        assert ledger.last_executed_trade("dry:SOL-USDC") is None
+
+
+class TestPolicyState:
+    def test_aggregates(self, ledger):
+        _executed(ledger, _intent(notional="10"), _order())
+        _executed(ledger, _intent(notional="5"), _order())
+        sell = _intent(side=IntentSide.SELL, notional="50")
+        _executed(ledger, sell, _order(OrderSide.SELL), Decimal("-3"))
+        denied = _intent(notional="999")
+        ledger.record_intent(denied, PolicyDecision(False, ("x",)))
+
+        state = ledger.policy_state()
+        # vendas e recusadas não consomem orçamento
+        assert state.daily_notional_usd == Decimal("15")
+        assert state.trades_last_hour == 2
+        assert state.daily_realized_pnl_usd == Decimal("-3")
+        assert state.consecutive_failures == 0
+        assert state.unresolved_intent_ids == ()
+
+    def test_windows_are_rolling(self, ledger):
+        _executed(ledger, _intent(notional="10"), _order())
+        later = datetime.now(UTC) + timedelta(hours=2)
+        assert ledger.policy_state(later).trades_last_hour == 0
+        assert ledger.policy_state(later).daily_notional_usd == Decimal("10")
+        next_day = datetime.now(UTC) + timedelta(hours=25)
+        assert ledger.policy_state(next_day).daily_notional_usd == Decimal("0")
+
+    def test_consecutive_failures_reset_by_success_and_resume(self, ledger):
+        def fail():
+            intent = _intent()
+            ledger.record_intent(intent, ALLOW)
+            ledger.mark_failed(intent.intent_id, "erro")
+
+        fail()
+        _executed(ledger, _intent())
+        fail()
+        fail()
+        assert ledger.policy_state().consecutive_failures == 2
+
+        ledger.add_event("resume", {})
+        assert ledger.policy_state().consecutive_failures == 0
+
+    def test_unresolved(self, ledger):
+        intent = _intent()
+        ledger.record_intent(intent, ALLOW)
+        assert ledger.policy_state().unresolved_intent_ids == (intent.intent_id,)
+
+
+class TestResolve:
+    def test_resolves_unconfirmed(self, ledger):
+        intent = _intent()
+        ledger.record_intent(intent, ALLOW)
+        ledger.mark_unconfirmed(intent.intent_id, "timeout")
+
+        ledger.resolve(intent.intent_id, IntentStatus.FAILED, "não está no explorer")
+
+        record = ledger.get(intent.intent_id)
+        assert record.status == IntentStatus.FAILED
+        assert record.error == "não está no explorer"
+        assert ledger.policy_state().unresolved_intent_ids == ()
+
+    def test_rejects_invalid_resolutions(self, ledger):
+        intent = _intent()
+        _executed(ledger, intent)
+        with pytest.raises(ValueError):
+            ledger.resolve(intent.intent_id, IntentStatus.FAILED, "x")
+        with pytest.raises(ValueError):
+            ledger.resolve(intent.intent_id, IntentStatus.DENIED, "x")
+        with pytest.raises(KeyError):
+            ledger.resolve("missing", IntentStatus.FAILED, "x")
+
+
+def test_persists_across_connections(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    first = Ledger(path)
+    intent = _intent()
+    _executed(first, intent, _order())
+    first.close()
+
+    second = Ledger(path)
+    record = second.get(intent.intent_id)
+    assert record and record.status == IntentStatus.EXECUTED
+    assert second.verify_chain() is None
+    second.close()

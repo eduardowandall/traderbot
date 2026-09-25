@@ -25,23 +25,21 @@ class BotLoggerFileHandler(logging.FileHandler):
         return False
 
     def setup_filename(self):
-        self.basefilename = f".logs/[bot]-{int(datetime.now().timestamp())}.log"
-        """
-        Do a rollover, as described in __init__().
-        """
+        """Troca o arquivo `bot-<ts>.log` pelo arquivo com o nome do bot."""
         if self.stream:
             self.stream.close()
             self.stream = None  # type: ignore
         if self.bot_name:
-            dfn = self.filename_format % self.bot_name
-            if os.path.exists(dfn):
-                os.remove(dfn)
-            else:
-                if os.path.exists(self.baseFilename):
-                    os.rename(self.baseFilename, dfn)
-            self.baseFilename = dfn
+            self._move_to_bot_file(self.filename_format % self.bot_name)
         if not self.delay:
             self.stream = self._open()
+
+    def _move_to_bot_file(self, dfn: str):
+        if os.path.exists(dfn):
+            os.remove(dfn)
+        elif os.path.exists(self.baseFilename):
+            os.rename(self.baseFilename, dfn)
+        self.baseFilename = dfn
 
     def emit(self, record):
         """
@@ -107,6 +105,14 @@ LOGGING = {
     "loggers": {
         "httpcore": {
             "level": "ERROR",
+        },
+        # httpx loga URLs em INFO (HELIUS_RPC_URL contém a api-key) e urllib3
+        # loga o path em DEBUG (a URL do Telegram contém o token do bot)
+        "httpx": {
+            "level": "WARNING",
+        },
+        "urllib3": {
+            "level": "WARNING",
         },
     },
 }

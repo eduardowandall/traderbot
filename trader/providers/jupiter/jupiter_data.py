@@ -68,6 +68,44 @@ class JupiterQuoteResponse:
     timeTaken: float | None
 
     @classmethod
+    def single_route(
+        cls,
+        input_mint: str,
+        in_amount: int,
+        output_mint: str,
+        out_amount: int,
+        *,
+        slippage_bps: int = 50,
+        price_impact_pct: str = "0",
+        label: str = "single",
+    ) -> JupiterQuoteResponse:
+        """Quote ExactIn com uma única rota (replay/backtest e testes)."""
+        swap_info = JupiterSwapInfo(
+            ammKey=label,
+            label=label,
+            inputMint=input_mint,
+            outputMint=output_mint,
+            inAmount=str(in_amount),
+            outAmount=str(out_amount),
+            feeAmount=None,
+            feeMint=None,
+        )
+        return cls(
+            inputMint=input_mint,
+            inAmount=str(in_amount),
+            outputMint=output_mint,
+            outAmount=str(out_amount),
+            otherAmountThreshold=str(out_amount),
+            swapMode="ExactIn",
+            slippageBps=slippage_bps,
+            platformFee=None,
+            priceImpactPct=price_impact_pct,
+            routePlan=[JupiterRoutePlan(swapInfo=swap_info, percent=100)],
+            contextSlot=None,
+            timeTaken=None,
+        )
+
+    @classmethod
     def from_dict(cls, data: dict[str, Any]) -> JupiterQuoteResponse:
         """Cria uma instância JupiterQuoteResponse a partir de um dicionário"""
         return cls(

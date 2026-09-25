@@ -40,3 +40,17 @@ def test_telegram_send_message_handles_exception(mock_post, caplog):
     with caplog.at_level(logging.INFO):
         service.send_message("Hello World")
     assert "Erro ao enviar alerta Telegram:" in caplog.text
+
+
+@patch("requests.post")
+def test_telegram_error_log_does_not_leak_token(mock_post, caplog):
+    mock_post.side_effect = Exception(
+        "404 Client Error for url: https://api.telegram.org/botsecret-token/sendMessage"
+    )
+    service = TelegramNotificationService("12345", "secret-token")
+
+    with caplog.at_level(logging.DEBUG):
+        service.send_message("Hello World")
+
+    assert "secret-token" not in caplog.text
+    assert "bot***/sendMessage" in caplog.text

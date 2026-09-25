@@ -18,3 +18,5 @@ wheels/
 .augment/
 
 *.log
+# Ledger, kill switch
+.data/

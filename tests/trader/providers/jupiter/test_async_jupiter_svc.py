@@ -26,7 +26,7 @@ from solders.solders import (
 )
 from solders.transaction import VersionedTransaction
 
-from trader.models import SOLANA_MINTS
+from trader.models import SOLANA_MINTS, SwapResult
 from trader.models.account_data import MintBalance
 from trader.providers import JupiterQuoteResponse, JupiterRoutePlan, JupiterSwapInfo
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
@@ -148,7 +148,9 @@ class TestPlaceOrder:
         )
 
     async def test_swap_forwards_slippage(self):
-        do_swap_with_retry = AsyncMock(return_value="sig")
+        do_swap_with_retry = AsyncMock(
+            return_value=SwapResult("sig", "mint_in", "mint_out", 1000, 10)
+        )
         self.api._do_swap_with_retry = do_swap_with_retry
 
         result = await self.api.swap("mint_in", "mint_out", 1000, slippage_bps=100)
@@ -161,7 +163,7 @@ class TestPlaceOrder:
         sol = SOLANA_MINTS.get_by_symbol("SOL").pubkey
         usdc = SOLANA_MINTS.get_by_symbol("USDC").pubkey
         swap = AsyncMock(return_value="sig")
-        self.api.swap = swap
+        self.api.swap_with_details = swap
 
         result = await self.api.buy(
             usdc, sol, "market", Decimal("10"), slippage_bps=100
@@ -173,7 +175,7 @@ class TestPlaceOrder:
         sol = SOLANA_MINTS.get_by_symbol("SOL").pubkey
         usdc = SOLANA_MINTS.get_by_symbol("USDC").pubkey
         swap = AsyncMock(return_value="sig")
-        self.api.swap = swap
+        self.api.swap_with_details = swap
 
         # SOL-USDC: vender 1 SOL (9 decimais) em troca de USDC (6 decimais)
         result = await self.api.sell(
@@ -185,6 +187,7 @@ class TestPlaceOrder:
         )
 
     async def test_do_swap_with_retry_escalates_slippage(self):
+        self.api.max_slippage_bps = 200
         do_swap = AsyncMock(
             side_effect=[Exception("erro 1"), Exception("erro 2"), "sig"]
         )
@@ -317,7 +320,7 @@ class TestPlaceOrder:
 
         tx = await self.api._get_swap_transaction(quote=quote)
         assert isinstance(tx, VersionedTransaction)
-        get_swap_transaction.assert_called_once_with(quote, self.api.keypair.pubkey())
+        get_swap_transaction.assert_called_once_with(quote, self.api.pubkey)
 
     async def test_get_signed_transaction(self, fake_solana_client):
         keypair = Keypair()

@@ -75,6 +75,7 @@ select = [
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
+    "C90", # mcage complexity check
 ]
 
 ignore = [
@@ -84,6 +85,9 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["trader"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 5
 
 [tool.pyright]
 include = ["trader/*"]

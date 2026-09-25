@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from decimal import Decimal
@@ -5,6 +6,7 @@ from decimal import Decimal
 import httpx
 from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
+from solana.rpc.commitment import Confirmed
 from solana.rpc.models import TokenAccountOpts
 from solders.keypair import Keypair
 from solders.message import MessageV0, to_bytes_versioned
@@ -37,6 +39,35 @@ class AsyncRPCClient:
             self.client = AsyncClient(rpc_url)
         self._client_connected = False
         self.is_dryrun = is_dryrun
+
+    async def aclose(self) -> None:
+        await self.client.close()
+
+    async def get_confirmed_transaction(
+        self, signature: str, delays: tuple[float, ...] = (0.5, 1, 2, 4, 4)
+    ):
+        """Transação confirmada com `meta`, ou None se o RPC ainda não a tem.
+
+        O índice de transações do RPC costuma atrasar em relação ao status da
+        assinatura, por isso tenta de novo com espera crescente (~11s).
+        """
+        sig = Signature.from_string(signature)
+        for delay in (0, *delays):
+            await asyncio.sleep(delay)
+            resp = await self.client.get_transaction(
+                sig,
+                encoding="json",
+                commitment=Confirmed,  # o padrão do cliente é Finalized
+                max_supported_transaction_version=0,
+            )
+            if resp.value is not None:
+                return resp.value.transaction
+        return None
+
+    async def get_fee_for_message(self, message) -> int | None:
+        """Taxa (base + priority) que a rede cobraria pela mensagem."""
+        resp = await self.client.get_fee_for_message(message)
+        return resp.value
 
     @logger_wrapper
     async def is_connected(self):

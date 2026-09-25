@@ -1,6 +1,8 @@
 import logging
 import random
 from abc import ABC, abstractmethod
+from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -14,8 +16,21 @@ from .models import OrderSide, OrderSignal, Position
 class TradingStrategy(ABC):
     """Classe base para estratégias de trading"""
 
+    # relógio e gerador aleatório injetáveis: no replay/backtest usam o tempo
+    # dos ticks e uma semente fixa, para o resultado ser determinístico
+    clock: Callable[[], datetime] = staticmethod(datetime.now)
+    rng: random.Random = random.Random()
+
     def __init__(self):
         self.logger = logging.getLogger(self.__module__)
+        self.clock = datetime.now
+        self.rng = random.Random()
+
+    def set_clock(self, clock: Callable[[], datetime]) -> None:
+        self.clock = clock
+
+    def seed(self, seed: int | str | None) -> None:
+        self.rng = random.Random(seed)
 
     @abstractmethod
     def on_market_refresh(
@@ -36,16 +51,20 @@ class TradingStrategy(ABC):
 
     def __repr__(self):
         _vars = vars(self)
-        _vars = {k: str(v) for k, v in vars(self).items() if k != "logger"}
+        hidden = ("logger", "clock", "rng")
+        _vars = {k: str(v) for k, v in vars(self).items() if k not in hidden}
         return f"{self.__class__.__name__} with {_vars}"
 
 
 class RandomStrategy(TradingStrategy):
-    def __init__(self, sell_chance: int, buy_chance: int):
+    def __init__(
+        self, sell_chance: int, buy_chance: int, seed: int | str | None = None
+    ):
         super().__init__()
         self.buy_chance = buy_chance
         self.sell_chance = sell_chance
-        self.price_history: list[Decimal] = []
+        if seed is not None:
+            self.seed(seed)
 
     def calculate_quantity(self, balance: Decimal, price: Decimal) -> Decimal:
         quantity = (balance * Decimal("1.0")) / price
@@ -58,19 +77,16 @@ class RandomStrategy(TradingStrategy):
         balance: Decimal,
         current_position: Position | None,
     ) -> OrderSignal | None:
-        self.price_history.append(price)
         if not current_position:
-            if random.randint(1, 100) <= int(self.buy_chance):
-                self.price_history = []
+            if self.rng.randint(1, 100) <= int(self.buy_chance):
                 self.logger.debug("buying at random")
                 return OrderSignal(
                     OrderSide.BUY,
                     quantity=self.calculate_quantity(balance, price),
                 )
         else:
-            if random.randint(1, 100) <= int(self.sell_chance):
+            if self.rng.randint(1, 100) <= int(self.sell_chance):
                 self.logger.debug("selling at random")
-                self.price_history = []
                 return OrderSignal(
                     OrderSide.SELL, current_position.entry_order.quantity
                 )
@@ -113,8 +129,8 @@ class TargetValueStrategy(TradingStrategy):
         self.highest_price_after_target = Decimal("0")
         self.position_periods = 0
         self.last_price = None
-        self.price_history: list[Decimal] = []
-        self.max_history_size = 60 * 60 * 4 / 10  # 4h
+        self.max_history_size = 60 * 60 * 4 // 10  # 4h
+        self.price_history: deque[Decimal] = deque(maxlen=self.max_history_size)
         self.same_target_count = 0
         self.report_interval = 60 * 60 / 10  # 1h
 
@@ -196,92 +212,89 @@ class TargetValueStrategy(TradingStrategy):
         balance: Decimal,
         current_position: Position | None,
     ) -> OrderSignal | None:
-        current_price = price
-
-        self.price_history.append(current_price)
-        self.same_target_count += 1
-        if len(self.price_history) > self.max_history_size:
-            self.price_history.pop(0)
-
-        # Se não tem posição, verifica se deve comprar
-        if not current_position:
-            # if self.same_target_count > self.max_history_size:
-            #     self._recalculate_target_buy_price()
-            #     self.same_target_count = 0
-            # Reset do estado quando não há posição
-            self.target_profit_reached = False
-            self.highest_price_after_target = Decimal("0")
-
-            # Compra quando o preço atingir ou estiver abaixo do valor alvo
-            if current_price <= self.target_buy_price:
-                if spread is not None and spread > self.max_spread:
-                    self.logger.info(f"Skip buying for high spread = {spread}")
-                    self.logger.info(
-                        f"Current price: {current_price}; target buy: {self.target_buy_price}; spread: {spread}"
-                    )
-                    return None
-                if self.last_price is None or current_price < self.last_price:
-                    self.logger.info("Skip buying - waiting for price to stop dropping")
-                    self.logger.info(
-                        f"Current price: {current_price}; target buy: {self.target_buy_price}; spread: {spread}"
-                    )
-                    self.last_price = current_price
-                    return None
-                self.position_periods = 0
-                self.logger.info(
-                    f"Current price: {current_price} <= Target buy: {self.target_buy_price} - BUYING!"
-                )
-                return OrderSignal(
-                    OrderSide.BUY,
-                    quantity=self.calculate_quantity(balance, price),
-                )
+        self._track_price(price)
+        if current_position:
+            signal, decided = self._check_sell(price, current_position)
         else:
-            # Tem posição aberta, verifica condições de venda
-            entry_price = current_position.entry_order.price
+            signal, decided = self._check_buy(price, spread, balance)
+        if decided:
+            return signal
 
-            # Calcula o percentual de ganho atual
-            profit_percent = ((current_price - entry_price) / entry_price) * Decimal(
-                "100"
-            )
-
-            # Verifica se atingiu o ganho alvo
-            if profit_percent >= self.target_profit_percent or (
-                self.target_profit_reached
-                and profit_percent >= self.target_profit_percent - Decimal("1.1")
-            ):
-                self.position_periods += 1
-                if not self.target_profit_reached:
-                    # Primeira vez que atinge o ganho alvo
-                    self.target_profit_reached = True
-                    self.highest_price_after_target = current_price
-
-                # Atualiza o preço mais alto após atingir o ganho alvo
-                if current_price > self.highest_price_after_target:
-                    self.highest_price_after_target = current_price
-
-                # Calcula a queda percentual desde o pico
-                drop_percent = (
-                    (self.highest_price_after_target - current_price)
-                    / self.highest_price_after_target
-                ) * Decimal("100")
-
-                # if self.position_periods >= self.max_position_periods:
-                #     self.logger.info(f"Current price: {current_price} - SELLING!")
-                #     return OrderSignal(
-                #         OrderSide.SELL, current_position.entry_order.quantity
-                #     )
-
-                # Ativa stop loss se cair o percentual configurado
-                if drop_percent >= self.stop_loss_percent:
-                    self.logger.info(f"Current price: {current_price} - SELLING!")
-                    return OrderSignal(
-                        OrderSide.SELL, current_position.entry_order.quantity
-                    )
-
-        msg = f"Current price: {current_price:.9f}; target buy: {self.target_buy_price:.9f}"
+        msg = f"Current price: {price:.9f}; target buy: {self.target_buy_price:.9f}"
         self.logger.info(msg)
-        self.last_price = current_price
+        self.last_price = price
         return None
+
+    def _track_price(self, price: Decimal) -> None:
+        self.price_history.append(price)  # deque descarta o mais antigo
+        self.same_target_count += 1
+
+    def _check_buy(
+        self, price: Decimal, spread: Decimal | None, balance: Decimal
+    ) -> tuple[OrderSignal | None, bool]:
+        """Sem posição. Retorna (sinal, decidido); decidido=False segue o fluxo."""
+        # if self.same_target_count > self.max_history_size:
+        #     self._recalculate_target_buy_price()
+        #     self.same_target_count = 0
+        # Reset do estado quando não há posição
+        self.target_profit_reached = False
+        self.highest_price_after_target = Decimal("0")
+
+        # Compra quando o preço atingir ou estiver abaixo do valor alvo
+        if price > self.target_buy_price:
+            return None, False
+        detail = (
+            f"Current price: {price}; target buy: {self.target_buy_price}; "
+            f"spread: {spread}"
+        )
+        if spread is not None and spread > self.max_spread:
+            self.logger.info(f"Skip buying for high spread = {spread}")
+            self.logger.info(detail)
+            return None, True
+        if self.last_price is None or price < self.last_price:
+            self.logger.info("Skip buying - waiting for price to stop dropping")
+            self.logger.info(detail)
+            self.last_price = price
+            return None, True
+        self.position_periods = 0
+        self.logger.info(
+            f"Current price: {price} <= Target buy: {self.target_buy_price} - BUYING!"
+        )
+        return OrderSignal(OrderSide.BUY, self.calculate_quantity(balance, price)), True
+
+    def _check_sell(
+        self, price: Decimal, position: Position
+    ) -> tuple[OrderSignal | None, bool]:
+        """Com posição: trailing stop depois de atingir o lucro alvo."""
+        entry_price = position.entry_order.price
+        profit_percent = ((price - entry_price) / entry_price) * Decimal("100")
+
+        # Verifica se atingiu o ganho alvo
+        in_target_band = profit_percent >= self.target_profit_percent or (
+            self.target_profit_reached
+            and profit_percent >= self.target_profit_percent - Decimal("1.1")
+        )
+        if not in_target_band:
+            return None, False
+
+        self.position_periods += 1
+        if not self.target_profit_reached:
+            # Primeira vez que atinge o ganho alvo
+            self.target_profit_reached = True
+            self.highest_price_after_target = price
+        # Atualiza o preço mais alto após atingir o ganho alvo
+        self.highest_price_after_target = max(self.highest_price_after_target, price)
+
+        # Calcula a queda percentual desde o pico
+        drop_percent = (
+            (self.highest_price_after_target - price) / self.highest_price_after_target
+        ) * Decimal("100")
+
+        # Ativa stop loss se cair o percentual configurado
+        if drop_percent >= self.stop_loss_percent:
+            self.logger.info(f"Current price: {price} - SELLING!")
+            return OrderSignal(OrderSide.SELL, position.entry_order.quantity), True
+        return None, False
 
 
 class WeightedMovingAverageStrategy(TradingStrategy):
@@ -326,7 +339,7 @@ class WeightedMovingAverageStrategy(TradingStrategy):
 
     def set_parameters(self, price: Decimal, timestamp: datetime | None = None):
         history_limit = self.long_window + self.shift_past
-        _now: datetime = datetime.now() if timestamp is None else timestamp
+        _now: datetime = self.clock() if timestamp is None else timestamp
         if self.last_price_time + timedelta(seconds=self.period) <= _now:
             self.price_history.append(price)
             self.last_price_time = _now
@@ -574,6 +587,16 @@ class StrategyComposer(TradingStrategy):
         for strategy in self.buy_strategies + self.sell_strategies:
             strategy.setup(ticker_history)
         return super().setup(ticker_history)
+
+    def set_clock(self, clock: Callable[[], datetime]) -> None:
+        super().set_clock(clock)
+        for strategy in self.buy_strategies + self.sell_strategies:
+            strategy.set_clock(clock)
+
+    def seed(self, seed: int | str | None) -> None:
+        super().seed(seed)
+        for index, strategy in enumerate(self.buy_strategies + self.sell_strategies):
+            strategy.seed(None if seed is None else f"{seed}:{index}")
 
     def _check_signals(self, signals, mode: str, side: OrderSide) -> bool:
         signal = False

@@ -38,4 +38,6 @@ class TelegramNotificationService(NotificationService):
             )
             response.raise_for_status()
         except Exception as e:
-            self.logger.warning("Erro ao enviar alerta Telegram:", exc_info=e)
+            # a mensagem de erro do requests inclui a URL, que contém o token
+            error = str(e).replace(self.token, "***")
+            self.logger.warning(f"Erro ao enviar alerta Telegram: {error}")

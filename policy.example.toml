@@ -1,0 +1,43 @@
+# Política de risco do bot. Copie para `policy.toml` (ou aponte
+# TRADER_POLICY_FILE para outro arquivo) e ajuste os limites.
+# Sem arquivo, valem os padrões abaixo. Chaves desconhecidas são erro.
+#
+# Toda ordem (estratégias e `main.py swap`) passa por esta política antes de
+# executar e fica registrada em `.data/ledger-<modo>.sqlite3`.
+
+[trading]
+# Modo real bloqueado até você habilitar explicitamente.
+real_trading_enabled = false
+# Símbolos permitidos (de trader/models/mints.py). Vazio = todos.
+allowed_symbols = []
+# Permite swaps sem estimativa em USD (quando nenhum lado é USDC/USDT e não há
+# preço de mercado, ex: `swap SOL JUP`). Esses swaps não entram no orçamento.
+allow_unknown_notional = false
+
+[limits]
+# Valor máximo por trade, em USD.
+max_trade_usd = 25
+# Soma máxima de compras/swaps nas últimas 24h, em USD.
+max_daily_notional_usd = 100
+# Máximo de compras/swaps na última hora.
+max_trades_per_hour = 10
+# Perda realizada nas últimas 24h que bloqueia novas compras, em USD.
+max_daily_loss_usd = 20
+# Falhas seguidas que disparam o circuit breaker (rearme: `main.py resume`).
+max_consecutive_failures = 3
+
+# Seções por modo (opcional): `[real.*]`, `[dry.*]` e `[paper.*]` sobrescrevem
+# só as chaves que definirem, e só naquele modo. Ex: limites folgados para
+# testar em paper sem afrouxar o modo real.
+#
+# [paper.limits]
+# max_daily_notional_usd = 1000
+# max_trades_per_hour = 60
+#
+# [real.trading]
+# real_trading_enabled = true
+# allowed_symbols = ["SOL", "USDC"]
+
+# Vendas que fecham uma posição ignoram os limites de orçamento acima (para a
+# posição nunca ficar presa), mas respeitam o kill switch, o circuit breaker e
+# intenções sem confirmação.

@@ -6,6 +6,7 @@ from enum import StrEnum, auto
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
+from trader.execution import TradeGateway
 from trader.models import SOLANA_MINTS
 from trader.notification.notification_service import (
     NotificationService,
@@ -17,6 +18,8 @@ from trader.trading_strategy import TradingStrategy
 class RunningMode(StrEnum):
     REAL = auto()
     DRY = auto()
+    # carteira simulada com quotes reais: não usa chave nem RPC
+    PAPER = auto()
 
 
 @dataclass
@@ -27,10 +30,12 @@ class BotConfig:
     input_mint: str  # a moeda que eu tenho
     output_mint: str  # a moeda que eu vou comprar
     mode: RunningMode
-    wallet: InitVar[Keypair]
+    wallet: InitVar[Keypair | None]
     provider: AsyncJupiterProvider
     strategy: TradingStrategy
     notifier: NotificationService
+    # caminho de execução com política + ledger; None executa direto (testes)
+    gateway: TradeGateway | None = None
 
     @property
     def currency(self):
@@ -39,21 +44,24 @@ class BotConfig:
         return f"{_out}-{_in}"
 
 
-def create_bot_config(mode: str, name: str, symbol: str, provider, strategy, notifier):
-    keypair = get_keypair_from_env()
-    _out, _in = symbol.split("-")
-    SOLANA_MINTS.get_by_symbol(_in)
+def create_bot_config(
+    mode: str, name: str, symbol: str, provider, strategy, notifier, gateway=None
+):
+    running_mode = RunningMode[mode.upper()]
+    keypair = None if running_mode == RunningMode.PAPER else get_keypair_from_env()
+    output_mint, input_mint = SOLANA_MINTS.get_pair(symbol)
 
     return BotConfig(
         id=uuid.uuid4().hex,
         name=name,
-        input_mint=SOLANA_MINTS.get_by_symbol(_in).mint,
-        output_mint=SOLANA_MINTS.get_by_symbol(_out).mint,
-        mode=RunningMode[mode.upper()],
+        input_mint=input_mint.mint,
+        output_mint=output_mint.mint,
+        mode=running_mode,
         wallet=keypair,
         provider=provider,
         strategy=strategy,
         notifier=notifier,
+        gateway=gateway,
     )
 
 
