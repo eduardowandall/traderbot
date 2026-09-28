@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-sync --project \"$CLAUDE_PROJECT_DIR\" python \"$CLAUDE_PROJECT_DIR/.claude/hooks/ruff_on_edit.py\"",
+            "timeout": 30,
+            "statusMessage": "ruff format + check"
+          }
+        ]
+      }
+    ]
+  }
+}
