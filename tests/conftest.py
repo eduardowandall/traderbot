@@ -29,7 +29,8 @@ def mock_jupiter_client():
             swapMode="ExactIn",
             slippageBps=50,
             platformFee=None,
-            priceImpactPct="0.5",
+            # fração (0.005 == 0.5%), não percentual
+            priceImpactPct="0.005",
             routePlan=[
                 JupiterRoutePlan(
                     swapInfo=JupiterSwapInfo(

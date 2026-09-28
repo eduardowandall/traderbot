@@ -30,6 +30,8 @@ Fill in `.env`:
 | `SOLANA_PUBLIC_KEY`  | Optional. Validated against the derived key             |
 | `TELEGRAM_CHAT_ID`   | Optional. Chat for `--notification-service telegram`    |
 | `TELEGRAM_BOT_TOKEN` | Optional. Bot token for Telegram notifications          |
+| `JUPITER_API_URL`    | Optional. Jupiter quote/swap API base URL. Defaults to `https://api.jup.ag` |
+| `JUPITER_API_KEY`    | Optional. Sent as `x-api-key`. Without it, requests still work but at a lower (keyless) rate limit. Get one at [developers.jup.ag/portal](https://developers.jup.ag/portal) |
 
 ### Run the bot
 

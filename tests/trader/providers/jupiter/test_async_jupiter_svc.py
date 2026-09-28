@@ -223,7 +223,7 @@ class TestPlaceOrder:
             swapMode="ExactIn",
             slippageBps=50,
             platformFee=None,
-            priceImpactPct="0.5",
+            priceImpactPct="0.005",
             routePlan=[
                 JupiterRoutePlan(
                     swapInfo=JupiterSwapInfo(
@@ -269,7 +269,7 @@ class TestPlaceOrder:
             swapMode="ExactIn",
             slippageBps=50,
             platformFee=None,
-            priceImpactPct="0.5",
+            priceImpactPct="0.005",
             routePlan=[],
             contextSlot=123456789,
             timeTaken=0.5,
@@ -294,7 +294,7 @@ class TestPlaceOrder:
             swapMode="ExactIn",
             slippageBps=50,
             platformFee=None,
-            priceImpactPct="0.5",
+            priceImpactPct="0.005",
             routePlan=[
                 JupiterRoutePlan(
                     swapInfo=JupiterSwapInfo(

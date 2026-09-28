@@ -14,7 +14,8 @@ from trader.providers.jupiter.async_jupiter_svc import (
 from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
 
 
-def _quote(price_impact_pct="0.1"):
+def _quote(price_impact_pct="0.001"):
+    # priceImpactPct da Jupiter é uma fração (0.01 == 1%), não um percentual
     return JupiterQuoteResponse.single_route(
         "in", 1000, "out", 990, price_impact_pct=price_impact_pct
     )
@@ -31,13 +32,15 @@ def _provider(**kwargs):
 
 class TestPriceImpact:
     async def test_quote_within_limit_is_accepted(self):
+        # max_price_impact_pct=1 -> 1%; 0.0099 de fração = 0.99%, dentro do limite
         provider = _provider(max_price_impact_pct=Decimal("1"))
-        provider.jupiter_client.get_quote = AsyncMock(return_value=_quote("0.99"))
+        provider.jupiter_client.get_quote = AsyncMock(return_value=_quote("0.0099"))
         quote = await provider._get_quote_with_route("in", "out", 1000)
-        assert quote.priceImpactPct == "0.99"
+        assert quote.priceImpactPct == "0.0099"
 
-    @pytest.mark.parametrize("impact", ["1.5", "-2"])
+    @pytest.mark.parametrize("impact", ["0.015", "-0.02"])
     async def test_quote_above_limit_is_rejected(self, impact):
+        # 0.015/-0.02 de fração = 1.5%/2%, acima do limite de 1%
         provider = _provider(max_price_impact_pct=Decimal("1"))
         provider.jupiter_client.get_quote = AsyncMock(return_value=_quote(impact))
         with pytest.raises(SwapRejectedError):
@@ -45,12 +48,13 @@ class TestPriceImpact:
 
     async def test_limit_can_be_disabled(self):
         provider = _provider(max_price_impact_pct=None)
-        provider.jupiter_client.get_quote = AsyncMock(return_value=_quote("50"))
+        provider.jupiter_client.get_quote = AsyncMock(return_value=_quote("0.5"))
         await provider._get_quote_with_route("in", "out", 1000)
 
     async def test_rejection_is_not_retried(self):
+        # 0.05 de fração = 5%, acima do limite de 1%
         provider = _provider(max_price_impact_pct=Decimal("1"))
-        provider.jupiter_client.get_quote = AsyncMock(return_value=_quote("5"))
+        provider.jupiter_client.get_quote = AsyncMock(return_value=_quote("0.05"))
         with pytest.raises(SwapRejectedError):
             await provider.swap("in", "out", 1000)
         provider.jupiter_client.get_quote.assert_awaited_once()

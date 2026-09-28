@@ -50,6 +50,8 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - Provider `buy`/`sell`/`swap_with_details` return `SwapResult` (quote amounts); `AsyncAccount` records fills from it. `swap` returns only the signature.
 - `AsyncAccount` keeps a 0.02 SOL fee reserve when SOL is spent.
 - Telegram credentials: `TELEGRAM_CHAT_ID`/`TELEGRAM_BOT_TOKEN` env vars.
+- Jupiter quote/swap calls go to `api.jup.ag` (the old `lite-api.jup.ag` is being sunset). Override with `JUPITER_API_URL`; `JUPITER_API_KEY` is sent as `x-api-key` when set (optional — unauthenticated requests still work at a lower rate limit). The undocumented websocket price feed (`trench-stream.jup.ag`) and candles (`datapi.jup.ag`) are untouched by this — still frontend endpoints, still no fallback.
+- `policy.toml`'s `[paper.limits]` must override `max_trade_usd` too (not just `max_daily_notional_usd`/`max_trades_per_hour`), or the first paper buy gets silently denied forever: the default paper wallet (100 USDC/0.5 SOL) times the default strategies' 50-100%-of-balance sizing is $50-100/trade, well above the base `max_trade_usd=25`. Denied intents still show up in `ledger list`/the `events` table (`intent_denied`, reason `"trade de N USD acima do limite 25 USD"`) — check there first if paper trading looks stuck.
 - Tests run in a temp cwd (`isolated_workdir` autouse fixture) so `.data/`, `HALT` and `policy.toml` never touch the real ones. Close `Ledger`s you open (`-W error::ResourceWarning` stays clean).
 - UNCONFIRMED intents block all trading until `main.py ledger resolve`; `main.py resume <mode>` re-arms the circuit breaker.
 - On Windows, `timeout -s INT` doesn't reach the bot; stop a test run with `taskkill /PID <uv pid> /T /F`.

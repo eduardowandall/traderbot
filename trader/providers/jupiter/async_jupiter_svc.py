@@ -252,12 +252,14 @@ class AsyncJupiterProvider:
     def _check_price_impact(self, quote: JupiterQuoteResponse) -> None:
         if self.max_price_impact_pct is None:
             return
-        # TODO: confirmar na documentação da Jupiter a unidade de priceImpactPct
-        # (percentual vs fração); aqui é tratado como percentual.
-        impact = abs(Decimal(quote.priceImpactPct or "0"))
-        if impact > self.max_price_impact_pct:
+        # `priceImpactPct` da Jupiter é uma fração (0.01 = 1%), confirmado
+        # comparando com o campo `priceImpact` (percentual) da API v2 num
+        # mesmo quote: os dois batem multiplicados por 100. `max_price_impact_pct`
+        # é expresso em percentual (API pública/CLI), daí a conversão abaixo.
+        impact_pct = abs(Decimal(quote.priceImpactPct or "0")) * 100
+        if impact_pct > self.max_price_impact_pct:
             raise SwapRejectedError(
-                f"Impacto de preço {impact}% acima do limite "
+                f"Impacto de preço {impact_pct}% acima do limite "
                 f"{self.max_price_impact_pct}%"
             )
 

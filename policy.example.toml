@@ -31,8 +31,13 @@ max_consecutive_failures = 3
 # testar em paper sem afrouxar o modo real.
 #
 # [paper.limits]
-# max_daily_notional_usd = 1000
-# max_trades_per_hour = 60
+# a carteira paper padrão é 100 USDC/0.5 SOL (`DEFAULT_PAPER_BALANCES`) e as
+# estratégias padrão dimensionam 50-100% do saldo: sem isso, a primeira
+# compra já esbarra no max_trade_usd=25 herdado e fica sempre recusada
+# ("trade de N USD acima do limite 25 USD" em `ledger list`)
+max_trade_usd = 1000
+max_daily_notional_usd = 10000
+max_trades_per_hour = 60
 #
 # [real.trading]
 # real_trading_enabled = true

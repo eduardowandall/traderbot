@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
@@ -17,6 +18,13 @@ from websockets.asyncio.client import ClientConnection
 
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.providers.jupiter.logging_utils import logger_wrapper
+
+# lite-api.jup.ag está obsoleta (sem data final confirmada, mas o desligamento
+# vem). A API paga/gratuita atual é api.jup.ag; sem `x-api-key` as requisições
+# ainda funcionam, só que num limite de taxa menor (keyless). O endpoint
+# /swap/v1/* segue com o mesmo formato de request/response de antes, só muda
+# o host. Ver docs/plan.md §3.4.
+DEFAULT_JUPITER_API_URL = "https://api.jup.ag"
 
 
 class Interval(StrEnum):
@@ -54,20 +62,32 @@ def _add_response_notes(ex: Exception, url: str, response) -> None:
 
 
 class AsyncJupiterClient:
-    def __init__(self, client=None, websocket=None):
+    def __init__(
+        self,
+        client=None,
+        websocket=None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         self.logger = logging.getLogger(self.__module__)
 
         self.websocket = websocket
+        # base da API de swap/quote; configurável porque a lite-api.jup.ag
+        # está sendo descontinuada em favor de api.jup.ag (docs/plan.md §3.4)
+        self.base_url = (
+            base_url or os.getenv("JUPITER_API_URL") or DEFAULT_JUPITER_API_URL
+        ).rstrip("/")
+        self.api_key = api_key or os.getenv("JUPITER_API_KEY") or None
+
         if client:
             self.client = client
         else:
             self.client = httpx.AsyncClient()
             # Headers padrão para requisições públicas
-            self.client.headers.update(
-                {
-                    "Content-Type": "application/json",
-                }
-            )
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["x-api-key"] = self.api_key
+            self.client.headers.update(headers)
 
     @logger_wrapper
     async def get_quote(
@@ -87,7 +107,7 @@ class AsyncJupiterClient:
             only_direct_routes,
             max_accounts,
         )
-        url = "https://lite-api.jup.ag/swap/v1/quote"
+        url = f"{self.base_url}/swap/v1/quote"
         response = await self.client.get(url, params=params)
         try:
             response.raise_for_status()
@@ -193,7 +213,7 @@ class AsyncJupiterClient:
         response = None
         try:
             response = await self.client.post(
-                "https://lite-api.jup.ag/swap/v1/swap",
+                f"{self.base_url}/swap/v1/swap",
                 json={
                     "quoteResponse": asdict(quote),
                     "userPublicKey": str(pubkey),

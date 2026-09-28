@@ -94,7 +94,7 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
                 swapMode="ExactIn",
                 slippageBps=50,
                 platformFee=None,
-                priceImpactPct="0.5",
+                priceImpactPct="0.005",
                 routePlan=[
                     JupiterRoutePlan(
                         swapInfo=JupiterSwapInfo(
@@ -133,7 +133,7 @@ def assert_jupiter_mock_calls(mock_jupiter_client, keypair, usdc, bonk):
                 swapMode="ExactIn",
                 slippageBps=50,
                 platformFee=None,
-                priceImpactPct="0.5",
+                priceImpactPct="0.005",
                 routePlan=[
                     JupiterRoutePlan(
                         swapInfo=JupiterSwapInfo(

@@ -93,11 +93,27 @@ Code-quality and refactoring items live in
   meaningful for stablecoin inputs; on pairs like `USDC-SOL` they mix SOL and
   USD. The proper fix is to price the output in input-token units (feed the
   input token's USD price too).
-- **Fills are only as good as the quote.** Since Phase 0, `Order` records the
-  quote's `inAmount`/`outAmount`. The on-chain amount can still differ within
-  slippage, and reconciling against the balance delta is not done yet.
+- **Fills are only as good as the quote — in dry/paper mode.** `Order` records
+  the quote's `inAmount`/`outAmount` by default, but in **real** mode
+  `swap_costs.py::parse_swap_costs` already reconciles against the confirmed
+  transaction's token-balance deltas (`actual_in_amount`/`actual_out_amount`),
+  and `AsyncAccount._fill` uses those over the quote when known. Dry/paper
+  fall back to the quote because there's no real balance movement to check
+  against — that's inherent to what those modes are, not a gap.
 - ~~Price impact never checked~~, ~~slippage escalation without a
   ceiling~~, ~~no SOL fee reserve~~ (done in Phase 0).
+- ~~`priceImpactPct` unit unconfirmed, price-impact cap effectively
+  inert~~ **(fixed 2026-09-27).** Confirmed empirically against the live
+  Jupiter API: `priceImpactPct` is a **fraction** (e.g. `0.01` = 1%), not a
+  percent — proven by comparing it against the newer `priceImpact` field on
+  the same quote (`/swap/v2/order`), which is exactly 100x larger.
+  `_check_price_impact` (`async_jupiter_svc.py`) compared the raw fraction
+  directly against `max_price_impact_pct` (default `1`, meant as 1%), so the
+  cap only ever fired above **100%** impact — inert for every realistic
+  trade. `SwapRejectedError` was never raised in practice. Fixed by scaling
+  the fraction to a percent before comparing; regression tests in
+  `test_swap_guards.py` use realistic fraction values and were confirmed to
+  fail against the old logic before the fix.
 - **Dry mode is not paper trading.** It reads the real wallet and never
   changes balances. **Use `paper` mode** (Phase 2) to test strategies end to
   end. `dry` is still useful for checking the real transaction path
@@ -131,32 +147,47 @@ Code-quality and refactoring items live in
 
 ### 3.4 External APIs (verify first)
 
-- **`lite-api.jup.ag` is deprecated.** Jupiter is moving to `api.jup.ag` with an
-  `x-api-key` header (free tier ~60 req/min), and Swap API V2 launched in
-  March 2026. The shutdown date has been postponed, but it is coming. Make the
-  base URL and API key configurable (`JUPITER_API_URL`, `JUPITER_API_KEY`).
+- ~~`lite-api.jup.ag` is deprecated~~ **(done 2026-09-27).** `AsyncJupiterClient`
+  now targets `api.jup.ag` by default and accepts a configurable base URL and
+  an optional `x-api-key` header, set via `JUPITER_API_URL`/`JUPITER_API_KEY`.
+  Verified directly against the live API: `GET/POST /swap/v1/quote` and
+  `/swap/v1/swap` still work unauthenticated on `api.jup.ag` with the exact
+  same request/response shape as before (only the host changed), so no
+  dataclass or business-logic changes were needed. Deliberately **not** used:
+  the new `/swap/v2/order` endpoint — when called with a `taker` (so it
+  returns a ready-to-sign transaction in one call) it silently switches into
+  Jupiter's "ultra" mode and **rejects an explicit `slippageBps`** (400, empty
+  body), which would have broken the slippage-escalation retry logic in
+  `_retry_slippages`/`max_slippage_bps`. Confirmed empirically, not just from
+  docs. Without an API key, requests fall back to a lower keyless rate limit
+  rather than failing.
 - **The price websocket (`trench-stream.jup.ag`) and candles
   (`datapi.jup.ag`) are undocumented frontend endpoints.** They are reached
   with a spoofed `Origin`/`User-Agent` and can break without notice. Plan a
-  fallback to the documented Price API V3.
+  fallback to the documented Price API V3. **Not done in this pass** — out of
+  scope for the base-URL/API-key change above.
 
 ## 4. Readiness gap analysis
+
+Rows below marked "**updated 2026-09-27**" were stale: written before Phase
+0/1/2 shipped and never revisited afterward, so they described gaps those
+phases had already closed or narrowed.
 
 | Area | Today | Gap | Priority |
 |---|---|---|---|
 | Programmatic interface | Typer CLI plus a blocking loop | No API or MCP surface an agent can call | P0 |
-| Decision/execution split | `AsyncAccount.place_order` calls the provider directly | No proposal/intent layer between deciding and executing | P0 |
-| Guardrails | Minimum balance checks only | No per-trade or daily limits, allow-list, price-impact cap, or kill switch | P0 |
-| Idempotency | Fixed here for retries (§2 #4) | No idempotency key and no dedupe across processes | P0 |
+| Decision/execution split | **(updated)** `TradeIntent`/`PolicyDecision`/`IntentRecord` (Phase 1) + `TradeGateway.submit`; `AsyncAccount` routes every order through it | The layer exists, but only strategies feed it today — no agent-facing intake (MCP), and it runs in the same process as the key | P1 |
+| Guardrails | **(updated)** Policy engine (Phase 1): per-trade/daily/hourly/loss limits, symbol allow-list, kill switch, all in `policy.toml`; price-impact cap at the provider level (now fixed, §3.1) | Price-impact cap isn't in `policy.py` (provider-only, no policy-level override per agent); no MCP-facing guardrail surface yet | P1 |
+| Idempotency | **(updated)** Idempotency key + ledger-based dedupe across processes (`TradeGateway._authorize`, Phase 1) | Done | done |
 | Persistence | SQLite ledger (Phase 1) | Done: orders, positions and PnL survive restarts | done |
 | Key isolation | Key in the bot process | Agent-reachable code shares memory with the key | P1 |
 | Human-in-the-loop | Telegram can only send | No approval flow | P1 |
-| Paper trading and backtesting | Dry mode is semi-real | No simulated wallet, no replay harness | P1 |
-| Observability | Free-text logs, PT/EN mix | No structured trade journal or decision rationale | P1 |
-| Configuration | CLI strings (`'k=v k=v'`), unused YAML | No validated config or policy file | P1 |
+| Paper trading and backtesting | **(updated)** `SimulatedWallet` + `PaperJupiterProvider` + `Backtester`/replay harness (Phase 2) | Code gap closed; the multi-week paper soak run itself (§6 Phase 2) is still outstanding, not a code gap | P2 |
+| Observability | **(updated)** Structured, hash-chained ledger (`events`/`intents`, Phase 1); `rationale` column already plumbed end-to-end | `rationale` is unpopulated (no agent exists to write one yet); logs outside the ledger are still free-text PT/EN | P1 |
+| Configuration | **(updated)** `policy.toml` is a validated, schema-checked TOML config (Phase 1) | Strategy args are still CLI `'k=v k=v'` strings; `botconfigs.example.yaml` remains completely unwired | P1 |
 | Multi-agent | One pair per process, whole wallet | No sub-accounts, budgets, or wallet lock | P2 |
 | Market data | Websocket price, 100 candles | Undocumented endpoints; no quotes/balances API | P1 |
-| Packaging | Runs from repo root only | `logging_config` outside the package; no service entrypoint | P2 |
+| Packaging | **(updated)** `trader/logging_config.py` is inside the package (Phase 0) | No service entrypoint (systemd/Docker/etc.) | P2 |
 
 ## 5. Target architecture
 
@@ -255,18 +286,18 @@ Each phase ships on its own and has exit criteria that tests can check.
       never retried) and a slippage ceiling for retry escalation
       (`max_slippage_bps`, default 100). CLI `swap` gets `--max-price-impact`,
       and `--slippage-bps` is capped at 1000.
-      **Open:** confirm in Jupiter's docs whether `priceImpactPct` is a percent
-      or a fraction. It is treated as a percent for now (TODO in
-      `_check_price_impact`).
+      **Resolved (2026-09-27):** `priceImpactPct` is a fraction, not a
+      percent — confirmed against the live API (§3.1). The cap was inert
+      until this fix; see §3.1 for detail.
 - [x] SOL fee reserve (0.02 SOL) on buys and sells that spend SOL; buys are
       capped at the spendable balance. CLI `swap` quantity is parsed as
       `Decimal`.
 - [x] `Order` records the quote fill (`inAmount`/`outAmount` through
       `SwapResult`) plus `requested_quantity`/`requested_price`. Realized PnL
-      uses the exit quantity.
-      **Open:** reconcile against the on-chain balance delta (Phase 1 ledger).
-- [ ] Configurable Jupiter base URL and API key; move to `api.jup.ag`
-      (**postponed** until the owner reviews the API)
+      uses the exit quantity. Real mode reconciles against the on-chain
+      balance delta (`swap_costs.py`, §3.1); dry/paper still use the quote.
+- [x] Configurable Jupiter base URL and API key; moved to `api.jup.ag`
+      (§3.4)
 - [x] Graceful shutdown: `aclose()` on the client, RPC and provider;
       `CancelledError` handled; `swap` closes its clients
 - [x] `logging_config` moved to `trader/logging_config.py`; `httpx`/`urllib3`
