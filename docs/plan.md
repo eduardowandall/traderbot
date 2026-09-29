@@ -404,6 +404,42 @@ anything else so each later step has a clean diff.
     and each would otherwise write a row per attempt.
 - Keep: no in-memory cache of the last event hash (the CLI writes while the
   bot runs), and `mark_executed` / `record_fill` stay two commits.
+- **Design (2026-09-29):**
+  - `trader/ledger/` becomes one module per concern. They share one
+    connection through a small base class, and `Ledger` is the facade that
+    combines them, so no caller changes:
+    - `store.py`: `LedgerStore` (connection, pragmas, `_SCHEMA`,
+      `_ADDED_COLUMNS`, `_migrate`, `_write`), the event chain
+      (`_add_event`, `add_event`, `verify_chain`, `last_event_time`,
+      `_event_hash`) and the SQL helpers;
+    - `intents.py`: `IntentStore`, which records intents, marks their
+      status, attaches orders, resolves, and runs the queries (`get`,
+      `find_by_idempotency_key`, `list_intents`, `last_executed_trade`);
+    - `reports.py`: `AccountPnL`, plus `pnl_report`, `pnl_totals` and
+      `total_realized_pnl`;
+    - `policy_state.py`: `policy_state()` and its aggregates;
+    - `ledger.py`: `class Ledger(IntentStore, Reports, PolicyStateQueries)`
+      and `ledger_path`.
+  - `order_to_json` / `order_from_json` move to `trader/models/order.py`,
+    and the gateway, tests and CLI import them from there. The ledger keeps
+    importing them, since risk may import core.
+  - **Collapsing identical denials:**
+    - A denial is a repeat when the account's latest intent row, in
+      insertion order, is a `denied` row with the same side, mints and
+      reasons.
+    - A repeat increments that row's `repeat_count` (a new column added via
+      `_migrate`) and its `updated_at`, and inserts nothing. The read and
+      the write happen in one `BEGIN IMMEDIATE` transaction.
+    - A repeat writes **no event**. The first denial is in the hash chain,
+      and repeats moved no funds; `repeat_count` is informational and not
+      tamper-evident.
+    - Any other outcome on the account (an executed, failed or different
+      denied intent) ends the streak.
+    - `IntentRecord.repeat_count` is exposed, and `ledger list` shows
+      `(xN)`.
+    - The caller still gets its `PolicyDeniedError`. The collapsed intent's
+      id is not stored, which is harmless: denied intents never block a
+      retry.
 
 #### A6. Split `main.py` into `trader/cli/` — M
 - **Problem:** `main.py` is 535 lines of owner commands, and stage B adds
@@ -412,6 +448,24 @@ anything else so each later step has a clean diff.
   `ledger`, `paper`, `halt`/`resume`) into `trader/cli/` modules (app layer),
   as `trader/agent_api/cli.py` already does; `main.py` only mounts them. Owner
   output formatting (`_format_account_pnl`, `_record_costs`) goes with them.
+- **Design (2026-09-29):** `trader/cli/` (app layer, mapped in
+  `tests/test_architecture.py`):
+  - `common.py`: `warn`, `parse_decimal`, `parse_kwargs` (was the
+    name-mangled `__parse_kwargs`), `get_strategy_obj`,
+    `get_notification_svc` and `check_symbol`;
+  - `bot.py`: `run` and `backtest`;
+  - `swap.py`: `swap` and its output;
+  - `safety.py`: `halt` and `resume`;
+  - `ledger.py`: the `ledger list / verify / resolve` group;
+  - `pnl.py`: `pnl` and its formatting;
+  - `paper.py`: the `paper balance / reset` group;
+  - `__init__.py`: builds `app`, registers the commands, and mounts the
+    groups plus the agent `market` / `strategy` apps.
+
+  `main.py` keeps only `from trader.cli import app` and the
+  `setup_logging()` entrypoint, so `uv run main.py ...` and
+  `main_module.app` are unchanged. The command names, arguments and output
+  stay the same; tests patch the new module paths.
 
 #### A7. Legacy strategies clean-up — S
 - Replace the undocumented hard-coded `Decimal("5")` order cap in three
@@ -589,8 +643,8 @@ The unified entry point for humans and agents.
 | A2 Manual swaps as a bucket | **done** (2026-09-29) | 451 tests (8 new). `TradeService.swap` + `trading_service/manual.py`; `main._execute_swap` removed. Checked live in paper (isolated data dir): USDC->SOL and SOL->JUP recorded with costs, an over-limit swap denied |
 | A3 Split `AsyncAccount` | **done** (2026-09-29) | 454 tests (4 new); live suite green. `PositionBook` in `trader/models/book.py`; `AsyncAccount` 520 -> 427 lines; dead market-data passthroughs removed from the account, the provider and `ReplayQuoteClient` |
 | A4 USD value for every trade | **done** (2026-09-29) | 472 tests (18 new); live suite 6/6 (new: Price API vs websocket, fallback). `trader/market/prices.py` (`JupiterPriceOracle`, `usd_snapshot`), `with_sol_usd`, notional for every pair, websocket fallback. Strategy-side price units moved to B6 |
-| A5 Split the ledger | not started | |
-| A6 Split `main.py` | not started | |
+| A5 Split the ledger | **done** (2026-09-29) | 476 tests (4 new); live suite 6/6. `trader/ledger/{store,intents,reports,policy_state}.py` behind the `Ledger` facade (the old 663-line module is now 34 lines); order codec in `models/order.py`; identical consecutive denials collapse (`repeat_count`, `ledger list` shows `(xN)`) |
+| A6 Split `main.py` | **done** (2026-09-29) | 476 tests; live suite 6/6. `trader/cli/` (7 modules, app layer); `main.py` is 10 lines; same commands, arguments and output |
 | A7 Legacy strategies clean-up | not started | |
 | A8 Async notifications | not started | |
 | A9 Small clean-ups | not started | |

@@ -6,7 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 import main as main_module
-from main import __parse_kwargs, _get_notification_svc, _get_strategy_obj
+from trader.cli.common import get_notification_svc, get_strategy_obj, parse_kwargs
 from trader.ledger import Ledger, ledger_path
 from trader.models import SOLANA_MINTS, SwapResult
 from trader.models.intent import IntentStatus
@@ -23,33 +23,34 @@ from trader.trading_strategy import (
     StrategyComposer,
     TargetValueStrategy,
 )
+from trader.wiring import build_gateway
 
 
 def test_parse_kwargs_key_values():
-    assert __parse_kwargs(["sell_chance=20", "buy_chance=40"]) == {
+    assert parse_kwargs(["sell_chance=20", "buy_chance=40"]) == {
         "sell_chance": "20",
         "buy_chance": "40",
     }
 
 
 def test_parse_kwargs_bare_flag():
-    assert __parse_kwargs(["dry_run"]) == {"dry_run": True}
+    assert parse_kwargs(["dry_run"]) == {"dry_run": True}
 
 
 def test_get_strategy_obj_with_args():
-    strategy = _get_strategy_obj("random", "sell_chance=20 buy_chance=40")
+    strategy = get_strategy_obj("random", "sell_chance=20 buy_chance=40")
     assert isinstance(strategy, RandomStrategy)
     assert strategy.sell_chance == "20"
     assert strategy.buy_chance == "40"
 
 
 def test_get_strategy_obj_no_args_uses_defaults():
-    strategy = _get_strategy_obj("composer", None)
+    strategy = get_strategy_obj("composer", None)
     assert isinstance(strategy, StrategyComposer)
 
 
 def test_get_strategy_obj_target_value_with_args():
-    strategy = _get_strategy_obj(
+    strategy = get_strategy_obj(
         "target_value", "target_buy_price=10.0 target_profit_percent=1.0"
     )
     assert isinstance(strategy, TargetValueStrategy)
@@ -58,13 +59,15 @@ def test_get_strategy_obj_target_value_with_args():
 
 def test_get_strategy_obj_unknown_strategy_raises():
     with pytest.raises(NotImplementedStrategy):
-        _get_strategy_obj("does_not_exist", None)
+        get_strategy_obj("does_not_exist", None)
 
 
 def test_run_composer_without_strategy_args():
     mock_bot = mock.Mock()
     with (
-        mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
+        mock.patch(
+            "trader.cli.bot.AsyncWebsocketTradingBot", return_value=mock_bot
+        ) as bot_cls,
         mock.patch(
             "trader.wiring.AsyncJupiterProvider.on_chain", return_value=mock.Mock()
         ),
@@ -84,7 +87,9 @@ def test_run_composer_without_strategy_args():
 def test_run_random_with_strategy_args():
     mock_bot = mock.Mock()
     with (
-        mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
+        mock.patch(
+            "trader.cli.bot.AsyncWebsocketTradingBot", return_value=mock_bot
+        ) as bot_cls,
         mock.patch(
             "trader.wiring.AsyncJupiterProvider.on_chain", return_value=mock.Mock()
         ),
@@ -103,7 +108,7 @@ def test_run_random_with_strategy_args():
 
 
 def test_get_notification_svc_null():
-    svc = _get_notification_svc("null", None)
+    svc = get_notification_svc("null", None)
     assert isinstance(svc, NullNotificationService)
 
 
@@ -111,11 +116,11 @@ def test_get_notification_svc_telegram_without_args_raises(monkeypatch):
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     with pytest.raises(ValueError, match="chat_id e token"):
-        _get_notification_svc("telegram", None)
+        get_notification_svc("telegram", None)
 
 
 def test_get_notification_svc_telegram_with_args():
-    svc = _get_notification_svc("telegram", "chat_id=123 token=abc")
+    svc = get_notification_svc("telegram", "chat_id=123 token=abc")
     assert isinstance(svc, TelegramNotificationService)
     assert svc.chat_id == "123"
     assert svc.token == "abc"
@@ -245,7 +250,7 @@ def test_get_notification_svc_telegram_from_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "999")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-token")
 
-    svc = _get_notification_svc("telegram", None)
+    svc = get_notification_svc("telegram", None)
 
     assert isinstance(svc, TelegramNotificationService)
     assert svc.chat_id == "999"
@@ -257,7 +262,7 @@ def test_get_notification_svc_telegram_missing_token_raises(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "999")
 
     with pytest.raises(ValueError, match="chat_id e token"):
-        _get_notification_svc("telegram", None)
+        get_notification_svc("telegram", None)
 
 
 def test_swap_is_recorded_in_the_ledger():
@@ -350,7 +355,9 @@ def test_run_paper_needs_no_private_key(monkeypatch):
     monkeypatch.delenv("SOLANA_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("HELIUS_RPC_URL", raising=False)
     mock_bot = mock.Mock()
-    with mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls:
+    with mock.patch(
+        "trader.cli.bot.AsyncWebsocketTradingBot", return_value=mock_bot
+    ) as bot_cls:
         result = CliRunner().invoke(
             main_module.app,
             ["run", "paper", "SOL-USDC", "random", "buy_chance=1 sell_chance=1"],
@@ -372,7 +379,9 @@ def test_run_paper_needs_no_private_key(monkeypatch):
 def test_run_record_ticks_passes_recorder(tmp_path):
     mock_bot = mock.Mock()
     with (
-        mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
+        mock.patch(
+            "trader.cli.bot.AsyncWebsocketTradingBot", return_value=mock_bot
+        ) as bot_cls,
     ):
         result = CliRunner().invoke(
             main_module.app,
@@ -434,11 +443,24 @@ def test_backtest_requires_a_source():
 
 def test_paper_uses_its_own_policy_section():
     policy_file().write_text("[paper.limits]\nmax_trade_usd = 1000\n", encoding="utf-8")
-    paper = main_module.build_gateway(RunningMode.PAPER)
-    dry = main_module.build_gateway(RunningMode.DRY)
+    paper = build_gateway(RunningMode.PAPER)
+    dry = build_gateway(RunningMode.DRY)
     try:
         assert paper.policy.max_trade_usd == 1000
         assert dry.policy.max_trade_usd == 25
     finally:
         paper.ledger.close()
         dry.ledger.close()
+
+
+def test_repeated_denials_show_as_one_ledger_line():
+    for _ in range(3):
+        denied, _, _ = _invoke_swap(["dry", "USDC", "SOL", "26"], policy=None)
+        assert denied.exit_code == 1
+
+    listed = CliRunner().invoke(main_module.app, ["ledger", "list", "dry"])
+
+    assert listed.exit_code == 0
+    lines = [line for line in listed.stdout.splitlines() if "denied" in line]
+    assert len(lines) == 1
+    assert "(x3)" in lines[0]

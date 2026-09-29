@@ -8,11 +8,12 @@ from live_helpers import LOOSE_PAPER_POLICY, invoke
 from trader.backtest import Backtester, TickRecorder, load_ticks
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.bot.config import BotConfig
-from trader.ledger import Ledger, ledger_path, order_from_json
+from trader.ledger import Ledger, ledger_path
 from trader.market import JupiterMarketData
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentStatus
 from trader.models.mode import RunningMode
+from trader.models.order import order_from_json
 from trader.notification.notification_service import NullNotificationService
 from trader.paths import policy_file
 from trader.strategies_registry import get_strategy_factory

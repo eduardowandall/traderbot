@@ -43,7 +43,8 @@ then later sells all of it back.
 ## Step 3 — The folder map
 
 ```
-main.py                         CLI (Typer): run, swap, backtest, pnl, halt, resume, ledger ..., paper ..., market ..., strategy ...
+main.py                         entrypoint: `from trader.cli import app` + logging
+trader/cli/                     owner CLI (Typer): bot.py (run, backtest), swap.py, safety.py (halt, resume), ledger.py, pnl.py, paper.py, common.py
 policy.toml / policy.example.toml   owner's risk policy (TOML)
 trader/
   __init__.py                   empty on purpose: every `import trader.x` loads it
@@ -84,7 +85,7 @@ trader/
   execution/gateway.py          TradeGateway (the only path to a swap and to the ledger) + KillSwitch
   execution/fills.py            execute_trade: gateway, then costs -> Fill (every trade)
   policy/policy.py              Policy, pure evaluate(), TOML loader
-  ledger/ledger.py              Ledger (SQLite): intents, events, PnL reports, restore
+  ledger/                       Ledger (SQLite) facade over store.py (schema, event chain), intents.py, reports.py, policy_state.py
   providers/jupiter/
     async_jupiter_client.py     Jupiter HTTP (quote, swap tx, candles) + price websocket
     candles.py                  raw datapi candles -> TickerData (shared by market data and the provider)
@@ -104,9 +105,9 @@ docs/                           plan.md (roadmap), this file, examples/
 
 Example: `uv run main.py run paper SOL-USDC random 'sell_chance=20 buy_chance=40'`
 
-`main.run` builds two separate sides and connects them:
+`run` (`trader/cli/bot.py`) builds two separate sides and connects them:
 
-1. **The strategy.** `_get_strategy_obj(name, args)` looks the name up in
+1. **The strategy.** `get_strategy_obj(name, args)` (`trader/cli/common.py`) looks the name up in
    `STRATEGIES` (`trader/strategies_registry.py`) and builds it from the
    `key=value` arguments. A spec must match the pair.
 2. **The execution side.** `build_trade_service(mode)` (`trader/wiring.py`)

@@ -10,10 +10,11 @@ from typer.testing import CliRunner
 import main as main_module
 from trader.async_account import AsyncAccount
 from trader.execution import KillSwitch, TradeGateway
-from trader.ledger import Ledger, ledger_path, order_from_json
-from trader.ledger.ledger import _SCHEMA
+from trader.ledger import Ledger, ledger_path
+from trader.ledger.store import _SCHEMA
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentSide, IntentStatus, PolicyDecision, TradeIntent
+from trader.models.order import order_from_json
 from trader.paper import SimulatedWallet, paper_provider
 from trader.paths import data_dir
 from trader.policy import Policy
@@ -189,7 +190,7 @@ def test_resolve_failed_backfills_fee():
         return_value=SimpleNamespace(meta=SimpleNamespace(fee=7000))
     )
     rpc.aclose = AsyncMock()
-    with mock.patch("main.AsyncRPCClient", return_value=rpc):
+    with mock.patch("trader.cli.ledger.AsyncRPCClient", return_value=rpc):
         result = CliRunner().invoke(
             main_module.app,
             ["ledger", "resolve", "real", intent.intent_id, "failed", "--note", "x"],

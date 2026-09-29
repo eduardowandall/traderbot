@@ -36,7 +36,7 @@ uv run main.py market symbols | market price SOL | market candles SOL --n 100 | 
 uv run main.py strategy schema | strategy validate spec.json [--mode paper] | strategy backtest spec.json [--candles 1000 | --ticks FILE]
 ```
 - `{"ok": true, ...}` or `{"ok": false, "errors": [{"path","msg"}]}` with exit code 1. Decimals are strings.
-- The commands live in `trader/agent_api/cli.py` (`main.py` only mounts them), and they are read-only: no key, no ledger writes.
+- The commands live in `trader/agent_api/cli.py` (`trader/cli/__init__.py` mounts them), and they are read-only: no key, no ledger writes.
 - Tests swap `cli.MARKET_DATA` for a fake.
 - `botconfigs.example.yaml` is a WIP not wired into the code (no YAML loader exists); config comes from CLI args only.
 
@@ -51,7 +51,7 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - Runs as `TradeService.swap` in the `manual` bucket (ledger account `<mode>:manual`; older ledgers also have `<mode>:swap` rows): same lock, gateway and `execute_trade` pipeline as strategies, with the fill and costs recorded (`trader/trading_service/manual.py`). A denied/rejected/failed swap prints reasons to stderr and exits 1.
 
 ## Architecture
-- `main.py` — Typer CLI (`run`, `swap`, `backtest`, `halt`/`resume`, `ledger`, `paper`, `market`, `strategy`). It only parses arguments; the per-mode wiring lives in `trader/wiring.py` (`build_provider`, `build_gateway`, `build_trade_service`, `keypair_from_env`).
+- `main.py` — entrypoint only (`from trader.cli import app` + logging). The owner commands live in `trader/cli/` (app layer), one module per group: `bot.py` (`run`, `backtest`), `swap.py`, `safety.py` (`halt`/`resume`), `ledger.py`, `pnl.py`, `paper.py`, shared helpers in `common.py`; `__init__.py` builds `app` and mounts the agent `market`/`strategy` apps. Tests patch those module paths (e.g. `trader.cli.bot.AsyncWebsocketTradingBot`). Commands only parse arguments; the per-mode wiring lives in `trader/wiring.py` (`build_provider`, `build_gateway`, `build_trade_service`, `keypair_from_env`).
 - `trader/bot/` is the strategy side and knows no mode, key, provider or ledger. `BotConfig(name, symbol, strategy, market: MarketData, trader: TradeClient, notifier, on_tick)`. The loop is: price → `trader.bucket()` → `strategy.on_market_refresh(price, None, available_usd, position)` → `trader.submit(OrderRequest)` → `OrderReply`. `denied`/`rejected` replies pause orders for 30s; `error` goes through the backoff. It logs under the `bot` logger.
 - `trader/trading_service/` is the seam.
   - `protocol.py` holds the plain data: `BucketSnapshot`, `OrderRequest`, `OrderReply`.
@@ -70,7 +70,7 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - `trader/trading_strategy.py` — strategy base + implementations + `StrategyComposer`.
 - `trader/execution/gateway.py` — `TradeGateway.submit(intent, execute)`: idempotency → `policy.evaluate` → ledger → execute. It is the only path to a swap and to the ledger for the account, the service and the CLI. It also provides `restore(account)`, `record_fill(...)`, `add_event(...)` and `for_mode(mode, policy=None)`; `halt` and `paper reset` pass `Policy()` so that a broken `policy.toml` never stops them.
 - `trader/policy/policy.py` — pure `evaluate()` + TOML loader (`policy.toml` / `TRADER_POLICY_FILE`); defaults deny real mode. `load_policy(mode=...)` merges `[trading]`/`[limits]` with `[<mode>.trading]`/`[<mode>.limits]` (real/dry/paper); all sections are validated regardless of mode.
-- `trader/ledger/ledger.py` — SQLite `.data/ledger-<mode>.sqlite3`; hash-chained `events`; positions/PnL restored on startup.
+- `trader/ledger/` — SQLite `.data/ledger-<mode>.sqlite3`; `Ledger` (`ledger.py`) is a facade over `store.py` (connection, schema, `_migrate`, hash-chained `events`), `intents.py` (lifecycle, queries; identical consecutive denials collapse into one row with `repeat_count` and no extra event), `reports.py` (`AccountPnL`) and `policy_state.py`. Positions/PnL restored on startup. The order JSON codec is `trader/models/order.py` (`order_to_json`/`order_from_json`).
 - `trader/paths.py` — `data_dir()` (`TRADER_DATA_DIR`, else `<project root>/.data`) and `policy_file()` (`TRADER_POLICY_FILE`, else `<project root>/policy.toml`). All state (ledger, `HALT`, paper wallet) derives from these, never from the cwd, so `halt`/`resume`/`ledger resolve` reach the running bot from any directory. Relative env values resolve against the project root. Read per call, so env changes apply after import. Never use a bare `Path(".data")`.
 - `trader/paper/` — `SimulatedWallet` + `SimulatedExecutor` + `paper_provider()`. `trader/backtest/` — `TickRecorder`/`load_ticks` + `Backtester`, which runs on `TradeService(TradeGateway.in_memory())` + `LocalTradeClient` (in-memory ledger, `Policy.unlimited()`, ignores the live `HALT`) with synthetic quotes via `ReplayQuoteClient` (optional `budget_usd`).
 - `trader/logging_config.py` — console filter shows only `bot`/`trader.trading_strategy` at DEBUG (others WARNING); file logs → `.logs/`.
@@ -103,8 +103,9 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
     `trader/models/costs.py`.
   - Never subtract LP fees or slippage from the actual amounts; they are
     already in them.
-  - Ledger columns are added by `_migrate()` (ALTER TABLE). Don't put new
-    columns only in `_SCHEMA`.
+  - Ledger columns are added by `_ADDED_COLUMNS` / `_migrate()` in
+    `trader/ledger/store.py` (ALTER TABLE). Don't put new columns only in
+    `_SCHEMA`.
   - The Windows console is cp1252: avoid non-Latin-1 symbols in
     log/CLI output (use `[!]`).
 - Docs: `docs/architecture.md` is a step-by-step tour of the code (read it first). `docs/plan.md` is the only roadmap: goal, progress score, target architecture (agents and the owner author strategy specs; strategy-runners talk to a per-mode trade-runner), stage A refactorings before stage B features, known issues and the decision log. Keep its progress table (§6) and score (§2) current, and add new backlog items there. Plan in `docs/` first, then implement.

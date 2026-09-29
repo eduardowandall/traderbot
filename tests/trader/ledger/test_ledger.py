@@ -5,14 +5,15 @@ from decimal import Decimal
 import pytest
 from factories import make_intent
 
-import trader.ledger.ledger as ledger_module
-from trader.ledger import Ledger, order_from_json, order_to_json
+import trader.ledger.store as ledger_module
+from trader.ledger import Ledger
 from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.models.intent import (
     IntentSide,
     IntentStatus,
     PolicyDecision,
 )
+from trader.models.order import order_from_json, order_to_json
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
@@ -240,3 +241,43 @@ def test_persists_across_connections(tmp_path):
     assert record and record.status == IntentStatus.EXECUTED
     assert second.verify_chain() is None
     second.close()
+
+
+class TestRepeatedDenials:
+    TOO_BIG = PolicyDecision(False, ("trade de 50.00 USD acima do limite 25 USD",))
+
+    def _events(self, ledger):
+        return ledger.conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+
+    def test_identical_denials_collapse_into_one_row(self, ledger):
+        ledger.record_intent(make_intent(), self.TOO_BIG)
+        events = self._events(ledger)
+
+        ledger.record_intent(make_intent(), self.TOO_BIG)
+        ledger.record_intent(make_intent(), self.TOO_BIG)
+
+        (record,) = ledger.list_intents()
+        assert record.status == IntentStatus.DENIED
+        assert record.repeat_count == 2
+        assert self._events(ledger) == events  # repetições não viram eventos
+        assert ledger.verify_chain() is None
+
+    def test_other_reasons_sides_and_accounts_are_new_rows(self, ledger):
+        other = PolicyDecision(False, ("limite de 10 trades por hora atingido",))
+        ledger.record_intent(make_intent(), self.TOO_BIG)
+        ledger.record_intent(make_intent(), other)
+        ledger.record_intent(make_intent(side=IntentSide.SWAP), other)
+        ledger.record_intent(make_intent(account="dry:JUP-USDC"), other)
+
+        records = ledger.list_intents()
+        assert len(records) == 4
+        assert all(r.repeat_count == 0 for r in records)
+
+    def test_any_other_outcome_ends_the_streak(self, ledger):
+        ledger.record_intent(make_intent(), self.TOO_BIG)
+        _executed(ledger, make_intent())
+        ledger.record_intent(make_intent(), self.TOO_BIG)
+
+        denied = [r for r in ledger.list_intents() if r.status == IntentStatus.DENIED]
+        assert len(denied) == 2
+        assert all(r.repeat_count == 0 for r in denied)

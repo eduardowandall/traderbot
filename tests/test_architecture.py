@@ -64,6 +64,7 @@ PACKAGES: dict[str, str] = {
     "trader.notification": "app",
     "trader.agent_api": "app",
     "trader.wiring": "app",
+    "trader.cli": "app",
 }
 
 # módulos fora do lugar: a camada real difere da do pacote. Cada um tem um

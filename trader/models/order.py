@@ -1,10 +1,11 @@
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum, auto
 from typing import Any
 
-from trader.models.costs import TradeCosts
+from trader.models.costs import TradeCosts, costs_from_dict
 
 
 class OrderSide(StrEnum):
@@ -72,3 +73,37 @@ class Order:
             and self.side == value.side
             and self.timestamp == value.timestamp
         )
+
+
+# --- JSON (ledger, protocolo de fio) ----------------------------------------
+
+_DECIMAL_FIELDS = (
+    "quantity",
+    "price",
+    "requested_quantity",
+    "requested_price",
+    "fill_price",
+    "quote_amount",
+    "quote_usd",
+    "sol_usd",
+    "sol_in_quote",
+)
+
+
+def _json_default(value):
+    return value.isoformat() if isinstance(value, datetime) else str(value)
+
+
+def order_to_json(order: Order) -> str:
+    return json.dumps(asdict(order), default=_json_default, sort_keys=True)
+
+
+def order_from_json(data: str) -> Order:
+    raw = json.loads(data)
+    for key in _DECIMAL_FIELDS:
+        if raw.get(key) is not None:
+            raw[key] = Decimal(raw[key])
+    raw["costs"] = costs_from_dict(raw.get("costs"))
+    raw["side"] = OrderSide(raw["side"])
+    raw["timestamp"] = datetime.fromisoformat(raw["timestamp"])
+    return Order(**raw)

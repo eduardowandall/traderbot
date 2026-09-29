@@ -98,3 +98,5 @@ class IntentRecord:
     costs_source: str | None = None
     quote_mint: str | None = None
     net_pnl_quote: Decimal | None = None
+    # recusas idênticas seguidas somadas nesta linha (além da primeira)
+    repeat_count: int = 0
