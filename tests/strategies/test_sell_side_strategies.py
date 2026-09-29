@@ -34,6 +34,7 @@ def _position(quantity="0.5", price="100"):
 
 class AlwaysSide(TradingStrategy):
     def __init__(self, side):
+        super().__init__()
         self.side = side
 
     def calculate_quantity(self, balance, price):

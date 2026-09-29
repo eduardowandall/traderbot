@@ -16,6 +16,9 @@ class OrderSide(StrEnum):
 class OrderSignal:
     side: OrderSide
     quantity: Decimal
+    # por que a estratégia sinalizou (ex: condições que dispararam); vai para
+    # o `rationale` da intenção no ledger
+    rationale: str | None = None
 
 
 @dataclass

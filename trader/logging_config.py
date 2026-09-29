@@ -65,7 +65,12 @@ class BotLoggerFileHandler(logging.FileHandler):
 
 
 class ConsoleFilter(logging.Filter):
-    ALLOWED_LOGGERS = ["bot", "trader.trading_strategy"]
+    # sinais das estratégias (legadas e specs) aparecem no console em DEBUG
+    ALLOWED_LOGGERS = [
+        "bot",
+        "trader.trading_strategy",
+        "trader.strategy_spec.strategy",
+    ]
 
     def __init__(self, param=None):
         self.param = param

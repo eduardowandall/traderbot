@@ -8,6 +8,7 @@ from trader.trading_strategy import StrategyComposer, TradingStrategy
 
 class FakeStrategy(TradingStrategy):
     def __init__(self, side: OrderSide):
+        super().__init__()
         self.count = 0
         self.side = side
 

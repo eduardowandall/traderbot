@@ -1,8 +1,9 @@
 """Backtest determinístico: reproduz ticks gravados por uma estratégia.
 
-Usa o mesmo caminho de execução do paper trading (`AsyncAccount` →
-`PaperJupiterProvider` → `SimulatedWallet`); só a quote é sintética, calculada
-a partir do preço do tick com uma taxa (`fee_bps`). A estratégia recebe o
+Usa o mesmo caminho de execução do paper trading (`TradeService` ->
+`AsyncJupiterProvider` + `SimulatedExecutor` -> `SimulatedWallet`); só a
+quote é sintética, calculada a partir do preço do tick com uma taxa
+(`fee_bps`). A estratégia recebe o
 relógio do replay e uma semente fixa, então a mesma entrada gera sempre o
 mesmo resultado.
 
@@ -11,23 +12,43 @@ ser uma stablecoin de dólar (ex: SOL-USDC).
 """
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from trader.async_account import AsyncAccount
 from trader.backtest.ticks import Tick
 from trader.models import SOLANA_MINTS, Mint, OrderSide
 from trader.models.costs import REPLAY
-from trader.paper.provider import PaperJupiterProvider
+from trader.paper.provider import paper_provider
 from trader.paper.wallet import SimulatedWallet
-from trader.providers.jupiter.async_jupiter_svc import SwapRejectedError
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.trading_service.local import LocalTradeClient
+from trader.trading_service.protocol import OrderRequest
+from trader.trading_service.service import TradeService
 from trader.trading_strategy import TradingStrategy
 
 logger = logging.getLogger(__name__)
 
 BPS = Decimal("10000")
+
+# loggers das estratégias: silenciados durante o replay (milhares de ticks
+# viram milhares de linhas; o resultado já resume o que aconteceu)
+STRATEGY_LOGGERS = ("trader.trading_strategy", "trader.strategy_spec")
+
+
+@contextmanager
+def quiet_strategy_logs() -> Iterator[None]:
+    loggers = [logging.getLogger(name) for name in STRATEGY_LOGGERS]
+    previous = [lg.level for lg in loggers]
+    for lg in loggers:
+        lg.setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        for lg, level in zip(loggers, previous, strict=True):
+            lg.setLevel(level)
 
 
 class ReplayQuoteClient:
@@ -131,6 +152,22 @@ class BacktestResult:
         return "\n".join(lines)
 
 
+@dataclass
+class _Run:
+    """Acumuladores de um replay."""
+
+    trades: list[BacktestTrade] = field(default_factory=list)
+    rejected: int = 0
+    peak: Decimal = Decimal("0")
+    max_drawdown: Decimal = Decimal("0")
+
+    def track(self, equity: Decimal) -> None:
+        self.peak = max(self.peak, equity)
+        if self.peak > 0:
+            drawdown = (self.peak - equity) / self.peak * 100
+            self.max_drawdown = max(self.max_drawdown, drawdown)
+
+
 class Backtester:
     def __init__(
         self,
@@ -140,6 +177,8 @@ class Backtester:
         initial_balance: Decimal,
         fee_bps: Decimal = Decimal("30"),
         seed: int | str = 0,
+        # teto do bucket, como ao vivo (prejuízo realizado reduz o disponível)
+        budget_usd: Decimal | None = None,
     ):
         self.token, self.quote = SOLANA_MINTS.get_pair(symbol)
         if not self.quote.is_usd_stable:
@@ -155,72 +194,25 @@ class Backtester:
         self.initial_balance = initial_balance
         self.fee_bps = fee_bps
         self.seed = seed
+        self.budget_usd = budget_usd
 
     async def run(self) -> BacktestResult:
-        client = ReplayQuoteClient(self.quote, self.fee_bps)
-        wallet = SimulatedWallet(initial={self.quote.symbol: self.initial_balance})
-        provider = PaperJupiterProvider(
-            wallet,
-            jupiter_client=client,
-            # a quote sintética não tem impacto de preço; taxas de rede em SOL
-            # não se aplicam (a carteira do backtest só tem a stablecoin)
-            max_price_impact_pct=None,
-            fee_lamports=0,
-            account_rent_lamports=0,
-            cost_source=REPLAY,  # custos modelados em fee_bps
-        )
-        account = AsyncAccount(
-            provider,
-            self.quote.pubkey,
-            self.token.pubkey,
-            # sem taxas de rede no replay: não precisa reservar SOL
-            sol_fee_reserve=Decimal("0"),
-            source="backtest",
-        )
+        with quiet_strategy_logs():
+            return await self._replay()
+
+    async def _replay(self) -> BacktestResult:
+        client, wallet, trader = self._venue()
+        await trader.open()
         self.strategy.set_clock(lambda: client.now)
         self.strategy.seed(self.seed)
 
-        trades: list[BacktestTrade] = []
-        rejected = 0
-        peak = Decimal("0")
-        max_drawdown = Decimal("0")
-
+        run = _Run()
         for tick in self.ticks:
             client.tick = tick
-            balance = await account.get_balance(self.quote.pubkey)
-            position = account.get_position()
-            signal = self.strategy.on_market_refresh(
-                tick.price, None, balance, position
-            )
-            if signal:
-                pnl_before = account.get_total_realized_pnl()
-                try:
-                    order = await account.place_order(
-                        tick.price, signal.side, signal.quantity
-                    )
-                    realized = (
-                        account.get_total_realized_pnl() - pnl_before
-                        if order.side == OrderSide.SELL
-                        else None
-                    )
-                    trades.append(
-                        BacktestTrade(
-                            tick.timestamp,
-                            order.side,
-                            order.quantity,
-                            order.price,
-                            realized,
-                        )
-                    )
-                except (ValueError, SwapRejectedError, RuntimeError) as ex:
-                    rejected += 1
-                    logger.debug(f"sinal recusado em {tick.timestamp}: {ex}")
+            await self._step(trader, tick, run)
+            run.track(self._equity(wallet, tick.price))
 
-            equity = self._equity(wallet, tick.price)
-            peak = max(peak, equity)
-            if peak > 0:
-                max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
-
+        final = await trader.bucket()
         return BacktestResult(
             symbol=self.symbol,
             start=self.ticks[0].timestamp,
@@ -228,11 +220,62 @@ class Backtester:
             ticks=len(self.ticks),
             initial_equity=self.initial_balance,
             final_equity=self._equity(wallet, self.ticks[-1].price),
-            max_drawdown_pct=max_drawdown,
-            realized_pnl=account.get_total_realized_pnl(),
-            rejected_signals=rejected,
-            open_position=account.get_position() is not None,
-            trades=trades,
+            max_drawdown_pct=run.max_drawdown,
+            realized_pnl=final.realized_usd,
+            rejected_signals=run.rejected,
+            open_position=final.position is not None,
+            trades=run.trades,
+        )
+
+    def _venue(self) -> tuple[ReplayQuoteClient, SimulatedWallet, LocalTradeClient]:
+        """Mesmo caminho do paper trading: TradeService -> provider -> carteira."""
+        client = ReplayQuoteClient(self.quote, self.fee_bps)
+        wallet = SimulatedWallet(initial={self.quote.symbol: self.initial_balance})
+        provider = paper_provider(
+            wallet,
+            jupiter_client=client,
+            # a quote sintética não tem impacto de preço; taxas de rede em SOL
+            # não se aplicam (a carteira do backtest só tem a stablecoin), e
+            # sem taxas o executor não reserva SOL
+            max_price_impact_pct=None,
+            fee_lamports=0,
+            account_rent_lamports=0,
+            cost_source=REPLAY,  # custos modelados em fee_bps
+        )
+        # sem gateway: nada de ledger nem política; ordens no horário do tick
+        service = TradeService(provider, gateway=None, clock=lambda: client.now)
+        trader = LocalTradeClient(
+            service,
+            self.symbol,
+            self.quote.mint,
+            self.token.mint,
+            budget_usd=self.budget_usd,
+            source="backtest",
+        )
+        return client, wallet, trader
+
+    async def _step(self, trader: LocalTradeClient, tick: Tick, run: _Run) -> None:
+        snapshot = await trader.bucket()
+        signal = self.strategy.on_market_refresh(
+            tick.price, None, snapshot.available_usd, snapshot.position
+        )
+        if signal is None:
+            return
+        reply = await trader.submit(
+            OrderRequest(signal.side, signal.quantity, tick.price, signal.rationale)
+        )
+        order = reply.order
+        if order is None:
+            run.rejected += 1
+            logger.debug(f"sinal recusado em {tick.timestamp}: {reply}")
+            return
+        realized = None
+        if order.side == OrderSide.SELL:
+            realized = (await trader.bucket()).realized_usd - snapshot.realized_usd
+        run.trades.append(
+            BacktestTrade(
+                tick.timestamp, order.side, order.quantity, order.price, realized
+            )
         )
 
     def _equity(self, wallet: SimulatedWallet, price: Decimal) -> Decimal:

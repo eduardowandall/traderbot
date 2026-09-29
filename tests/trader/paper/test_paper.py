@@ -7,8 +7,9 @@ from trader.async_account import AsyncAccount
 from trader.models import SOLANA_MINTS
 from trader.paper import (
     InsufficientFundsError,
-    PaperJupiterProvider,
+    SimulatedExecutor,
     SimulatedWallet,
+    paper_provider,
     parse_balances,
 )
 from trader.providers import JupiterQuoteResponse
@@ -91,7 +92,7 @@ class TestSimulatedWallet:
 def _provider(wallet, quote):
     client = AsyncMock(spec=AsyncJupiterClient)
     client.get_quote = AsyncMock(return_value=quote)
-    return PaperJupiterProvider(wallet, jupiter_client=client)
+    return paper_provider(wallet, jupiter_client=client)
 
 
 class TestPaperProvider:
@@ -134,11 +135,11 @@ class TestPaperProvider:
         }
 
     async def test_never_touches_rpc_or_keys(self):
+        # a execução simulada não tem RPC nem chave para usar, por construção
         provider = _provider(SimulatedWallet(), None)
-        with pytest.raises(RuntimeError, match="paper"):
-            await provider.rpc_client.send_transaction(None)  # type: ignore[arg-type]
-        with pytest.raises(RuntimeError, match="sem chave"):
-            _ = provider.pubkey
+        assert isinstance(provider.executor, SimulatedExecutor)
+        for attr in ("rpc_client", "keypair", "pubkey"):
+            assert not hasattr(provider.executor, attr)
         await provider.aclose()  # não falha
 
     async def test_full_round_trip_through_account(self):
@@ -152,7 +153,7 @@ class TestPaperProvider:
                 _quote(SOL.mint, SOL.ui_to_raw("0.1"), USDC.mint, USDC.ui_to_raw("11")),
             ]
         )
-        provider = PaperJupiterProvider(wallet, jupiter_client=client)
+        provider = paper_provider(wallet, jupiter_client=client)
         account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey)
 
         await account.buy(Decimal("100"), Decimal("0.1"))

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "sol-dip",
+  "agent_id": "example",
+  "rationale": "Compra SOL em queda de 2% da maxima de 30 barras com RSI baixo; sai com trailing stop de 3%, alvo de 4% ou 4h.",
+  "symbol": "SOL-USDC",
+  "timeframe": "1_MINUTE",
+  "entry": {
+    "mode": "all",
+    "conditions": [
+      {"type": "dip_from_high", "window": 30, "pct": 2},
+      {"type": "rsi_below", "period": 14, "value": 35}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "trailing_stop", "pct": 3},
+    "mode": "any",
+    "conditions": [
+      {"type": "take_profit", "pct": 4},
+      {"type": "max_hold", "minutes": 240}
+    ]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 20},
+  "budget_usd": 50,
+  "max_loss_usd": 10,
+  "cooldown_minutes": 30,
+  "expires_at": "2099-01-01T00:00:00Z"
+}

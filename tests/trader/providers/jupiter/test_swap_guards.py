@@ -22,7 +22,7 @@ def _quote(price_impact_pct="0.001"):
 
 
 def _provider(**kwargs):
-    return AsyncJupiterProvider(
+    return AsyncJupiterProvider.on_chain(
         Keypair(),
         rpc_client=AsyncMock(spec=AsyncRPCClient),
         jupiter_client=AsyncMock(spec=AsyncJupiterClient),
@@ -58,7 +58,7 @@ class TestPriceImpact:
         with pytest.raises(SwapRejectedError):
             await provider.swap("in", "out", 1000)
         provider.jupiter_client.get_quote.assert_awaited_once()
-        provider.rpc_client.send_transaction.assert_not_awaited()  # type: ignore[attr-defined]
+        provider.executor.rpc_client.send_transaction.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 class TestSlippageCeiling:
@@ -79,11 +79,13 @@ class TestSlippageCeiling:
 async def test_do_swap_returns_quote_amounts():
     provider = _provider()
     provider._get_quote_with_route = AsyncMock(return_value=_quote())
-    provider._get_swap_transaction = AsyncMock()
-    provider._get_signed_transaction = AsyncMock()
+    provider.executor._get_swap_transaction = AsyncMock()
+    provider.executor._get_signed_transaction = AsyncMock()
     resp = AsyncMock()
     resp.to_json = lambda: '{"result": "sig"}'
-    provider._send_transaction_and_wait_for_confirmation = AsyncMock(return_value=resp)
+    provider.executor._send_transaction_and_wait_for_confirmation = AsyncMock(
+        return_value=resp
+    )
 
     result = await provider._do_swap("in", "out", 1000)
 
@@ -93,9 +95,9 @@ async def test_do_swap_returns_quote_amounts():
 async def test_aclose_closes_all_clients_even_if_one_fails():
     provider = _provider()
     provider.jupiter_client.aclose = AsyncMock(side_effect=RuntimeError("boom"))
-    provider.rpc_client.aclose = AsyncMock()
+    provider.executor.rpc_client.aclose = AsyncMock()
 
     await provider.aclose()
 
     provider.jupiter_client.aclose.assert_awaited_once()
-    provider.rpc_client.aclose.assert_awaited_once()
+    provider.executor.rpc_client.aclose.assert_awaited_once()

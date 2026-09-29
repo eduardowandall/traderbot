@@ -4,7 +4,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import make_intent, open_ledger
+from factories import make_intent, mock_provider, open_ledger
 
 from trader.async_account import AsyncAccount
 from trader.execution import (
@@ -23,7 +23,6 @@ from trader.models.intent import (
     TradeIntent,
 )
 from trader.policy import Policy
-from trader.providers import AsyncJupiterProvider
 from trader.providers.jupiter.async_jupiter_svc import TransactionSubmittedError
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -161,7 +160,7 @@ def test_kill_switch_fails_closed(tmp_path, monkeypatch):
 
 
 def _account(gateway, usdc="1000", sol="1"):
-    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider = mock_provider()
     provider.get_account_balance = AsyncMock(
         return_value=[
             MintBalance(mint=USDC.pubkey, available=Decimal(usdc)),
@@ -289,7 +288,7 @@ def test_order_timestamp_is_preserved_by_restore(tmp_path):
     ledger.mark_executed(intent.intent_id, RESULT)
     ledger.attach_order(intent.intent_id, order)
     account = AsyncAccount(
-        AsyncMock(spec=AsyncJupiterProvider),
+        mock_provider(),
         USDC.pubkey,
         SOL.pubkey,
         gateway=TradeGateway(ledger, Policy(), KillSwitch(tmp_path / "H"), False),
@@ -306,7 +305,7 @@ async def test_non_stablecoin_input_has_unknown_notional(tmp_path):
     # USDC-SOL: gasta SOL; quantity*price misturaria SOL com USD e subestimaria
     # o valor pelo preço do SOL, furando max_trade_usd
     gateway = _gateway(tmp_path)
-    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider = mock_provider()
     provider.get_account_balance = AsyncMock(
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("1"))]
     )

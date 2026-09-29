@@ -10,14 +10,19 @@ Fluxo de `submit`:
 
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
-from trader.ledger import Ledger
-from trader.models.intent import IntentRecord, TradeIntent
-from trader.models.order import SwapResult
+from trader.ledger import Ledger, ledger_path, order_from_json
+from trader.ledger.ledger import AccountPnL
+from trader.models.costs import PnLResult
+from trader.models.errors import TransactionSubmittedError
+from trader.models.intent import IntentRecord, IntentSide, TradeIntent
+from trader.models.mode import RunningMode
+from trader.models.order import Order, SwapResult
 from trader.paths import data_dir
-from trader.policy import Policy, evaluate
-from trader.providers.jupiter.async_jupiter_svc import TransactionSubmittedError
+from trader.policy import Policy, evaluate, load_policy
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +65,26 @@ class KillSwitch:
         self.path.unlink(missing_ok=True)
 
 
+def _open_entry(last: IntentRecord | None) -> Order | None:
+    """A compra da última perna executada, se a posição ainda está aberta."""
+    if last is None or last.intent.side != IntentSide.BUY or not last.order_json:
+        return None
+    return order_from_json(last.order_json)
+
+
+@dataclass(frozen=True)
+class AccountState:
+    """O que o ledger sabe de uma conta: PnL realizado e a posição aberta."""
+
+    realized_usd: Decimal
+    totals: AccountPnL
+    open_entry: Order | None = None  # ordem de compra da posição aberta
+    entry_intent_id: str | None = None
+
+
 class TradeGateway:
+    """Único caminho até o ledger para quem executa (conta, serviço, CLI)."""
+
     def __init__(
         self,
         ledger: Ledger,
@@ -72,6 +96,59 @@ class TradeGateway:
         self.policy = policy
         self.kill_switch = kill_switch
         self.real_mode = real_mode
+
+    @classmethod
+    def for_mode(cls, mode: str, policy: Policy | None = None) -> TradeGateway:
+        """Ledger do modo + política do modo + kill switch.
+
+        `policy=None` carrega `policy.toml`. `halt` e manutenção passam
+        `Policy()` para funcionar mesmo com um `policy.toml` quebrado.
+        """
+        return cls(
+            ledger=Ledger(ledger_path(mode)),
+            policy=load_policy(mode=str(mode)) if policy is None else policy,
+            kill_switch=KillSwitch(),
+            real_mode=mode == RunningMode.REAL,
+        )
+
+    def close(self) -> None:
+        self.ledger.close()
+
+    def __enter__(self) -> TradeGateway:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    # --- estado e registros (sem passar pela política) ----------------------
+
+    def restore(self, account_id: str) -> AccountState:
+        """PnL e posição aberta da conta, para reconstruir após reinício."""
+        last = self.ledger.last_executed_trade(account_id)
+        entry = _open_entry(last)
+        return AccountState(
+            realized_usd=self.ledger.total_realized_pnl(account_id),
+            totals=self.ledger.pnl_totals(account_id),
+            open_entry=entry,
+            entry_intent_id=last.intent.intent_id if entry and last else None,
+        )
+
+    def record_fill(
+        self,
+        intent_id: str,
+        order: Order,
+        realized_usd: Decimal | None = None,
+        pnl: PnLResult | None = None,
+    ) -> None:
+        """Grava a ordem (e o PnL, em vendas) de uma intenção já EXECUTED.
+
+        Fica separado de `mark_executed` de propósito: os custos são buscados
+        entre os dois, e a intenção precisa estar EXECUTED antes disso.
+        """
+        self.ledger.attach_order(intent_id, order, realized_usd, pnl)
+
+    def add_event(self, type_: str, payload: dict) -> None:
+        self.ledger.add_event(type_, payload)
 
     async def submit(
         self,

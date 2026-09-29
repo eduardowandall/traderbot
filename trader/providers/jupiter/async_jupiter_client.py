@@ -6,7 +6,6 @@ import os
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
-from enum import StrEnum
 from typing import Any
 
 import httpx
@@ -16,6 +15,8 @@ from solders.solders import VersionedTransaction
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 from websockets.asyncio.client import ClientConnection
 
+# `Interval` mora em models (camada core); reexportado por compatibilidade
+from trader.models.public_data import Interval as Interval
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.providers.jupiter.logging_utils import logger_wrapper
 
@@ -23,14 +24,8 @@ from trader.providers.jupiter.logging_utils import logger_wrapper
 # vem). A API paga/gratuita atual é api.jup.ag; sem `x-api-key` as requisições
 # ainda funcionam, só que num limite de taxa menor (keyless). O endpoint
 # /swap/v1/* segue com o mesmo formato de request/response de antes, só muda
-# o host. Ver docs/plan.md §3.4.
+# o host. Ver docs/plan.md §7.2.
 DEFAULT_JUPITER_API_URL = "https://api.jup.ag"
-
-
-class Interval(StrEnum):
-    SECOND_15 = "15_SECOND"
-    MINUTE_1 = "1_MINUTE"
-    HOUR_1 = "1_HOUR"
 
 
 def _quote_params(
@@ -73,7 +68,7 @@ class AsyncJupiterClient:
 
         self.websocket = websocket
         # base da API de swap/quote; configurável porque a lite-api.jup.ag
-        # está sendo descontinuada em favor de api.jup.ag (docs/plan.md §3.4)
+        # está sendo descontinuada em favor de api.jup.ag (docs/plan.md §7.2)
         self.base_url = (
             base_url or os.getenv("JUPITER_API_URL") or DEFAULT_JUPITER_API_URL
         ).rstrip("/")

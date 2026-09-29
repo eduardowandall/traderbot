@@ -6,7 +6,7 @@ no ledger (`IntentRecord`).
 """
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum, auto
@@ -57,6 +57,15 @@ class TradeIntent:
     idempotency_key: str = field(default_factory=lambda: uuid.uuid4().hex)
     intent_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: datetime = field(default_factory=_now)
+
+
+def with_idempotency_key(intent: TradeIntent, key: str | None) -> TradeIntent:
+    """A intenção com a chave dada; sem chave, fica a aleatória padrão.
+
+    Único lugar que decide o padrão da chave (quem cria intenções não
+    repete `uuid4().hex`).
+    """
+    return replace(intent, idempotency_key=key) if key else intent
 
 
 @dataclass(frozen=True)

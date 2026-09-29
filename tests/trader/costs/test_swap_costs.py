@@ -223,7 +223,7 @@ class TestConfirmedTransactionFetch:
 
 
 def _provider(is_dryrun=False):
-    return AsyncJupiterProvider(
+    return AsyncJupiterProvider.on_chain(
         Keypair(),
         rpc_client=AsyncMock(spec=AsyncRPCClient),
         jupiter_client=AsyncMock(spec=AsyncJupiterClient),
@@ -239,7 +239,7 @@ def _result(**kwargs):
 class TestFetchSwapCosts:
     async def test_never_raises(self):
         provider = _provider()
-        provider.rpc_client.get_confirmed_transaction = AsyncMock(
+        provider.executor.rpc_client.get_confirmed_transaction = AsyncMock(
             side_effect=RuntimeError("rpc caiu")
         )
         costs = await provider.fetch_swap_costs(_result())
@@ -249,19 +249,23 @@ class TestFetchSwapCosts:
 
     async def test_missing_transaction_degrades_to_quote(self):
         provider = _provider()
-        provider.rpc_client.get_confirmed_transaction = AsyncMock(return_value=None)
+        provider.executor.rpc_client.get_confirmed_transaction = AsyncMock(
+            return_value=None
+        )
         assert (await provider.fetch_swap_costs(_result())).source == QUOTE
 
     async def test_dry_run_estimates_fee_for_the_message(self):
         provider = _provider(is_dryrun=True)
-        provider.rpc_client.get_fee_for_message = AsyncMock(return_value=25_000)
+        provider.executor.rpc_client.get_fee_for_message = AsyncMock(
+            return_value=25_000
+        )
         message = SimpleNamespace(header=SimpleNamespace(num_required_signatures=1))
 
         costs = await provider.fetch_swap_costs(_result(message=message))
 
         assert costs.source == ESTIMATED
         assert (costs.fee_lamports, costs.priority_fee_lamports) == (25_000, 20_000)
-        provider.rpc_client.get_confirmed_transaction.assert_not_awaited()  # type: ignore[attr-defined]
+        provider.executor.rpc_client.get_confirmed_transaction.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_costs_already_known_are_kept(self):
         known = TradeCosts(source="simulated", fee_lamports=5000)
@@ -276,16 +280,18 @@ class TestFetchSwapCosts:
             USDC.mint, USDC.ui_to_raw("10"), SOL.mint, SOL.ui_to_raw("0.1")
         )
         provider.jupiter_client.get_quote = AsyncMock(return_value=quote)
-        provider.rpc_client.sign_transaction = AsyncMock()
-        provider.rpc_client.send_transaction = AsyncMock(
+        provider.executor.rpc_client.sign_transaction = AsyncMock()
+        provider.executor.rpc_client.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        provider.rpc_client.check_signature_is_confirmed = AsyncMock(return_value=True)
-        provider.rpc_client.get_confirmed_transaction = AsyncMock(
+        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
+            return_value=True
+        )
+        provider.executor.rpc_client.get_confirmed_transaction = AsyncMock(
             side_effect=RuntimeError("boom")
         )
-        provider.rpc_client.get_account_balance = AsyncMock(return_value={})
-        provider.rpc_client.get_lamports = AsyncMock(return_value=0)
+        provider.executor.rpc_client.get_account_balance = AsyncMock(return_value={})
+        provider.executor.rpc_client.get_lamports = AsyncMock(return_value=0)
         provider.get_account_balance = AsyncMock(
             return_value=[
                 SimpleNamespace(mint=USDC.pubkey, available=Decimal("1000")),
@@ -299,7 +305,7 @@ class TestFetchSwapCosts:
 
         order = await account.buy(Decimal("100"), Decimal("0.1"))
 
-        provider.rpc_client.send_transaction.assert_awaited_once()
+        provider.executor.rpc_client.send_transaction.assert_awaited_once()
         record = ledger.list_intents(1)[0]
         assert record.status == IntentStatus.EXECUTED
         assert order.costs is not None and order.costs.source == QUOTE

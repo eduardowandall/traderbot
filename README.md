@@ -184,7 +184,7 @@ CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every p
 - `trader/paper/` — simulated wallet + paper provider (real quotes, simulated fills)
 - `trader/backtest/` — tick recording and deterministic replay
 - `trader/logging_config.py` — logging (console + files in `.logs/`)
-- `docs/plan.md` — agent-readiness plan and roadmap
+- `docs/plan.md` — goal, progress and roadmap; `docs/architecture.md` — a guided tour of the code
 
 ### Notes
 

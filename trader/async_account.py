@@ -1,5 +1,5 @@
 import logging
-import uuid
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -7,9 +7,8 @@ from decimal import Decimal
 from solders.pubkey import Pubkey
 
 from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
-from trader.ledger import order_from_json
 from trader.models.costs import PnLResult, TradeCosts, trade_rates
-from trader.models.intent import IntentSide, TradeIntent
+from trader.models.intent import IntentSide, TradeIntent, with_idempotency_key
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
 
 from .models import (
@@ -22,8 +21,8 @@ from .models import (
     TickerData,
 )
 
-# SOL mínimo mantido na carteira para taxas de transação e rent
-DEFAULT_SOL_FEE_RESERVE = Decimal("0.02")
+# saldos lidos do provider valem por este tempo (invalidados a cada ordem)
+BALANCE_CACHE_TTL = timedelta(minutes=3)
 
 
 class AsyncAccount:
@@ -34,13 +33,19 @@ class AsyncAccount:
         provider: AsyncJupiterProvider,
         input_mint: Pubkey,
         output_mint: Pubkey,
-        sol_fee_reserve: Decimal = DEFAULT_SOL_FEE_RESERVE,
         gateway: TradeGateway | None = None,
         account_id: str | None = None,
         source: str = "strategy",
+        clock: Callable[[], datetime] = datetime.now,
+        spend_cap: Callable[[], Decimal] | None = None,
     ):
         self.provider = provider
-        self.sol_fee_reserve = sol_fee_reserve
+        # teto de gasto por compra (orçamento do bucket, na moeda de entrada);
+        # None = só o saldo da carteira limita
+        self.spend_cap = spend_cap
+        # relógio injetável: no backtest é o tempo do tick, para que
+        # `Order.timestamp` (e o `max_hold` das estratégias) sigam o replay
+        self.clock = clock
         # com gateway, toda ordem vira uma intenção avaliada pela política e
         # registrada no ledger; sem ele, executa direto no provider (testes)
         self.gateway = gateway
@@ -70,7 +75,7 @@ class AsyncAccount:
         self.incomplete_trades = 0
 
         self.balances = None
-        self.balances_last_update = datetime.min
+        self.balances_last_update: datetime | None = None
 
     def __repr__(self):
         return f"{self.__class__.__name__} for {self.input_mint=} and {self.output_mint=} with current_position on {self.current_position}"
@@ -82,14 +87,13 @@ class AsyncAccount:
         return await self.provider.get_candles(mint)
 
     async def get_balance(self, mint: Pubkey) -> Decimal:
-        # Cache para evitar chamadas repetidas ao RPC; expira a cada 3 minutos
-        # e é invalidado a cada ordem executada (`_execute_order`)
-        if not self.balances or self.balances_last_update < datetime.now() - timedelta(
-            minutes=3
-        ):
+        # Cache para evitar chamadas repetidas ao RPC; expira após
+        # BALANCE_CACHE_TTL e é invalidado a cada ordem executada
+        # (`_execute_order`)
+        if self._balances_stale():
             self.balances = await self.provider.get_account_balance()
-            self.balances_last_update = datetime.now()
-        for balance in self.balances:
+            self.balances_last_update = self.clock()
+        for balance in self.balances or []:
             if balance.mint == mint:
                 self.logger.debug(
                     f"get_balance: {str(balance.mint)=} {balance.available=}"
@@ -97,11 +101,20 @@ class AsyncAccount:
                 return balance.available
         return Decimal("0.0")
 
+    def _balances_stale(self) -> bool:
+        if not self.balances or self.balances_last_update is None:
+            return True
+        return self.balances_last_update < self.clock() - BALANCE_CACHE_TTL
+
     async def get_spendable_balance(self, mint: Pubkey) -> Decimal:
-        """Saldo que pode ser gasto; para SOL desconta a reserva de taxas."""
+        """Saldo que pode ser gasto; para SOL desconta a reserva de taxas.
+
+        A reserva é do local de execução (`provider.native_fee_reserve`):
+        0.02 SOL on-chain e em paper, zero no backtest (sem taxas de rede).
+        """
         balance = await self.get_balance(mint)
         if mint == SOLANA_MINTS.get_by_symbol("SOL").pubkey:
-            balance -= self.sol_fee_reserve
+            balance -= self.provider.native_fee_reserve
         return max(balance, Decimal("0"))
 
     def _fill(
@@ -150,7 +163,7 @@ class AsyncAccount:
             # para o PnL não comparar SOL com USD
             price=fill_price if self._quote_is_usd else price,
             side=side,
-            timestamp=datetime.now(),
+            timestamp=self.clock(),
             requested_quantity=requested_quantity,
             requested_price=price,
             fill_price=fill_price,
@@ -165,22 +178,20 @@ class AsyncAccount:
         """Recupera posição aberta e PnL realizado do ledger (após reinício)."""
         if self.gateway is None:
             return
-        ledger = self.gateway.ledger
-        self.total_pnl = ledger.total_realized_pnl(self.account_id)
-        totals = ledger.pnl_totals(self.account_id)
-        self.total_gross_quote = totals.gross_quote
-        self.total_net_quote = totals.net_quote
-        self.total_costs_sol = totals.costs_sol
-        self.incomplete_trades = totals.incomplete
-        last = ledger.last_executed_trade(self.account_id)
-        if last and last.intent.side == IntentSide.BUY and last.order_json:
-            entry = order_from_json(last.order_json)
+        state = self.gateway.restore(self.account_id)
+        self.total_pnl = state.realized_usd
+        self.total_gross_quote = state.totals.gross_quote
+        self.total_net_quote = state.totals.net_quote
+        self.total_costs_sol = state.totals.costs_sol
+        self.incomplete_trades = state.totals.incomplete
+        entry = state.open_entry
+        if entry is not None:
             self.current_position = Position(
                 type=PositionType.LONG, entry_order=entry, exit_order=None
             )
             self.logger.warning(
                 f"Posição restaurada do ledger: {entry.quantity} @ {entry.price} "
-                f"(intenção {last.intent.intent_id})"
+                f"(intenção {state.entry_intent_id})"
             )
 
     async def reconcile_position(self) -> bool:
@@ -199,7 +210,7 @@ class AsyncAccount:
         self.logger.warning(
             f"Carteira tem {balance} mas o ledger registra posição de {expected}"
         )
-        self.gateway.ledger.add_event(
+        self.gateway.add_event(
             "reconcile_mismatch",
             {
                 "account": self.account_id,
@@ -250,7 +261,7 @@ class AsyncAccount:
         realized_usd: Decimal | None = None,
     ) -> None:
         if self.gateway is not None:
-            self.gateway.ledger.attach_order(intent.intent_id, order, realized_usd, pnl)
+            self.gateway.record_fill(intent.intent_id, order, realized_usd, pnl)
 
     def _book(self, pnl: PnLResult | None) -> None:
         """Acumula o PnL nativo de uma posição fechada."""
@@ -294,13 +305,14 @@ class AsyncAccount:
         quantity: Decimal,
         spend_amount: Decimal,
         idempotency_key: str | None = None,
+        rationale: str | None = None,
     ) -> TradeIntent:
         spend, receive = (
             (self.input_mint, self.output_mint)
             if side == IntentSide.BUY
             else (self.output_mint, self.input_mint)
         )
-        return TradeIntent(
+        intent = TradeIntent(
             source=self.source,
             account=self.account_id,
             side=side,
@@ -310,8 +322,9 @@ class AsyncAccount:
             notional_usd=self._notional_usd(price, quantity),
             price=price,
             quantity=quantity,
-            idempotency_key=idempotency_key or uuid.uuid4().hex,
+            rationale=rationale,
         )
+        return with_idempotency_key(intent, idempotency_key)
 
     def get_position(self) -> Position | None:
         """Retorna a posição atual"""
@@ -354,31 +367,62 @@ class AsyncAccount:
             )
 
     async def place_order(
-        self, price: Decimal, side: OrderSide, quantity: Decimal
+        self,
+        price: Decimal,
+        side: OrderSide,
+        quantity: Decimal,
+        rationale: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Order:
         if side == OrderSide.BUY:
-            return await self.buy(price, quantity)
+            return await self.buy(price, quantity, rationale, idempotency_key)
         if side == OrderSide.SELL:
-            return await self.sell(price, quantity)
+            # a venda tem chave fixa por posição (ver `sell`)
+            return await self.sell(price, quantity, rationale)
 
         raise ValueError("Invalid Order Side.")
 
-    async def buy(self, price: Decimal, quantity: Decimal) -> Order:
-        await self.can_buy()
-
+    async def _buy_limit(self) -> Decimal:
+        """Quanto uma compra pode gastar: saldo gastável, limitado pelo bucket."""
+        if self.spend_cap is not None:
+            # buckets dividem a carteira: o saldo em cache pode já ter sido
+            # gasto por outro bucket
+            self.balances = None
         spendable = await self.get_spendable_balance(self.input_mint)
         if spendable <= 0:
             raise ValueError(
                 "Não é possível executar compra no momento. Saldo reservado para taxas"
             )
-        if quantity * price > spendable:
+        cap = spendable if self.spend_cap is None else self.spend_cap()
+        if cap <= 0:
+            raise ValueError("Não é possível executar compra: orçamento esgotado")
+        return min(spendable, cap)
+
+    async def buy(
+        self,
+        price: Decimal,
+        quantity: Decimal,
+        rationale: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> Order:
+        await self.can_buy()
+
+        limit = await self._buy_limit()
+        if quantity * price > limit:
             self.logger.warning(
-                f"Compra de {quantity * price} acima do saldo disponível {spendable}; "
+                f"Compra de {quantity * price} acima do disponível {limit}; "
                 "ajustando a quantidade"
             )
-            quantity = spendable / price
+            quantity = limit / price
 
-        intent = self._intent(IntentSide.BUY, price, quantity, quantity * price)
+        intent = self._intent(
+            IntentSide.BUY,
+            price,
+            quantity,
+            quantity * price,
+            idempotency_key=idempotency_key,
+            rationale=rationale,
+        )
         order = await self._execute_order(
             intent,
             lambda: self.provider.buy(
@@ -399,7 +443,9 @@ class AsyncAccount:
         )
         return order
 
-    async def sell(self, price: Decimal, quantity: Decimal) -> Order:
+    async def sell(
+        self, price: Decimal, quantity: Decimal, rationale: str | None = None
+    ) -> Order:
         await self.can_sell()
         position = self.current_position
         assert position  # garantido por can_sell
@@ -425,6 +471,7 @@ class AsyncAccount:
             quantity,
             # uma venda por posição: evita vender duas vezes a mesma entrada
             idempotency_key=f"{self.account_id}:sell:{position.entry_order.order_id}",
+            rationale=rationale,
         )
         order = await self._execute_order(
             intent,

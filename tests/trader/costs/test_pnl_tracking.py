@@ -14,7 +14,7 @@ from trader.ledger import Ledger, ledger_path, order_from_json
 from trader.ledger.ledger import _SCHEMA
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentSide, IntentStatus, PolicyDecision, TradeIntent
-from trader.paper import PaperJupiterProvider, SimulatedWallet
+from trader.paper import SimulatedWallet, paper_provider
 from trader.paths import data_dir
 from trader.policy import Policy
 from trader.providers import JupiterQuoteResponse
@@ -29,7 +29,7 @@ RENT = 2_039_280
 def _paper(wallet, quotes):
     client = AsyncMock(spec=AsyncJupiterClient)
     client.get_quote = AsyncMock(side_effect=quotes)
-    return PaperJupiterProvider(wallet, jupiter_client=client)
+    return paper_provider(wallet, jupiter_client=client)
 
 
 def _quote(in_mint, in_amount, out_mint, out_amount):

@@ -1,83 +1,68 @@
 import asyncio
 import os
-import uuid
 from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import typer
 
-from trader import get_strategy_cls, logging_config
+from trader import logging_config
+from trader.agent_api.cli import market_app, strategy_app
 from trader.backtest import Backtester, TickRecorder, load_ticks, ticks_from_candles
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
+from trader.bot.config import BotConfig
 from trader.execution import KillSwitch, TradeGateway
 from trader.ledger import Ledger, ledger_path
-from trader.models import SOLANA_MINTS
-from trader.models.bot_config import (
-    RunningMode,
-    create_bot_config,
-    get_keypair_from_env,
+from trader.market import JupiterMarketData
+from trader.models import SOLANA_MINTS, Interval
+from trader.models.intent import (
+    IntentSide,
+    IntentStatus,
+    TradeIntent,
+    with_idempotency_key,
 )
-from trader.models.intent import IntentSide, IntentStatus, TradeIntent
+from trader.models.mode import RunningMode
 from trader.notification.notification_service import (
     NullNotificationService,
     TelegramNotificationService,
 )
 from trader.paper import (
     DEFAULT_PAPER_BALANCES,
-    PaperJupiterProvider,
     SimulatedWallet,
     parse_balances,
 )
-from trader.paths import data_dir
-from trader.policy import load_policy
-from trader.providers.jupiter.async_jupiter_client import Interval
+from trader.policy import Policy
 from trader.providers.jupiter.async_jupiter_svc import (
     DEFAULT_MAX_PRICE_IMPACT_PCT,
     AsyncJupiterProvider,
 )
 from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
-from trader.trading_strategy import StrategyComposer
+from trader.strategies_registry import get_strategy_factory
+from trader.trading_service.local import LocalTradeClient
+from trader.wiring import (
+    build_gateway,
+    build_provider,
+    build_trade_service,
+    paper_wallet_path,
+)
 
 app = typer.Typer()
 ledger_app = typer.Typer(help="Consulta e manutenção do ledger de trades.")
 app.add_typer(ledger_app, name="ledger")
 paper_app = typer.Typer(help="Carteira simulada do modo paper.")
 app.add_typer(paper_app, name="paper")
+# comandos de agente: sempre respondem em JSON (trader/agent_api/cli.py)
+app.add_typer(market_app, name="market")
+app.add_typer(strategy_app, name="strategy")
 
 
-def _paper_wallet_path():
-    return data_dir() / "paper-wallet.json"
+def _warn(message: str) -> None:
+    # stderr: não pode sujar o stdout dos comandos `--json`
+    typer.echo(message, err=True)
 
 
-def _build_provider(mode: RunningMode, **kwargs) -> AsyncJupiterProvider:
-    """Provider real/dry (com chave) ou paper (carteira simulada)."""
-    if mode == RunningMode.PAPER:
-        wallet = SimulatedWallet(_paper_wallet_path())
-        if wallet.is_empty:
-            wallet.reset(DEFAULT_PAPER_BALANCES)
-            # stderr: não pode sujar o stdout dos comandos `--json`
-            typer.echo(
-                f"Carteira paper criada com {DEFAULT_PAPER_BALANCES} "
-                "(mude com `main.py paper reset`)",
-                err=True,
-            )
-        return PaperJupiterProvider(wallet, **kwargs)
-    return AsyncJupiterProvider(
-        keypair=get_keypair_from_env(),
-        is_dryrun=(mode == RunningMode.DRY),
-        **kwargs,
-    )
-
-
-def _build_gateway(mode: RunningMode) -> TradeGateway:
-    """Política + ledger (um arquivo por modo) + kill switch."""
-    return TradeGateway(
-        ledger=Ledger(ledger_path(mode)),
-        policy=load_policy(mode=str(mode)),
-        kill_switch=KillSwitch(),
-        real_mode=mode == RunningMode.REAL,
-    )
+def _build_provider(mode: RunningMode, **limits) -> AsyncJupiterProvider:
+    return build_provider(mode, on_wallet_created=_warn, **limits)
 
 
 @app.command()
@@ -108,24 +93,43 @@ def run(
         uv run main.py run dry SOL-USDC composer 'buy_mode=all sell_mode=any'
     """
 
-    provider = _build_provider(mode)
-    gateway = _build_gateway(mode)
+    # estratégia primeiro: um erro nela não pode deixar ledger/conexões abertos
     strategy_obj = _get_strategy_obj(strategy, strategy_args)
+    _check_symbol(strategy_obj, currency)
+    token, quote = SOLANA_MINTS.get_pair(currency)
     notification_svc = _get_notification_svc(notification_service, notification_args)
 
-    config = create_bot_config(
-        mode,
-        f"run-{strategy}",
+    # execução (modo, chave, ledger) de um lado; o bot só vê o bucket do par
+    service = build_trade_service(mode, on_wallet_created=_warn)
+    trader = LocalTradeClient(
+        service,
+        # o nome do bucket é o par: a conta no ledger segue "<modo>:<par>"
         currency,
-        provider,
-        strategy_obj,
-        notification_svc,
-        gateway=gateway,
+        quote.mint,
+        token.mint,
+        source=f"run-{strategy}",
+        owns_service=True,
     )
-
     recorder = TickRecorder(record_ticks) if record_ticks else None
-    with gateway.ledger, recorder or nullcontext():
-        _run_bot(AsyncWebsocketTradingBot(config, tick_recorder=recorder))
+    config = BotConfig(
+        name=f"{mode}-run-{strategy}",
+        symbol=currency,
+        strategy=strategy_obj,
+        market=JupiterMarketData(),
+        trader=trader,
+        notifier=notification_svc,
+        on_tick=recorder.record if recorder else None,
+    )
+    assert service.gateway is not None
+    with service.gateway, recorder or nullcontext():
+        _run_bot(AsyncWebsocketTradingBot(config))
+
+
+def _check_symbol(strategy_obj, symbol: str) -> None:
+    # estratégias com par próprio (specs) só rodam no par delas
+    expected = getattr(strategy_obj, "symbol", None)
+    if expected and expected != symbol:
+        raise typer.BadParameter(f"a estratégia é para {expected}, não {symbol}")
 
 
 def _run_bot(bot: AsyncWebsocketTradingBot) -> None:
@@ -133,31 +137,6 @@ def _run_bot(bot: AsyncWebsocketTradingBot) -> None:
         bot.run()
     except KeyboardInterrupt:
         bot.stop()
-
-
-@app.command()
-def start(
-    mode: RunningMode = typer.Argument(
-        RunningMode.DRY, help="Modo de execucão do bot."
-    ),
-    symbol: str = typer.Argument("SOL-USDC", help="The trading symbol"),
-):
-    provider = _build_provider(mode)
-    gateway = _build_gateway(mode)
-
-    config = create_bot_config(
-        mode,
-        "my_config",
-        symbol,
-        provider,
-        # RandomStrategy(sell_chance=20, buy_chance=50),
-        StrategyComposer(sell_mode="any", buy_mode="all"),
-        NullNotificationService(),
-        gateway=gateway,
-    )
-
-    with gateway.ledger:
-        _run_bot(AsyncWebsocketTradingBot(config))
 
 
 @app.command()
@@ -193,8 +172,8 @@ def swap(
     max_impact = _parse_decimal(max_price_impact, "max-price-impact")
 
     provider = _build_provider(mode, max_price_impact_pct=max_impact)
-    gateway = _build_gateway(mode)
-    with gateway.ledger:
+    gateway = build_gateway(mode)
+    with gateway:
         signature = asyncio.run(
             _execute_swap(
                 provider,
@@ -232,8 +211,8 @@ async def _execute_swap(
         spend_amount=quantity,
         # só dá para estimar em USD quando o token gasto é stablecoin
         notional_usd=quantity if mint_in.is_usd_stable else None,
-        idempotency_key=idempotency_key or uuid.uuid4().hex,
     )
+    intent = with_idempotency_key(intent, idempotency_key)
     try:
         result = await gateway.submit(
             intent,
@@ -251,10 +230,10 @@ def halt(reason: str = typer.Argument("manual", help="Motivo da parada")):
     """Ativa o kill switch: nenhum trade executa até `resume`."""
     KillSwitch().activate(reason)
     for mode in RunningMode:
-        # não carrega a política: o kill switch precisa funcionar mesmo com
-        # um policy.toml quebrado
-        with Ledger(ledger_path(mode)) as ledger:
-            ledger.add_event("halt", {"reason": reason})
+        # `Policy()` em vez do policy.toml: o kill switch precisa funcionar
+        # mesmo com a política quebrada
+        with TradeGateway.for_mode(mode, policy=Policy()) as gateway:
+            gateway.add_event("halt", {"reason": reason})
     typer.echo(f"Kill switch ATIVO ({reason}).")
 
 
@@ -264,8 +243,8 @@ def resume(
     note: str = typer.Option("", help="Observação para o ledger"),
 ):
     """Desativa o kill switch e rearma o circuit breaker do modo."""
-    gateway = _build_gateway(mode)
-    with gateway.ledger:
+    gateway = build_gateway(mode)
+    with gateway:
         gateway.resume(note)
     typer.echo(f"Kill switch desativado; circuit breaker de {mode} rearmado.")
 
@@ -273,7 +252,7 @@ def resume(
 @paper_app.command("balance")
 def paper_balance():
     """Mostra os saldos da carteira simulada."""
-    wallet = SimulatedWallet(_paper_wallet_path())
+    wallet = SimulatedWallet(paper_wallet_path())
     if wallet.is_empty:
         typer.echo("Carteira paper vazia (use `main.py paper reset`).")
         return
@@ -293,9 +272,9 @@ def paper_reset(
         parsed = parse_balances(balances)
     except ValueError as ex:
         raise typer.BadParameter(str(ex)) from ex
-    SimulatedWallet(_paper_wallet_path()).reset(parsed)
-    with Ledger(ledger_path(RunningMode.PAPER)) as ledger:
-        ledger.add_event("paper_wallet_reset", {"balances": parsed})
+    SimulatedWallet(paper_wallet_path()).reset(parsed)
+    with TradeGateway.for_mode(RunningMode.PAPER, policy=Policy()) as gateway:
+        gateway.add_event("paper_wallet_reset", {"balances": parsed})
     typer.echo(f"Carteira paper: {parsed}")
     typer.echo(
         "Atenção: posições abertas no ledger paper não são apagadas; "
@@ -334,7 +313,7 @@ def backtest(
     else:
         token, _ = SOLANA_MINTS.get_pair(symbol)
         tick_list = ticks_from_candles(
-            asyncio.run(_fetch_candles(token.pubkey, interval, candles))
+            asyncio.run(_fetch_candles(token.mint, interval, candles))
         )
 
     result = asyncio.run(
@@ -350,13 +329,13 @@ def backtest(
     typer.echo(result.summary())
 
 
-async def _fetch_candles(mint, interval: Interval, qty: int):
-    # só leitura de dados públicos: não precisa de chave
-    provider = PaperJupiterProvider(SimulatedWallet())
+async def _fetch_candles(mint: str, interval: Interval, qty: int):
+    # só leitura de dados públicos: sem chave, sem RPC
+    data = JupiterMarketData()
     try:
-        return await provider.get_candles(mint, interval=interval, candle_qty=qty)
+        return await data.get_candles(mint, interval, qty)
     finally:
-        await provider.aclose()
+        await data.aclose()
 
 
 @ledger_app.command("list")
@@ -511,7 +490,7 @@ def _parse_decimal(value: str, name: str) -> Decimal:
 
 
 def _get_strategy_obj(strategy: str, strategy_args: str | None = None):
-    strategy_cls = get_strategy_cls(strategy)
+    strategy_cls = get_strategy_factory(strategy)
     try:
         args = __parse_kwargs(strategy_args.split()) if strategy_args else {}
         return strategy_cls(**args)

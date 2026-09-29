@@ -65,7 +65,7 @@ class TestCheckSignatureIsConfirmed:
 
 @pytest.fixture
 def provider():
-    return AsyncJupiterProvider(
+    return AsyncJupiterProvider.on_chain(
         Keypair(),
         rpc_client=AsyncMock(spec=AsyncRPCClient),
         jupiter_client=AsyncMock(spec=AsyncJupiterClient),
@@ -74,42 +74,50 @@ def provider():
 
 class TestWaitForConfirmation:
     async def test_polls_until_confirmed(self, provider, mock_sleep):
-        provider.rpc_client.check_signature_is_confirmed = AsyncMock(
+        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
             side_effect=[False, False, True]
         )
-        assert await provider._wait_for_confirmation("sig") is True
-        assert provider.rpc_client.check_signature_is_confirmed.await_count == 3
+        assert await provider.executor._wait_for_confirmation("sig") is True
+        assert (
+            provider.executor.rpc_client.check_signature_is_confirmed.await_count == 3
+        )
 
     async def test_failed_transaction_raises_immediately(self, provider, mock_sleep):
-        provider.rpc_client.check_signature_is_confirmed = AsyncMock(
+        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
             side_effect=TransactionFailedError("Transação falhou: err")
         )
         with pytest.raises(TransactionFailedError):
-            await provider._wait_for_confirmation("sig")
-        assert provider.rpc_client.check_signature_is_confirmed.await_count == 1
+            await provider.executor._wait_for_confirmation("sig")
+        assert (
+            provider.executor.rpc_client.check_signature_is_confirmed.await_count == 1
+        )
 
     async def test_transient_errors_are_retried_with_sleep(self, provider):
-        provider.rpc_client.check_signature_is_confirmed = AsyncMock(
+        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
             side_effect=[ConnectionError("rpc down"), True]
         )
         with mock.patch("asyncio.sleep") as sleep:
-            assert await provider._wait_for_confirmation("sig") is True
+            assert await provider.executor._wait_for_confirmation("sig") is True
         sleep.assert_awaited_once_with(1.0)
 
     async def test_timeout(self, provider, mock_sleep):
-        provider.rpc_client.check_signature_is_confirmed = AsyncMock(return_value=False)
+        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
+            return_value=False
+        )
         with pytest.raises(TimeoutError):
-            await provider._wait_for_confirmation("sig", timeout=0)
+            await provider.executor._wait_for_confirmation("sig", timeout=0)
 
 
 class TestNoRetryAfterBroadcast:
     async def test_unconfirmed_send_is_wrapped(self, provider):
-        provider._send_signed_transaction = AsyncMock(
+        provider.executor._send_signed_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        provider._wait_for_confirmation = AsyncMock(side_effect=TimeoutError())
+        provider.executor._wait_for_confirmation = AsyncMock(side_effect=TimeoutError())
         with pytest.raises(TransactionSubmittedError):
-            await provider._send_transaction_and_wait_for_confirmation(mock.Mock())
+            await provider.executor._send_transaction_and_wait_for_confirmation(
+                mock.Mock()
+            )
 
     async def test_submitted_error_is_not_retried(self, provider):
         do_swap = AsyncMock(side_effect=TransactionSubmittedError("sent"))
@@ -120,18 +128,20 @@ class TestNoRetryAfterBroadcast:
 
     async def test_timeout_after_send_sends_only_once(self, provider, mock_sleep):
         provider._get_quote_with_route = AsyncMock()
-        provider._get_swap_transaction = AsyncMock()
-        provider._get_signed_transaction = AsyncMock()
-        provider.rpc_client.send_transaction = AsyncMock(
+        provider.executor._get_swap_transaction = AsyncMock()
+        provider.executor._get_signed_transaction = AsyncMock()
+        provider.executor.rpc_client.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        provider.rpc_client.check_signature_is_confirmed = AsyncMock(return_value=False)
+        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
+            return_value=False
+        )
         with (
             mock.patch("time.time", side_effect=[0, 100]),
             pytest.raises(TransactionSubmittedError),
         ):
             await provider._do_swap_with_retry("mint_in", "mint_out", 1000)
-        provider.rpc_client.send_transaction.assert_awaited_once()
+        provider.executor.rpc_client.send_transaction.assert_awaited_once()
 
     async def test_pre_broadcast_errors_are_still_retried(self, provider):
         do_swap = AsyncMock(side_effect=[Exception("quote falhou"), "sig"])

@@ -3,6 +3,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import mock_provider
 
 from trader.async_account import AsyncAccount
 from trader.models import (
@@ -14,12 +15,11 @@ from trader.models import (
     SwapResult,
 )
 from trader.models.account_data import MintBalance
-from trader.providers import AsyncJupiterProvider
 
 
 def _make_account(balances=None):
     mi, mo = SOLANA_MINTS.get_by_symbol("SOL"), SOLANA_MINTS.get_by_symbol("USDC")
-    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider = mock_provider()
     if balances is None:
         balances = [
             MintBalance(mint=mi.pubkey, available=Decimal("1.0")),
@@ -109,7 +109,7 @@ def _usdc_sol_account(usdc="1000", sol="1", fill_ratio=Decimal("1")):
 
     fill_ratio < 1 simula slippage: recebe-se menos do que o pedido.
     """
-    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider = mock_provider()
     provider.get_account_balance = AsyncMock(
         return_value=[
             MintBalance(mint=USDC.pubkey, available=Decimal(usdc)),
@@ -212,7 +212,7 @@ async def test_sell_refuses_to_touch_sol_fee_reserve():
 
 async def test_buy_with_sol_keeps_fee_reserve():
     # par USDC-SOL: compra USDC gastando SOL
-    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider = mock_provider()
     provider.get_account_balance = AsyncMock(
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("1"))]
     )
@@ -233,7 +233,7 @@ async def test_pnl_uses_usd_price_when_input_is_not_a_stablecoin():
     # caso real do log dry-run-random-USDC-SOL: comprou USDC gastando SOL.
     # o fill é 0.0086 SOL/USDC, mas o feed cota USDC a ~1 USD; misturar os dois
     # mostrava PNL de 11509%
-    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider = mock_provider()
     provider.get_account_balance = AsyncMock(
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("0.059077338"))]
     )

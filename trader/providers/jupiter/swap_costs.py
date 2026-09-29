@@ -1,6 +1,6 @@
 """Custos reais de um swap, lidos da transação confirmada (`getTransaction`).
 
-Regras (ver docs/plan.md, "PnL líquido"):
+Regras (ver docs/plan.md §7.1, "Costs and net PnL"):
 - índice 0 das contas estáticas é o fee payer; ele precisa ser a carteira;
 - `meta.fee` = taxa base (5000/assinatura) + priority fee;
 - rent = variação de lamports das contas de token (não-wSOL) da carteira:

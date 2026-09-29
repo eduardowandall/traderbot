@@ -5,7 +5,7 @@ Cada módulo pertence a uma camada e só pode importar das camadas listadas em
 (strategy-runner) nunca importam execução, venue (quem move fundos) ou risco
 (política/ledger), então código de estratégia não alcança a chave, o ledger
 nem a política. Ver `docs/architecture.md` (passo 11) e
-`docs/agent-strategies.md` (§2.2).
+`docs/plan.md` (§3.4).
 
 Módulo novo sem camada faz o teste falhar: adicione-o em `PACKAGES`.
 """
@@ -32,7 +32,7 @@ ALLOWED: dict[str, set[str]] = {
 }
 
 # pacote/módulo -> camada; vale o prefixo mais longo. Inclui os pacotes
-# planejados em docs/agent-strategies.md, para que já nasçam na camada certa.
+# planejados em docs/plan.md, para que já nasçam na camada certa.
 PACKAGES: dict[str, str] = {
     "trader.models": "core",
     "trader.paths": "core",
@@ -40,9 +40,11 @@ PACKAGES: dict[str, str] = {
     "trader.indicators": "core",
     "trader.trading_strategy": "strategy",
     "trader.strategy_spec": "strategy",
+    "trader.strategies_registry": "strategy",
     "trader.providers.jupiter.async_jupiter_client": "market",
     "trader.providers.jupiter.jupiter_data": "market",
     "trader.providers.jupiter.logging_utils": "market",
+    "trader.providers.jupiter.candles": "market",
     "trader.market": "market",
     "trader.providers": "venue",
     "trader.paper": "venue",
@@ -56,18 +58,21 @@ PACKAGES: dict[str, str] = {
     "trader.trading_service.remote": "strategy-side",
     "trader.runners.strategy_runner": "strategy-side",
     "trader.runners": "app",
-    "trader.bot": "app",
+    # o loop do bot só conhece MarketData + TradeClient (fase 2)
+    "trader.bot": "strategy-side",
     "trader.backtest": "app",
     "trader.notification": "app",
     "trader.agent_api": "app",
+    "trader.wiring": "app",
 }
 
 # módulos fora do lugar: a camada real difere da do pacote. Cada um tem um
 # item no backlog que o move; ao mover, apague a linha daqui.
-MISPLACED: dict[str, tuple[str, str]] = {
-    "trader": ("app", "backlog 1.5: registro de estratégias no __init__"),
-    "trader.models.bot_config": ("app", "backlog 1.6: wiring dentro de models"),
-}
+MISPLACED: dict[str, tuple[str, str]] = {}
+
+# módulos com camada própria, sem valer como prefixo: o `__init__` do pacote
+# raiz é carregado por todo `import trader.x`, então precisa ficar vazio (core)
+EXACT: dict[str, str] = {"trader": "core"}
 
 # importações proibidas toleradas por enquanto: (quem importa, o que) -> motivo
 EXCEPTIONS: dict[tuple[str, str], str] = {}
@@ -90,6 +95,8 @@ MODULES = {
 def layer_of(module: str) -> str | None:
     if module in MISPLACED:
         return MISPLACED[module][0]
+    if module in EXACT:
+        return EXACT[module]
     matches = [key for key in PACKAGES if module == key or module.startswith(key + ".")]
     return PACKAGES[max(matches, key=len)] if matches else None
 

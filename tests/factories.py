@@ -49,3 +49,52 @@ def open_ledger() -> Ledger:
 def close_open_ledgers() -> None:
     while _OPEN_LEDGERS:
         _OPEN_LEDGERS.pop().close()
+
+
+def make_spec(**overrides) -> dict:
+    """Spec válida (dict JSON) de SOL-USDC; `overrides` troca chaves do topo.
+
+    Use `StrategySpec.model_validate(make_spec(...))` para o objeto.
+    """
+    spec = {
+        "version": 1,
+        "name": "sol-dip",
+        "agent_id": "test-agent",
+        "rationale": "teste",
+        "symbol": "SOL-USDC",
+        "timeframe": "1_MINUTE",
+        "entry": {
+            "mode": "all",
+            "conditions": [{"type": "price_below", "value": 100}],
+        },
+        "exit": {
+            "stop": {"type": "stop_loss", "pct": 5},
+            "mode": "any",
+            "conditions": [{"type": "take_profit", "pct": 10}],
+        },
+        "sizing": {"type": "fixed_usd", "usd": 20},
+        "budget_usd": 50,
+        "max_loss_usd": 10,
+        "cooldown_minutes": 0,
+        "expires_at": "2099-01-01T00:00:00Z",
+    }
+    spec.update(overrides)
+    return spec
+
+
+def mock_provider(**attrs):
+    """`AsyncMock(spec=AsyncJupiterProvider)` com os fatos do local de execução.
+
+    Um mock com spec devolve Mock para propriedades; a conta faz contas com
+    `native_fee_reserve`, então ela precisa ser um Decimal de verdade.
+    """
+    from unittest.mock import AsyncMock
+
+    from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
+
+    provider = AsyncMock(spec=AsyncJupiterProvider)
+    provider.native_fee_reserve = Decimal("0.02")
+    provider.balances_track_fills = True
+    for name, value in attrs.items():
+        setattr(provider, name, value)
+    return provider

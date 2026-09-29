@@ -1,4 +1,5 @@
-from .provider import DEFAULT_FEE_LAMPORTS, PaperJupiterProvider
+from .executor import DEFAULT_FEE_LAMPORTS, SimulatedExecutor
+from .provider import paper_provider
 from .wallet import (
     DEFAULT_PAPER_BALANCES,
     InsufficientFundsError,
@@ -10,7 +11,8 @@ __all__ = [
     "DEFAULT_FEE_LAMPORTS",
     "DEFAULT_PAPER_BALANCES",
     "InsufficientFundsError",
-    "PaperJupiterProvider",
+    "SimulatedExecutor",
     "SimulatedWallet",
+    "paper_provider",
     "parse_balances",
 ]

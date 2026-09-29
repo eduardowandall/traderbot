@@ -93,17 +93,17 @@ class TestAsyncJupiterProvider:
         keypair = Keypair()
         rpc_client = AsyncMock(spec=AsyncRPCClient)
         jupiter_client = AsyncMock(spec=AsyncJupiterClient)
-        api = AsyncJupiterProvider(
+        api = AsyncJupiterProvider.on_chain(
             keypair, rpc_client=rpc_client, jupiter_client=jupiter_client
         )
 
-        assert isinstance(api.keypair, Keypair)
-        assert api.keypair == keypair
-        assert api.rpc_client is rpc_client
+        assert isinstance(api.executor.keypair, Keypair)
+        assert api.executor.keypair == keypair
+        assert api.executor.rpc_client is rpc_client
         assert api.jupiter_client is jupiter_client
 
     async def test_get_account_balance(self, fake_solana_client):
-        api = AsyncJupiterProvider(
+        api = AsyncJupiterProvider.on_chain(
             Keypair(),
             rpc_client=AsyncRPCClient(client=fake_solana_client),
             jupiter_client=AsyncMock(spec=AsyncJupiterClient),
@@ -123,7 +123,7 @@ class TestGetPriceTicker:
         jupiter_client = AsyncMock(spec=AsyncJupiterClient)
         get_price = AsyncMock(return_value=Decimal("2"))
         jupiter_client.get_price = get_price
-        provider = AsyncJupiterProvider(
+        provider = AsyncJupiterProvider.on_chain(
             Keypair(),
             rpc_client=AsyncMock(spec=AsyncRPCClient),
             jupiter_client=jupiter_client,
@@ -141,7 +141,7 @@ class TestPlaceOrder:
     @pytest.fixture(autouse=True)
     def setup_tests(self):
         self.jupiter_client = AsyncMock(spec=AsyncJupiterClient)
-        self.api = AsyncJupiterProvider(
+        self.api = AsyncJupiterProvider.on_chain(
             Keypair(),
             rpc_client=AsyncMock(spec=AsyncRPCClient),
             jupiter_client=self.jupiter_client,
@@ -318,15 +318,15 @@ class TestPlaceOrder:
         )
         self.jupiter_client.get_swap_transaction = get_swap_transaction
 
-        tx = await self.api._get_swap_transaction(quote=quote)
+        tx = await self.api.executor._get_swap_transaction(quote=quote)
         assert isinstance(tx, VersionedTransaction)
-        get_swap_transaction.assert_called_once_with(quote, self.api.pubkey)
+        get_swap_transaction.assert_called_once_with(quote, self.api.executor.pubkey)
 
     async def test_get_signed_transaction(self, fake_solana_client):
         keypair = Keypair()
         receiver = Pubkey.new_unique()
 
-        api = AsyncJupiterProvider(
+        api = AsyncJupiterProvider.on_chain(
             keypair=keypair,
             rpc_client=AsyncRPCClient(client=fake_solana_client),
             jupiter_client=AsyncMock(spec=AsyncJupiterClient),
@@ -352,7 +352,7 @@ class TestPlaceOrder:
             address_table_lookups=[],
         )
         tx = VersionedTransaction(message, [keypair])
-        signed_tx = await api._get_signed_transaction(tx=tx)
+        signed_tx = await api.executor._get_signed_transaction(tx=tx)
         assert isinstance(signed_tx, VersionedTransaction)
         assert signed_tx.signatures[0].verify(
             keypair.pubkey(), to_bytes_versioned(signed_tx.message)
@@ -362,7 +362,7 @@ class TestPlaceOrder:
         keypair = Keypair()
         receiver = Pubkey.new_unique()
 
-        service = AsyncJupiterProvider(
+        service = AsyncJupiterProvider.on_chain(
             keypair=keypair,
             rpc_client=AsyncRPCClient(client=fake_solana_client),
             jupiter_client=AsyncMock(spec=AsyncJupiterClient),
@@ -383,5 +383,5 @@ class TestPlaceOrder:
         tx = VersionedTransaction(msg, [keypair])
         tx.signatures = [keypair.sign_message(to_bytes_versioned(msg))]
 
-        resp = await service._send_signed_transaction(tx)
+        resp = await service.executor._send_signed_transaction(tx)
         assert resp.value is not None

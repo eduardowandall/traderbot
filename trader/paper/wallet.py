@@ -11,7 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from trader.models import SOLANA_MINTS
-from trader.providers.jupiter.async_jupiter_svc import SwapRejectedError
+from trader.models.errors import SwapRejectedError
 
 SOL_MINT = SOLANA_MINTS.get_by_symbol("SOL").mint
 

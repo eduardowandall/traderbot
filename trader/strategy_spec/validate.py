@@ -1,0 +1,119 @@
+"""Leitura e validação de specs.
+
+`parse_spec` transforma o texto JSON numa `StrategySpec` (erros de formato
+viram `SpecParseError` com um `SpecError` por campo). `validate` confere a
+spec contra os limites do dono (`SpecLimits`) e devolve a lista de problemas;
+lista vazia = válida.
+
+`SpecLimits` é um dado simples, não a `Policy`: a camada de estratégia não
+importa a política (camada de risco). Quem monta os limites a partir da
+política é a camada de aplicação (`trader.agent_api`). Esta validação é
+consultiva: quem executa (gateway, e o trade-runner na fase 4) valida de
+novo com a política dele.
+"""
+
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from pydantic import ValidationError
+
+from trader.models import SOLANA_MINTS, Mint
+from trader.strategy_spec.models import StrategySpec
+
+# prazo máximo de uma spec; vai para a seção [strategies] da política na fase 3
+DEFAULT_MAX_DAYS = 30
+
+
+@dataclass(frozen=True)
+class SpecError:
+    path: str  # campo com problema, ex: "exit.stop.pct" ("" = a spec toda)
+    msg: str
+
+
+class SpecParseError(ValueError):
+    def __init__(self, errors: list[SpecError]):
+        self.errors = errors
+        super().__init__("; ".join(f"{e.path}: {e.msg}" for e in errors))
+
+
+@dataclass(frozen=True)
+class SpecLimits:
+    max_trade_usd: Decimal
+    allowed_symbols: tuple[str, ...] = ()  # vazio = todos do registro
+    max_days: int = DEFAULT_MAX_DAYS
+
+
+def parse_spec(text: str) -> StrategySpec:
+    try:
+        return StrategySpec.model_validate_json(text)
+    except ValidationError as ex:
+        raise SpecParseError(
+            [
+                SpecError(".".join(str(p) for p in err["loc"]), err["msg"])
+                for err in ex.errors(include_url=False)
+            ]
+        ) from ex
+
+
+Rule = Callable[[StrategySpec, SpecLimits, datetime], Iterator[SpecError]]
+
+
+def _symbol(spec: StrategySpec, limits: SpecLimits, now: datetime):
+    try:
+        token, quote = SOLANA_MINTS.get_pair(spec.symbol)
+    except ValueError as ex:
+        yield SpecError("symbol", str(ex))
+        return
+    yield from _legs(token, quote)
+    yield from _allowed(token, quote, limits)
+
+
+def _legs(token: Mint, quote: Mint) -> Iterator[SpecError]:
+    # o feed de preços é em USD: só dá para operar gastando stablecoin de dólar
+    if not quote.is_usd_stable:
+        yield SpecError(
+            "symbol",
+            f"entrada {quote.symbol} precisa ser USDC ou USDT (par TOKEN-USDC)",
+        )
+    if token.is_usd_stable:
+        yield SpecError("symbol", f"saída {token.symbol} não pode ser stablecoin")
+
+
+def _allowed(token: Mint, quote: Mint, limits: SpecLimits) -> Iterator[SpecError]:
+    if not limits.allowed_symbols:
+        return
+    for mint in (token, quote):
+        if mint.symbol not in limits.allowed_symbols:
+            yield SpecError("symbol", f"símbolo não permitido: {mint.symbol}")
+
+
+def _sizing(spec: StrategySpec, limits: SpecLimits, now: datetime):
+    usd = spec.sizing.usd
+    if usd > limits.max_trade_usd:
+        # acima do limite por trade toda compra seria recusada pela política
+        yield SpecError(
+            "sizing.usd", f"{usd} USD acima do limite por trade {limits.max_trade_usd}"
+        )
+    if usd > spec.budget_usd:
+        yield SpecError(
+            "sizing.usd", f"{usd} USD acima do budget_usd {spec.budget_usd}"
+        )
+
+
+def _expiry(spec: StrategySpec, limits: SpecLimits, now: datetime):
+    if spec.expires_at <= now:
+        yield SpecError("expires_at", "já expirou")
+    if spec.expires_at > now + timedelta(days=limits.max_days):
+        yield SpecError("expires_at", f"mais de {limits.max_days} dias no futuro")
+
+
+RULES: tuple[Rule, ...] = (_symbol, _sizing, _expiry)
+
+
+def validate(
+    spec: StrategySpec, limits: SpecLimits, now: datetime | None = None
+) -> list[SpecError]:
+    now = now or datetime.now(UTC)
+    return [error for rule in RULES for error in rule(spec, limits, now)]

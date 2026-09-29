@@ -7,17 +7,17 @@ from typer.testing import CliRunner
 
 import main as main_module
 from main import __parse_kwargs, _get_notification_svc, _get_strategy_obj
-from trader import NotImplementedStrategy
 from trader.ledger import Ledger, ledger_path
 from trader.models import SOLANA_MINTS, SwapResult
-from trader.models.bot_config import RunningMode
 from trader.models.intent import IntentStatus
+from trader.models.mode import RunningMode
 from trader.notification.notification_service import (
     NullNotificationService,
     TelegramNotificationService,
 )
-from trader.paper import PaperJupiterProvider
+from trader.paper import SimulatedExecutor
 from trader.paths import policy_file
+from trader.strategies_registry import NotImplementedStrategy
 from trader.trading_strategy import (
     RandomStrategy,
     StrategyComposer,
@@ -65,12 +65,10 @@ def test_run_composer_without_strategy_args():
     mock_bot = mock.Mock()
     with (
         mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
-        mock.patch("main.AsyncJupiterProvider", return_value=mock.Mock()),
-        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
         mock.patch(
-            "trader.models.bot_config.get_keypair_from_env",
-            return_value=mock.Mock(),
+            "trader.wiring.AsyncJupiterProvider.on_chain", return_value=mock.Mock()
         ),
+        mock.patch("trader.wiring.keypair_from_env", return_value=mock.Mock()),
     ):
         result = CliRunner().invoke(
             main_module.app, ["run", "dry", "SOL-USDC", "composer"]
@@ -80,19 +78,17 @@ def test_run_composer_without_strategy_args():
     mock_bot.run.assert_called_once()
     config = bot_cls.call_args.args[0]
     assert isinstance(config.strategy, StrategyComposer)
-    assert config.mode == RunningMode.DRY
+    assert config.trader.service.mode == "dry"
 
 
 def test_run_random_with_strategy_args():
     mock_bot = mock.Mock()
     with (
         mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
-        mock.patch("main.AsyncJupiterProvider", return_value=mock.Mock()),
-        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
         mock.patch(
-            "trader.models.bot_config.get_keypair_from_env",
-            return_value=mock.Mock(),
+            "trader.wiring.AsyncJupiterProvider.on_chain", return_value=mock.Mock()
         ),
+        mock.patch("trader.wiring.keypair_from_env", return_value=mock.Mock()),
     ):
         result = CliRunner().invoke(
             main_module.app,
@@ -145,9 +141,9 @@ def _invoke_swap(argv, policy: str | None = PERMISSIVE_POLICY):
     mock_provider.aclose = mock.AsyncMock()
     with (
         mock.patch(
-            "main.AsyncJupiterProvider", return_value=mock_provider
+            "trader.wiring.AsyncJupiterProvider.on_chain", return_value=mock_provider
         ) as provider_cls,
-        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
+        mock.patch("trader.wiring.keypair_from_env", return_value=mock.Mock()),
     ):
         result = CliRunner().invoke(main_module.app, ["swap", *argv])
     return result, mock_provider, provider_cls
@@ -201,22 +197,9 @@ def test_swap_command_zero_quantity_fails():
     mock_provider.swap.assert_not_awaited()
 
 
-def test_start_defaults_to_dry_mode():
-    mock_bot = mock.Mock()
-    with (
-        mock.patch("main.AsyncWebsocketTradingBot", return_value=mock_bot) as bot_cls,
-        mock.patch("main.AsyncJupiterProvider", return_value=mock.Mock()) as prov,
-        mock.patch("main.get_keypair_from_env", return_value=mock.Mock()),
-        mock.patch(
-            "trader.models.bot_config.get_keypair_from_env",
-            return_value=mock.Mock(),
-        ),
-    ):
-        result = CliRunner().invoke(main_module.app, ["start"])
-
-    assert result.exit_code == 0
-    prov.assert_called_once_with(keypair=mock.ANY, is_dryrun=True)
-    assert bot_cls.call_args.args[0].mode == RunningMode.DRY
+def test_start_command_was_removed():
+    result = CliRunner().invoke(main_module.app, ["start"])
+    assert result.exit_code != 0
 
 
 def test_swap_command_parses_quantity_as_exact_decimal():
@@ -370,11 +353,12 @@ def test_run_paper_needs_no_private_key(monkeypatch):
 
     assert result.exit_code == 0, result.output
     config = bot_cls.call_args.args[0]
-    assert config.mode == RunningMode.PAPER
-    assert isinstance(config.provider, PaperJupiterProvider)
-    assert config.provider.wallet.balance(
-        SOLANA_MINTS.get_by_symbol("USDC").mint
-    ) == Decimal("100")
+    assert config.trader.service.mode == "paper"
+    executor = config.trader.service.provider.executor
+    assert isinstance(executor, SimulatedExecutor)
+    assert executor.wallet.balance(SOLANA_MINTS.get_by_symbol("USDC").mint) == Decimal(
+        "100"
+    )
     # vai para o stderr: o stdout fica reservado para saídas `--json`
     assert "Carteira paper criada" in result.stderr
     assert "Carteira paper criada" not in result.stdout
@@ -398,7 +382,8 @@ def test_run_record_ticks_passes_recorder(tmp_path):
             ],
         )
     assert result.exit_code == 0, result.output
-    assert bot_cls.call_args.kwargs["tick_recorder"].path == Path("ticks/sol.csv")
+    on_tick = bot_cls.call_args.args[0].on_tick
+    assert on_tick.__self__.path == Path("ticks/sol.csv")
 
 
 def test_backtest_from_ticks_file():
@@ -444,8 +429,8 @@ def test_backtest_requires_a_source():
 
 def test_paper_uses_its_own_policy_section():
     policy_file().write_text("[paper.limits]\nmax_trade_usd = 1000\n", encoding="utf-8")
-    paper = main_module._build_gateway(RunningMode.PAPER)
-    dry = main_module._build_gateway(RunningMode.DRY)
+    paper = main_module.build_gateway(RunningMode.PAPER)
+    dry = main_module.build_gateway(RunningMode.DRY)
     try:
         assert paper.policy.max_trade_usd == 1000
         assert dry.policy.max_trade_usd == 25

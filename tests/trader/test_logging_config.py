@@ -29,5 +29,6 @@ def test_console_filter_allows_bot_logs_and_warnings_only():
 
     assert f.filter(record("bot", logging.DEBUG))
     assert f.filter(record("trader.trading_strategy", logging.DEBUG))
+    assert f.filter(record("trader.strategy_spec.strategy", logging.DEBUG))
     assert not f.filter(record("trader.async_account", logging.INFO))
     assert f.filter(record("trader.async_account", logging.WARNING))

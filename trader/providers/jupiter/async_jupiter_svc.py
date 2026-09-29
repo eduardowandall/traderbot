@@ -1,88 +1,92 @@
+"""Swaps pela Jupiter, independentes de onde são executados.
+
+`AsyncJupiterProvider` faz o que vale para todo local de execução:
+- converte quantidades UI -> raw (`buy`/`sell`);
+- pede a quote e aplica o teto de impacto de preço;
+- re-tenta falhas anteriores ao envio, escalando o slippage até um teto;
+- busca e enriquece os custos depois da execução (`fetch_swap_costs`).
+
+Quem executa é o `Executor` (`executor.py`): on-chain (com chave) ou simulado
+(`trader.paper`). Crie com `AsyncJupiterProvider.on_chain(keypair, ...)` ou
+`trader.paper.paper_provider(wallet, ...)`.
+"""
+
 import asyncio
-import json
 import logging
-import time
 from dataclasses import replace
-from datetime import datetime
 from decimal import Decimal
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.solders import SendTransactionResp
-from solders.transaction import VersionedTransaction
 
 from trader.models import SOLANA_MINTS, SwapResult, TickerData
 from trader.models.account_data import MintBalance
-from trader.models.costs import BASE_FEE_LAMPORTS, ESTIMATED, QUOTE, TradeCosts
-from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient, Interval
-from trader.providers.jupiter.async_rpc_client import (
-    AsyncRPCClient,
-    TransactionFailedError,
+from trader.models.costs import QUOTE, TradeCosts
+
+# reexportados: os erros moram em models (camada core)
+from trader.models.errors import SwapRejectedError as SwapRejectedError
+from trader.models.errors import (
+    TransactionSubmittedError as TransactionSubmittedError,
 )
+from trader.models.public_data import Interval
+from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
+from trader.providers.jupiter.candles import candles_to_tickers
+from trader.providers.jupiter.executor import Executor, OnChainExecutor
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.providers.jupiter.swap_costs import SwapLegs, parse_swap_costs, quote_info
-
-
-class TransactionSubmittedError(Exception):
-    """Falha depois que a transação já foi enviada à rede.
-
-    Não deve ser re-tentada automaticamente: a transação pode ter sido
-    executada, e um novo envio poderia duplicar o swap.
-    """
-
-    def __init__(self, message: str, signature: str | None = None):
-        super().__init__(message)
-        # guardada no ledger: permite conferir a transação e cobrar a taxa
-        # mesmo se ela falhou
-        self.signature = signature
-
+from trader.providers.jupiter.swap_costs import quote_info
 
 # tempo máximo para buscar os custos de um swap já confirmado
 COSTS_TIMEOUT_SECONDS = 20
-
-
-class SwapRejectedError(Exception):
-    """Swap recusado antes do envio por uma regra de segurança.
-
-    Não é re-tentado: a mesma quote seria recusada novamente.
-    """
-
 
 DEFAULT_MAX_PRICE_IMPACT_PCT = Decimal("1")
 DEFAULT_MAX_SLIPPAGE_BPS = 100
 SLIPPAGE_RETRY_STEP_BPS = 25
 
 
-class AsyncJupiterProvider:
+class AsyncJupiterProvider[E: Executor]:
+    """Genérico no executor: `AsyncJupiterProvider[OnChainExecutor]` etc."""
+
     def __init__(
         self,
-        keypair: Keypair | None,
-        rpc_client=None,
+        executor: E,
+        # AsyncJupiterClient, ou um substituto com a mesma interface (replay)
         jupiter_client=None,
-        is_dryrun=False,
         max_price_impact_pct: Decimal | None = DEFAULT_MAX_PRICE_IMPACT_PCT,
         max_slippage_bps: int = DEFAULT_MAX_SLIPPAGE_BPS,
     ):
-        self.keypair = keypair
+        self.executor = executor
         # None desativa a checagem de impacto de preço
         self.max_price_impact_pct = max_price_impact_pct
         # teto para o aumento automático de slippage nas re-tentativas
         self.max_slippage_bps = max_slippage_bps
-
-        self.is_dryrun = is_dryrun
-        self.rpc_client = rpc_client or AsyncRPCClient(is_dryrun=is_dryrun)
         self.jupiter_client = jupiter_client or AsyncJupiterClient()
         self.logger = logging.getLogger(self.__module__)
-        self.logger.info(f"Starting bot on {is_dryrun=}")
+
+    @classmethod
+    def on_chain(
+        cls,
+        keypair: Keypair,
+        rpc_client: AsyncRPCClient | None = None,
+        jupiter_client: AsyncJupiterClient | None = None,
+        is_dryrun: bool = False,
+        **limits,
+    ) -> AsyncJupiterProvider[OnChainExecutor]:
+        """Provider que assina e envia (ou só simula, em dry run) com a chave."""
+        client = jupiter_client or AsyncJupiterClient()
+        executor = OnChainExecutor(keypair, rpc_client, client, is_dryrun)
+        return AsyncJupiterProvider(executor, client, **limits)
 
     @property
-    def pubkey(self) -> Pubkey:
-        if self.keypair is None:
-            raise RuntimeError("Provider sem chave privada (paper trading?)")
-        return self.keypair.pubkey()
+    def balances_track_fills(self) -> bool:
+        return self.executor.balances_track_fills
+
+    @property
+    def native_fee_reserve(self) -> Decimal:
+        return self.executor.native_fee_reserve
 
     def __repr__(self):
-        return f"{self.__class__.__name__}.{self.pubkey} with rpc {str(self.rpc_client)} and client {str(self.jupiter_client)}"
+        return f"{self.__class__.__name__} via {self.executor!r}"
 
     async def get_candles(
         self,
@@ -93,49 +97,13 @@ class AsyncJupiterProvider:
         candles_json = await self.jupiter_client.get_candles(
             str(mint), interval=interval, candle_qty=candle_qty
         )
-        tickers: list[TickerData] = []
-        for candle in candles_json:
-            tickers.append(
-                TickerData(
-                    pair="ignored",
-                    timestamp=datetime.fromtimestamp(candle["time"]),
-                    high=Decimal(candle["high"]),
-                    low=Decimal(candle["low"]),
-                    open=Decimal(candle["open"]),
-                    last=Decimal(candle["close"]),
-                    buy=Decimal(candle["open"]),
-                    sell=Decimal(candle["open"]),
-                    vol=Decimal(candle["volume"]),
-                )
-            )
-        return tickers
+        return candles_to_tickers(candles_json)
 
     async def get_price_ticker_data(self, mint: Pubkey) -> Decimal:
-        price = await self.jupiter_client.get_price(str(mint))
-        return price
+        return await self.jupiter_client.get_price(str(mint))
 
     async def get_account_balance(self) -> list[MintBalance]:
-        balances = []
-
-        # Saldo de SOL (lamports)
-        amount = await self.rpc_client.get_lamports(self.pubkey)
-        solana_mint = SOLANA_MINTS.get_by_symbol("SOL")
-        balances.append(
-            MintBalance(
-                available=solana_mint.raw_to_ui(amount),
-                mint=solana_mint.pubkey,
-            )
-        )
-
-        mint_balances = await self.rpc_client.get_account_balance(self.pubkey)
-        for mint, amount in mint_balances.items():
-            mint_info = SOLANA_MINTS.get(mint)
-            if not mint_info:
-                continue
-            balances.append(
-                MintBalance(available=mint_info.raw_to_ui(amount), mint=mint)
-            )
-        return balances
+        return await self.executor.balances()
 
     async def buy(
         self,
@@ -263,61 +231,6 @@ class AsyncJupiterProvider:
                 f"{self.max_price_impact_pct}%"
             )
 
-    async def _get_swap_transaction(
-        self, quote: JupiterQuoteResponse
-    ) -> VersionedTransaction:
-        return await self.jupiter_client.get_swap_transaction(quote, self.pubkey)
-
-    async def _get_signed_transaction(
-        self, tx: VersionedTransaction
-    ) -> VersionedTransaction:
-        if self.keypair is None:
-            raise RuntimeError("Provider sem chave privada não pode assinar")
-        return await self.rpc_client.sign_transaction(tx, self.keypair)
-
-    async def _send_signed_transaction(
-        self, new_tx: VersionedTransaction
-    ) -> SendTransactionResp:
-        await self.rpc_client.simulate_transaction(new_tx)
-
-        resp = await self.rpc_client.send_transaction(new_tx)
-
-        return resp
-
-    async def _wait_for_confirmation(self, signature, timeout=30):
-        start = time.time()
-
-        while True:
-            if await self._poll_confirmation(signature):
-                return True
-            if time.time() - start > timeout:
-                raise TimeoutError("Transação não foi confirmada a tempo.")
-            await asyncio.sleep(1.0)
-
-    async def _poll_confirmation(self, signature) -> bool:
-        """Uma consulta; erros transitórios de RPC contam como "ainda não"."""
-        try:
-            return await self.rpc_client.check_signature_is_confirmed(signature)
-        except TransactionFailedError:
-            raise
-        except Exception as ex:
-            self.logger.warning(f"Erro ao consultar confirmação: {ex}")
-            return False
-
-    async def _send_transaction_and_wait_for_confirmation(
-        self, new_tx: VersionedTransaction
-    ) -> SendTransactionResp:
-        resp = await self._send_signed_transaction(new_tx)
-        signature = resp.value
-        try:
-            await self._wait_for_confirmation(signature)
-        except Exception as ex:
-            raise TransactionSubmittedError(
-                f"Transação {signature} enviada mas não confirmada: {ex}",
-                signature=str(signature),
-            ) from ex
-        return resp
-
     async def _do_swap(
         self,
         input_mint: str,
@@ -328,21 +241,7 @@ class AsyncJupiterProvider:
         quote = await self._get_quote_with_route(
             input_mint, output_mint, amount_in, slippage_bps
         )
-        tx = await self._get_swap_transaction(quote)
-        new_tx = await self._get_signed_transaction(tx)
-        resp = await self._send_transaction_and_wait_for_confirmation(new_tx)
-
-        # valores da quote; os efetivos (e os custos) vêm de `fetch_swap_costs`,
-        # chamado só depois que o ledger marcou a intenção como executada
-        return SwapResult(
-            signature=json.loads(resp.to_json())["result"],
-            input_mint=input_mint,
-            output_mint=output_mint,
-            in_amount=int(quote.inAmount),
-            out_amount=int(quote.outAmount),
-            quote=quote,
-            message=new_tx.message,
-        )
+        return await self.executor.execute(input_mint, output_mint, quote)
 
     async def fetch_swap_costs(self, result: SwapResult) -> TradeCosts:
         """Custos reais do swap. **Nunca** levanta exceção.
@@ -355,50 +254,14 @@ class AsyncJupiterProvider:
         if costs is None:
             try:
                 async with asyncio.timeout(COSTS_TIMEOUT_SECONDS):
-                    costs = await self._read_costs(result)
+                    costs = await self.executor.fetch_costs(result)
             except Exception as ex:
                 self.logger.warning(f"Custos de {result.signature} indisponíveis: {ex}")
         return _with_quote_info(costs or TradeCosts(source=QUOTE), result)
 
-    async def _read_costs(self, result: SwapResult) -> TradeCosts | None:
-        if self.is_dryrun:
-            return await self._estimated_costs(result)
-        tx = await self.rpc_client.get_confirmed_transaction(result.signature)
-        if tx is None:
-            return None
-        ui_tx = tx.transaction
-        return parse_swap_costs(
-            tx.meta,
-            list(getattr(getattr(ui_tx, "message", None), "account_keys", [])),
-            len(getattr(ui_tx, "signatures", [])),
-            self.pubkey,
-            SwapLegs(
-                result.input_mint,
-                result.output_mint,
-                result.in_amount,
-                result.out_amount,
-            ),
-        )
-
-    async def _estimated_costs(self, result: SwapResult) -> TradeCosts | None:
-        """Dry run: a transação não é enviada; a taxa é a que a rede cobraria."""
-        if result.message is None:
-            return None
-        fee = await self.rpc_client.get_fee_for_message(result.message)
-        if fee is None:
-            return None
-        signatures = result.message.header.num_required_signatures
-        return TradeCosts(
-            source=ESTIMATED,
-            fee_lamports=fee,
-            priority_fee_lamports=max(fee - BASE_FEE_LAMPORTS * signatures, 0),
-            actual_in_amount=result.in_amount,
-            actual_out_amount=result.out_amount,
-        )
-
     async def aclose(self) -> None:
         """Fecha as conexões HTTP/WebSocket/RPC abertas."""
-        for client in (self.jupiter_client, self.rpc_client):
+        for client in (self.jupiter_client, self.executor):
             try:
                 await client.aclose()
             except Exception as ex:

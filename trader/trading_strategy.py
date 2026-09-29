@@ -17,9 +17,10 @@ class TradingStrategy(ABC):
     """Classe base para estratégias de trading"""
 
     # relógio e gerador aleatório injetáveis: no replay/backtest usam o tempo
-    # dos ticks e uma semente fixa, para o resultado ser determinístico
-    clock: Callable[[], datetime] = staticmethod(datetime.now)
-    rng: random.Random = random.Random()
+    # dos ticks e uma semente fixa, para o resultado ser determinístico.
+    # Definidos por instância em __init__ (subclasses devem chamá-lo).
+    clock: Callable[[], datetime]
+    rng: random.Random
 
     def __init__(self):
         self.logger = logging.getLogger(self.__module__)
