@@ -16,8 +16,9 @@ from solders.pubkey import Pubkey
 
 from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
 from trader.execution.fills import Fill, execute_trade
+from trader.market.prices import PriceOracle, usd_snapshot
 from trader.models.book import PositionBook
-from trader.models.costs import trade_rates
+from trader.models.costs import trade_rates, with_sol_usd
 from trader.models.intent import IntentSide, TradeIntent, with_idempotency_key
 from trader.models.position import Position
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
@@ -40,8 +41,12 @@ class AsyncAccount:
         source: str = "strategy",
         clock: Callable[[], datetime] = datetime.now,
         spend_cap: Callable[[], Decimal] | None = None,
+        # preços USD (Price API) para pares sem stablecoin ou sem SOL;
+        # None: esses valores ficam desconhecidos (backtest, testes)
+        prices: PriceOracle | None = None,
     ):
         self.provider = provider
+        self.prices = prices
         # teto de gasto por compra (orçamento do bucket, na moeda de entrada);
         # None = só o saldo da carteira limita
         self.spend_cap = spend_cap
@@ -64,6 +69,13 @@ class AsyncAccount:
         self._quote_is_sol = input_mint == SOL
         self._token_is_sol = output_mint == SOL
         self.book = PositionBook(SOLANA_MINTS.symbol_of(input_mint))
+        # o que o trade não precifica sozinho: o token gasto na compra (se não
+        # é stablecoin) e o SOL dos custos (se o par não tem SOL)
+        self._priced_mints: set[str] = set()
+        if not self._quote_is_usd:
+            self._priced_mints.add(str(input_mint))
+        if not (self._quote_is_sol or self._token_is_sol):
+            self._priced_mints.add(str(SOL))
 
         self.balances = None
         self.balances_last_update: datetime | None = None
@@ -178,6 +190,7 @@ class AsyncAccount:
         side: OrderSide,
         requested_quantity: Decimal,
         price: Decimal,
+        usd: dict[str, Decimal],
     ) -> Order:
         filled_quantity, fill_price, quote_amount = self._fill_amounts(fill)
         rates = trade_rates(
@@ -187,6 +200,7 @@ class AsyncAccount:
             self._quote_is_sol,
             self._token_is_sol,
         )
+        rates = with_sol_usd(rates, usd.get(str(SOL)))
         return Order(
             order_id=fill.result.signature,
             input_mint=str(self.input_mint),
@@ -215,13 +229,18 @@ class AsyncAccount:
         side: OrderSide,
         requested_quantity: Decimal,
         price: Decimal,
+        usd: dict[str, Decimal],
     ) -> Order:
-        """Executa a intenção e converte o fill em `Order`."""
+        """Executa a intenção e converte o fill em `Order`.
+
+        `usd` são os preços tirados antes do trade: depois de EXECUTED nada
+        pode falhar, então nenhum preço é buscado aqui.
+        """
         try:
             fill = await execute_trade(self.gateway, self.provider, intent, call)
             # a carteira mudou: o próximo get_balance relê
             self.balances = None
-            return self._to_order(fill, side, requested_quantity, price)
+            return self._to_order(fill, side, requested_quantity, price, usd)
         except PolicyDeniedError, DuplicateIntentError:
             raise  # recusa esperada; o bot registra como aviso
         except Exception as ex:
@@ -230,16 +249,31 @@ class AsyncAccount:
 
     # --- intenções ---------------------------------------------------------
 
-    def _notional_usd(self, price: Decimal, quantity: Decimal) -> Decimal | None:
+    def _notional_usd(
+        self,
+        side: IntentSide,
+        price: Decimal,
+        quantity: Decimal,
+        spend_amount: Decimal,
+        usd: dict[str, Decimal],
+    ) -> Decimal | None:
         """Valor do trade em USD, quando dá para saber.
 
-        `price` é o preço de mercado do token em USD, mas as estratégias
-        dimensionam `quantity` a partir do saldo do input_mint. Só quando o
-        input_mint é stablecoin de dólar as duas unidades batem; nos demais
-        pares (ex: USDC-SOL) o valor seria subestimado pelo preço do SOL e
-        furaria os limites da política, então fica desconhecido.
+        Venda: quantidade x preço do sinal (o feed é em USD em todo par).
+        Compra: valor gasto x preço USD do token gasto. As estratégias
+        dimensionam a compra pelo saldo do input_mint, então só o valor gasto
+        está na unidade certa; sem preço do input (Price API fora) fica
+        desconhecido, e a política recusa (`allow_unknown_notional`).
         """
-        return quantity * price if self._quote_is_usd else None
+        if side == IntentSide.SELL:
+            return quantity * price
+        if self._quote_is_usd:
+            return spend_amount
+        rate = usd.get(str(self.input_mint))
+        return None if rate is None else spend_amount * rate
+
+    async def _usd_snapshot(self) -> dict[str, Decimal]:
+        return await usd_snapshot(self.prices, self._priced_mints)
 
     def _intent(
         self,
@@ -247,6 +281,7 @@ class AsyncAccount:
         price: Decimal,
         quantity: Decimal,
         spend_amount: Decimal,
+        usd: dict[str, Decimal],
         idempotency_key: str | None = None,
         rationale: str | None = None,
     ) -> TradeIntent:
@@ -262,7 +297,7 @@ class AsyncAccount:
             spend_mint=str(spend),
             receive_mint=str(receive),
             spend_amount=spend_amount,
-            notional_usd=self._notional_usd(price, quantity),
+            notional_usd=self._notional_usd(side, price, quantity, spend_amount, usd),
             price=price,
             quantity=quantity,
             rationale=rationale,
@@ -350,11 +385,13 @@ class AsyncAccount:
             )
             quantity = limit / price
 
+        usd = await self._usd_snapshot()
         intent = self._intent(
             IntentSide.BUY,
             price,
             quantity,
             quantity * price,
+            usd,
             idempotency_key=idempotency_key,
             rationale=rationale,
         )
@@ -370,6 +407,7 @@ class AsyncAccount:
             OrderSide.BUY,
             quantity,
             price,
+            usd,
         )
         self.logger.debug(f"ORDER PLACED: {asdict(order)}", extra=asdict(order))
         self.gateway.record_fill(intent.intent_id, order)
@@ -395,11 +433,13 @@ class AsyncAccount:
             )
             quantity = available
 
+        usd = await self._usd_snapshot()
         intent = self._intent(
             IntentSide.SELL,
             price,
             quantity,
             quantity,
+            usd,
             # uma venda por posição: evita vender duas vezes a mesma entrada
             idempotency_key=f"{self.account_id}:sell:{position.entry_order.order_id}",
             rationale=rationale,
@@ -415,6 +455,7 @@ class AsyncAccount:
             OrderSide.SELL,
             quantity,
             price,
+            usd,
         )
         self.logger.debug(
             f"ORDER PLACED: order={asdict(order)} position={asdict(position)}",

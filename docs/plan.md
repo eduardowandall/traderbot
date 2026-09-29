@@ -28,7 +28,7 @@ implement.
 
 ## 2. Where we are
 
-**Overall: about 58% of the end goal.** The foundations (safety, ledger,
+**Overall: about 61% of the end goal.** The foundations (safety, ledger,
 execution seam, spec format) are largely in place. What is missing is mostly
 the part that makes strategies *live*: storing them, running many at once, and
 approving them for real money.
@@ -36,10 +36,10 @@ approving them for real money.
 | Goal | Done | Missing | Score |
 |---|---|---|---|
 | 1. One gateway to create strategies that run automatically | Spec format, `strategy schema/validate/backtest` (JSON CLI), `TradeService` seam, `run ... spec` | Storing specs (`submit`), a registry, runners that start stored specs, real-mode approval | **35%** |
-| 2. Manual trades | `swap` runs in the `manual` bucket through the same pipeline as strategies; the fill (real amounts) and costs are recorded and show in `pnl` / `ledger list` | Allowed to spend funds that buckets hold; no SOL fee reserve; no USD value when neither side is a stable | **75%** |
+| 2. Manual trades | `swap` runs in the `manual` bucket through the same pipeline as strategies; the fill (real amounts) and costs are recorded and show in `pnl` / `ledger list` | Allowed to spend funds that buckets hold; no SOL fee reserve | **80%** |
 | 3. Structured strategy building | Spec v1: 13 condition types, required stop, warm-up, validation, backtest | One sizer only, USDC/USDT inputs only, no expression language; the legacy strategies live outside the spec | **65%** |
 | 4. One wallet, bucket per strategy | In-process buckets with a budget cap that shrinks after losses; per-bucket ledger account; buckets on one wallet can't double-spend | One strategy per process, budgets not persisted, no wallet-level allocation view or aggregate reconcile | **45%** |
-| 5. Accurate trades and costs | Real mode reads real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; hash-chained ledger | Costs of non-SOL pairs have no USD value (`[!] incompleto`); no USD value for non-stable inputs; no mark-to-market | **70%** |
+| 5. Accurate trades and costs | Real mode reads real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; hash-chained ledger; every registry pair gets USD values (Price API V3 fills what the trade can't price) | No mark-to-market; paper/backtest fills are the quote's; USD values depend on the Price API being up | **80%** |
 | (Foundations: safety, tests, layering) | Policy, kill switch, breaker, idempotency, UNCONFIRMED blocking, 432 tests, enforced layering | Key still shares a process with strategies | 85% |
 
 The overall figure is the plain average of goals 1–5.
@@ -345,6 +345,49 @@ anything else so each later step has a clean diff.
 - **Exit:** no `[!] incompleto` on pairs in the registry; a `JUP-USDC` swap
   paid in SOL has a USD notional.
 - Lifting the USDC/USDT-only rule for specs is a feature (B6).
+- **API check (2026-09-29, live):** `GET {JUPITER_API_URL}/price/v3?ids=a,b`
+  works unauthenticated on `api.jup.ag`. It returns
+  `{mint: {usdPrice, blockId, decimals, liquidity, priceChange24h, ...}}`
+  for all eight registry mints, and silently omits unknown ids. Stables
+  come back as about 0.9999, not 1.
+- **Design (2026-09-29):**
+  - `AsyncJupiterClient.get_usd_prices(mints) -> dict[str, Decimal]`,
+    parsed with `parse_float=Decimal`; missing mints are absent.
+  - `trader/market/prices.py` (market layer):
+    - a `PriceOracle` protocol with `usd_prices(mints)`;
+    - `JupiterPriceOracle(client, ttl=10s)`, which caches per mint and
+      treats USDC/USDT as exactly 1 USD, as the rest of the code already
+      does (`quote_usd = 1`, notional = amount spent);
+    - `usd_snapshot(oracle, mints)`, which **never raises**: it uses a 5s
+      timeout, logs a warning and returns `{}` on failure, so a price
+      problem can only make values unknown, never block or fail a trade.
+  - **The prices are taken before the trade, never after it.** Anything
+    after `EXECUTED` must not fail (the costs rule), so the account and the
+    manual swap take one snapshot before building the intent and reuse it.
+  - **Notional (policy USD value):**
+    - a buy is the amount spent × `usd(input)`, which gives the same number
+      as today for stable inputs;
+    - a sell is the quantity × the signal's USD price, which is known on
+      every pair because the feed is USD;
+    - a manual swap is the amount × `usd(spend)`.
+  - **Rates:** `trade_rates` stays the first source. A new
+    `with_sol_usd(rates, sol_usd)` (in `models/costs.py`) fills `sol_usd`
+    and `sol_in_quote` from the snapshot when the pair has no SOL, so costs
+    get a USD and quote value and PnL is complete. For manual swaps with no
+    stable side, the USD price of the token received comes from
+    `usd(spend) × fill_price`, falling back to `usd(receive)`.
+  - `TradeService(..., prices=None)` passes the oracle to its accounts and
+    to `swap`; `None` keeps today's behavior. That is what backtests (no
+    network) and unit tests use. `wiring.build_trade_service` passes a
+    `JupiterPriceOracle` over the provider's Jupiter client.
+  - **Websocket fallback:** `JupiterMarketData.get_price` waits at most
+    `price_timeout` (30s) for the websocket. On a timeout or a websocket
+    failure it logs a warning and returns the Price API price, so the bot
+    keeps ticking (and its stops keep working) while the feed is quiet or
+    down. The next call tries the websocket again.
+  - **Moved to B6:** pricing the strategy's feed in input-token units
+    (`price(out) / price(in)`). That changes what strategies see, and it
+    only matters once non-stable inputs are allowed for strategies.
 
 #### A5. Split the ledger module and move the order codec — M
 - **Problem:** `trader/ledger/ledger.py` (663 lines) holds the connection and
@@ -515,7 +558,9 @@ The unified entry point for humans and agents.
 - Sizers: percent of the bucket (now meaningful, since buckets exist).
 - The `expr` condition type: a restricted parser that compiles to the same
   comparison nodes.
-- Lift the USDC/USDT-only input rule for specs (needs A4).
+- Lift the USDC/USDT-only input rule for specs and backtests (needs A4): feed
+  strategies the output priced in input-token units (`price(out) / price(in)`)
+  and replay two price series.
 - Port the useful legacy strategies to specs, then remove
   `TargetValueStrategy` and the composer family (`RandomStrategy` stays for
   testing). Adding a condition type stays a three-place change (model, union,
@@ -543,7 +588,7 @@ The unified entry point for humans and agents.
 | A1 One trade pipeline | **done** (2026-09-29) | 443 tests (11 new). `execute_trade` is the only cost fetch; backtests use `TradeGateway.in_memory()`. Checked live: a 300-candle random backtest made 161 legs through it |
 | A2 Manual swaps as a bucket | **done** (2026-09-29) | 451 tests (8 new). `TradeService.swap` + `trading_service/manual.py`; `main._execute_swap` removed. Checked live in paper (isolated data dir): USDC->SOL and SOL->JUP recorded with costs, an over-limit swap denied |
 | A3 Split `AsyncAccount` | **done** (2026-09-29) | 454 tests (4 new); live suite green. `PositionBook` in `trader/models/book.py`; `AsyncAccount` 520 -> 427 lines; dead market-data passthroughs removed from the account, the provider and `ReplayQuoteClient` |
-| A4 USD value for every trade | not started | |
+| A4 USD value for every trade | **done** (2026-09-29) | 472 tests (18 new); live suite 6/6 (new: Price API vs websocket, fallback). `trader/market/prices.py` (`JupiterPriceOracle`, `usd_snapshot`), `with_sol_usd`, notional for every pair, websocket fallback. Strategy-side price units moved to B6 |
 | A5 Split the ledger | not started | |
 | A6 Split `main.py` | not started | |
 | A7 Legacy strategies clean-up | not started | |
@@ -576,14 +621,19 @@ Owner task, outside the code: a one-week paper soak run.
   - LP/AMM fees, price impact and slippage are already in the actual amounts
     and are never subtracted again; they are logged for information.
   - PnL is kept in native units (the quote token, plus costs in SOL) with a
-    USD estimate from rates taken from the trade itself. Pairs without SOL
-    keep costs in SOL only and are flagged `[!] incompleto` (fixed by A4).
+    USD estimate from rates taken from the trade itself. What the trade
+    can't price (the SOL price on pairs without SOL, the USD price of a
+    non-stable token spent) comes from a Price API V3 snapshot taken
+    **before** the trade. If the API is down those values stay unknown:
+    the costs are flagged `[!] incompleto`, and a buy with an unknown USD
+    value is denied unless `allow_unknown_notional = true`.
   - Costs are fetched only after the ledger marks the intent EXECUTED, and a
     failure there never retries or fails the swap.
   - See it with `main.py pnl <mode>` and `ledger list`.
 - **Prices are USD, balances are in the input token.** `Order.price` is the
   real fill only for USDC/USDT inputs; `Order.fill_price` keeps the raw
-  input-per-token price. Sizing is only meaningful for stable inputs (A4).
+  input-per-token price. Strategy sizing is only meaningful for stable
+  inputs, which is why specs and backtests require them (B6 lifts this).
 - **Manual swaps may spend any wallet funds**, including what a bucket
   holds, and keep no SOL fee reserve (B2). Their `pnl` block shows the
   costs paid; its gross/net lines are always zero, since a manual swap
@@ -610,8 +660,14 @@ Owner task, outside the code: a one-week paper soak run.
   API; the cap scales it to a percent.
 - **The price websocket (`trench-stream.jup.ag`) and candles
   (`datapi.jup.ag`) are undocumented frontend endpoints**, reached with a
-  spoofed `Origin`/`User-Agent`, with no fallback. A4 adds Price API V3 as a
-  fallback for prices; candles still have none.
+  spoofed `Origin`/`User-Agent`. Prices fall back to the documented Price
+  API V3 when the websocket fails or is quiet for 30s (A4); candles still
+  have no fallback.
+- **Keyless rate limit.** Without `JUPITER_API_KEY`, `api.jup.ag` answers
+  `429 Too Many Requests` under bursts (seen in the live suite: quote calls
+  right after candle and price calls). The live suite pauses 5s between
+  tests. Many strategy-runners on one keyless IP (B3) will need an API key
+  or the shared price hub (B7).
 
 ### 7.3 Security
 

@@ -70,6 +70,7 @@ trader/
     strategy.py                 SpecStrategy: runs a spec as a TradingStrategy
     validate.py                 parse_spec, validate(spec, SpecLimits)
   market/data.py                MarketData protocol + JupiterMarketData (read-only: no key, no RPC)
+  market/prices.py              PriceOracle + JupiterPriceOracle (Price API V3) + usd_snapshot (never raises)
   agent_api/                    what agents call: market.py, strategies.py, cli.py (JSON output), output.py
   bot/                          strategy side: knows no mode, key, ledger or provider
     config.py                   BotConfig(name, symbol, strategy, market, trader, notifier, on_tick)
@@ -143,7 +144,9 @@ Example: `uv run main.py run paper SOL-USDC random 'sell_chance=20 buy_chance=40
 
 **Each tick (`_tick` → `process_market_data`):**
 1. `market.get_price(output_mint)` reads the next price from the Jupiter
-   websocket (in USD).
+   websocket (in USD). If the websocket fails or is quiet for 30s, the price
+   comes from the documented Price API V3 instead, so the loop (and its
+   stops) keeps running.
 2. `trader.bucket()` returns a `BucketSnapshot`: what the bucket may spend
    (`available_usd`), the position, the realized PnL and the status. A
    `retiring` status stops the bot.
@@ -201,9 +204,13 @@ the order into an intent. Its position and PnL live in `account.book`, a
   - caps the quantity at what the wallet actually holds;
   - uses a fixed idempotency key per position, so one entry can never be sold
     twice.
-- **Notional:** the intent's USD value (`notional_usd`) is known only when the
-  input is USDC/USDT. For other pairs it is `None`, and the policy denies it by
-  default.
+- **Notional:** the intent's USD value (`notional_usd`). A sell is its
+  quantity times the signal's USD price. A buy is the amount spent, times the
+  USD price of the token spent (1 for USDC/USDT; otherwise from a Price API
+  snapshot, `trader/market/prices.py`). The snapshot is taken **before** the
+  trade and never raises; if it has no price, the value is `None` and the
+  policy denies the buy by default. The same snapshot gives the SOL price for
+  pairs without SOL, so their costs get a USD value.
 
 **`TradeGateway.submit(intent, execute)` (`trader/execution/gateway.py`)** is
 the **only** path to a swap:

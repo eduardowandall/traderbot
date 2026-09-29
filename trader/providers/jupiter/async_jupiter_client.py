@@ -151,6 +151,31 @@ class AsyncJupiterClient:
                 ex.add_note(f"Response: {response.text}")
             raise ex
 
+    async def get_usd_prices(self, mints: list[str]) -> dict[str, Decimal]:
+        """Preços USD da Price API V3 (documentada); mints sem preço ficam de fora.
+
+        Conferido na API real (2026-09-29): `GET /price/v3?ids=a,b` responde
+        `{mint: {"usdPrice": ..., "blockId": ..., ...}}` sem chave e omite
+        ids desconhecidos.
+        """
+        if not mints:
+            return {}
+        url = f"{self.base_url}/price/v3"
+        response = await self.client.get(
+            url, params={"ids": ",".join(mints)}, timeout=10
+        )
+        try:
+            response.raise_for_status()
+            data = json.loads(response.text, parse_float=Decimal)
+        except Exception as ex:
+            _add_response_notes(ex, url, response)
+            raise
+        return {
+            mint: Decimal(item["usdPrice"])
+            for mint, item in data.items()
+            if isinstance(item, dict) and item.get("usdPrice") is not None
+        }
+
     @logger_wrapper
     async def get_price(self, mint: str, max_reconnects: int = 5) -> Decimal:
         for attempt in range(max_reconnects + 1):

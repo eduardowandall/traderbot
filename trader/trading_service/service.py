@@ -28,6 +28,7 @@ from solders.pubkey import Pubkey
 
 from trader.async_account import AsyncAccount
 from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
+from trader.market.prices import PriceOracle
 from trader.models import Order, OrderSide
 from trader.models.errors import SwapRejectedError
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
@@ -66,8 +67,11 @@ class TradeService:
         gateway: TradeGateway,
         mode: str | None = None,
         clock: Callable[[], datetime] = datetime.now,
+        # preços USD para pares sem stablecoin/SOL; None no backtest e testes
+        prices: PriceOracle | None = None,
     ):
         self.provider = provider
+        self.prices = prices
         # no backtest, `TradeGateway.in_memory()`
         self.gateway = gateway
         self.mode = mode
@@ -100,6 +104,7 @@ class TradeService:
             account_id=self.account_id(name),
             source=source,
             clock=self.clock,
+            prices=self.prices,
         )
         bucket = _Bucket(account, budget_usd)
         if budget_usd is not None:
@@ -163,6 +168,7 @@ class TradeService:
                     request,
                     source,
                     self.clock(),
+                    self.prices,
                 ),
             )
 

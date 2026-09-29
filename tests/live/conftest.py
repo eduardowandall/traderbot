@@ -6,11 +6,14 @@ pode assinar: a chave, o RPC e o Telegram saem do ambiente, e o
 política em `tmp_path`. Só modo paper e comandos de leitura.
 """
 
+import os
+import time
 from pathlib import Path
 
 import pytest
 
 LIVE_DIR = Path(__file__).parent
+PAUSE_SECONDS = 5
 SECRETS = (
     "SOLANA_PRIVATE_KEY",
     "SOLANA_PUBLIC_KEY",
@@ -26,6 +29,15 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if LIVE_DIR in Path(item.fspath).parents:
             item.add_marker(pytest.mark.live)
+
+
+@pytest.fixture(autouse=True)
+def rate_limit_pause():
+    # sem JUPITER_API_KEY a api.jup.ag tem um limite baixo (429 Too Many
+    # Requests): testes seguidos estouram; uma pausa entre eles basta
+    yield
+    if not os.getenv("JUPITER_API_KEY"):
+        time.sleep(PAUSE_SECONDS)
 
 
 @pytest.fixture(autouse=True)

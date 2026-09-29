@@ -1,5 +1,6 @@
 """Dados de mercado reais: preço, candles e resumo (comandos de agente)."""
 
+import asyncio
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -8,8 +9,12 @@ from pathlib import Path
 
 from live_helpers import invoke, invoke_json
 
+from trader.market import JupiterMarketData, JupiterPriceOracle
+from trader.models import SOLANA_MINTS
 from trader.paths import PROJECT_ROOT
+from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 
+SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 EXAMPLE_SPEC = str(PROJECT_ROOT / "docs" / "examples" / "spec-sol-dip.json")
 
 
@@ -53,3 +58,27 @@ def test_random_backtest_trades_on_real_candles():
     assert "300 ticks" in result.stdout
     trades = re.search(r"trades: (\d+)", result.stdout)
     assert trades and int(trades.group(1)) > 10
+
+
+def test_price_api_prices_every_registry_mint_close_to_the_websocket():
+    async def check():
+        client = AsyncJupiterClient()
+        try:
+            oracle = JupiterPriceOracle(client)
+            mints = [m.mint for m in SOLANA_MINTS.values()]
+            prices = await oracle.usd_prices(mints)
+            ws_sol = await JupiterMarketData(client).get_price(SOL)
+            # websocket mudo: o preço vem da Price API
+            fallback = await JupiterMarketData(client, price_timeout=0.001).get_price(
+                SOL
+            )
+        finally:
+            await client.aclose()
+        return prices, ws_sol, fallback
+
+    prices, ws_sol, fallback = asyncio.run(check())
+
+    assert set(prices) == {m.mint for m in SOLANA_MINTS.values()}
+    assert prices[SOLANA_MINTS.get_by_symbol("USDC").mint] == Decimal("1")
+    assert abs(prices[SOL] / ws_sol - 1) < Decimal("0.02")
+    assert abs(fallback / ws_sol - 1) < Decimal("0.02")

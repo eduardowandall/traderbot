@@ -13,6 +13,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
 from trader.execution import TradeGateway
+from trader.market.prices import JupiterPriceOracle
 from trader.models.mode import RunningMode
 from trader.paper import DEFAULT_PAPER_BALANCES, SimulatedWallet, paper_provider
 from trader.paths import data_dir
@@ -78,4 +79,6 @@ def build_trade_service(
     Quem cria fecha: `service.aclose()` (provider) e o ledger do gateway.
     """
     provider = build_provider(mode, on_wallet_created, **limits)
-    return TradeService(provider, build_gateway(mode), mode=str(mode))
+    # preços USD pela Price API, no mesmo cliente Jupiter das quotes
+    prices = JupiterPriceOracle(provider.jupiter_client)
+    return TradeService(provider, build_gateway(mode), mode=str(mode), prices=prices)

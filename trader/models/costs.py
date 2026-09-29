@@ -98,6 +98,18 @@ def trade_rates(
     return TradeRates(quote_usd, None, None)
 
 
+def with_sol_usd(rates: TradeRates, sol_usd: Decimal | None) -> TradeRates:
+    """Completa o preço do SOL de um par sem SOL (vindo da Price API).
+
+    As taxas do próprio trade vêm primeiro; isto só preenche o que falta,
+    para os custos (pagos em SOL) terem valor em USD e em cotação.
+    """
+    if rates.sol_usd is not None or sol_usd is None:
+        return rates
+    sol_in_quote = sol_usd / rates.quote_usd if rates.quote_usd else None
+    return TradeRates(rates.quote_usd, sol_usd, sol_in_quote)
+
+
 @dataclass(frozen=True)
 class PnLResult:
     """PnL de uma posição fechada: nativo (token de cotação) + estimativa USD."""

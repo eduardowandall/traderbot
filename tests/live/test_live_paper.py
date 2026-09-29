@@ -8,7 +8,7 @@ from live_helpers import LOOSE_PAPER_POLICY, invoke
 from trader.backtest import Backtester, TickRecorder, load_ticks
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.bot.config import BotConfig
-from trader.ledger import Ledger, ledger_path
+from trader.ledger import Ledger, ledger_path, order_from_json
 from trader.market import JupiterMarketData
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentStatus
@@ -28,10 +28,8 @@ def _records():
 
 
 def test_manual_swaps_record_fills_and_costs():
-    # limites padrão (25 USD por trade), mas SOL -> JUP não tem valor em USD
-    policy_file().write_text(
-        "[trading]\nallow_unknown_notional = true\n", encoding="utf-8"
-    )
+    # política padrão (25 USD por trade, valor desconhecido recusado): o
+    # SOL -> JUP passa porque a Price API dá o valor em USD do SOL gasto
     bought = invoke("swap", "paper", "USDC", "SOL", "5")
     spent_sol = invoke("swap", "paper", "SOL", "JUP", "0.01")
     denied = invoke("swap", "paper", "USDC", "SOL", "50")
@@ -41,6 +39,7 @@ def test_manual_swaps_record_fills_and_costs():
     assert "custos [simulated]" in bought.stdout
     assert "~$" in bought.stdout  # par com stablecoin: custo em USD
     assert spent_sol.exit_code == 0, spent_sol.output
+    assert "~$" in spent_sol.stdout  # sem stablecoin: custo em USD pela API
     assert denied.exit_code == 1
     assert "acima do limite" in denied.stderr
 
@@ -53,6 +52,8 @@ def test_manual_swaps_record_fills_and_costs():
     # a primeira conta de JUP da carteira paga rent
     jup = next(r for r in executed if r.intent.spend_mint == _mint("SOL"))
     assert jup.rent_lamports and jup.rent_lamports > 0
+    assert jup.intent.notional_usd and 0 < jup.intent.notional_usd < 25
+    assert jup.order_json and order_from_json(jup.order_json).sol_usd
 
     pnl = invoke("pnl", "paper")
     assert pnl.exit_code == 0
