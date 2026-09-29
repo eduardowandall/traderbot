@@ -115,9 +115,9 @@ class TestLedgerRecordsCostsAndNetPnl:
 
         fresh = _sol_usdc_account(ledger)
         fresh.restore_from_ledger()
-        assert fresh.total_net_quote == account.total_net_quote
-        assert fresh.total_costs_sol == account.total_costs_sol
-        assert "PNL líquido +0.998950 USDC" in fresh.pnl_summary()
+        assert fresh.book.net_quote == account.book.net_quote
+        assert fresh.book.costs_sol == account.book.costs_sol
+        assert "PNL líquido +0.998950 USDC" in fresh.book.summary()
         assert ledger.verify_chain() is None
         ledger.close()
 

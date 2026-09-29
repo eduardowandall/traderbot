@@ -19,7 +19,7 @@ from decimal import Decimal
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from trader.models import SOLANA_MINTS, SwapResult, TickerData
+from trader.models import SOLANA_MINTS, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.costs import QUOTE, TradeCosts
 
@@ -28,10 +28,8 @@ from trader.models.errors import SwapRejectedError as SwapRejectedError
 from trader.models.errors import (
     TransactionSubmittedError as TransactionSubmittedError,
 )
-from trader.models.public_data import Interval
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
-from trader.providers.jupiter.candles import candles_to_tickers
 from trader.providers.jupiter.executor import Executor, OnChainExecutor
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.providers.jupiter.swap_costs import quote_info
@@ -87,20 +85,6 @@ class AsyncJupiterProvider[E: Executor]:
 
     def __repr__(self):
         return f"{self.__class__.__name__} via {self.executor!r}"
-
-    async def get_candles(
-        self,
-        mint: Pubkey,
-        interval: Interval = Interval.SECOND_15,
-        candle_qty: int = 100,
-    ) -> list[TickerData]:
-        candles_json = await self.jupiter_client.get_candles(
-            str(mint), interval=interval, candle_qty=candle_qty
-        )
-        return candles_to_tickers(candles_json)
-
-    async def get_price_ticker_data(self, mint: Pubkey) -> Decimal:
-        return await self.jupiter_client.get_price(str(mint))
 
     async def get_account_balance(self) -> list[MintBalance]:
         return await self.executor.balances()

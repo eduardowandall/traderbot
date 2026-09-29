@@ -54,7 +54,7 @@ def quiet_strategy_logs() -> Iterator[None]:
 
 
 class ReplayQuoteClient:
-    """Substitui o `AsyncJupiterClient`: preço e quotes vêm do tick atual."""
+    """Substitui o `AsyncJupiterClient` do provider: quotes do tick atual."""
 
     def __init__(self, quote_mint: Mint, fee_bps: Decimal):
         self.quote_mint = quote_mint  # stablecoin (input do par)
@@ -65,13 +65,6 @@ class ReplayQuoteClient:
     def now(self) -> datetime:
         assert self.tick is not None, "replay ainda não começou"
         return self.tick.timestamp
-
-    async def get_price(self, mint: str) -> Decimal:
-        assert self.tick is not None
-        return self.tick.price
-
-    async def get_candles(self, mint: str, **kwargs) -> list:
-        return []
 
     async def get_quote(
         self, input_mint: str, output_mint: str, amount: int, slippage_bps: int = 50

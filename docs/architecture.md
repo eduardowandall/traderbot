@@ -56,6 +56,7 @@ trader/
     mints.py                    SOLANA_MINTS registry, Mint (decimals, UI/raw conversion)
     order.py                    OrderSide, OrderSignal, SwapResult, Order
     position.py                 Position and its PnL math
+    book.py                     PositionBook: a bucket's open position and realized PnL totals
     intent.py                   TradeIntent, PolicyDecision, IntentRecord, IntentStatus
     costs.py                    TradeCosts (network fee, rent), PnLResult, trade_rates
     public_data.py              TickerData (a candle), Interval (15s / 1m / 1h timeframes)
@@ -78,7 +79,7 @@ trader/
     client.py                   TradeClient protocol (one bucket): open / bucket / submit / aclose
     service.py                  TradeService: buckets (budget caps), serialized orders, reply classification
     local.py                    LocalTradeClient: TradeClient for a TradeService in the same process
-  async_account.py              AsyncAccount: one bucket's balances and position; turns orders into intents
+  async_account.py              AsyncAccount: one bucket's balances, sizing and intents; fill -> Order; its book is models/book.py
   execution/gateway.py          TradeGateway (the only path to a swap and to the ledger) + KillSwitch
   execution/fills.py            execute_trade: gateway, then costs -> Fill (every trade)
   policy/policy.py              Policy, pure evaluate(), TOML loader
@@ -186,7 +187,8 @@ budget.
 ## Step 6 — From signal to swap
 
 **`AsyncAccount` (`trader/async_account.py`)**, the bucket's account, turns
-the order into an intent:
+the order into an intent. Its position and PnL live in `account.book`, a
+`PositionBook` (`trader/models/book.py`, plain data):
 - **`buy`:**
   - refuses if a position is already open or the balance is below the minimum;
   - caps the amount at the spendable balance and at the bucket cap
@@ -254,8 +256,9 @@ In **dry** mode the RPC client simulates the transaction and never sends it.
    just unknown.
 3. The result becomes an `Order`. Real amounts are used when known, otherwise
    the quote's.
-4. A buy opens a `Position`. A sell closes it and computes the realized PnL:
-   gross, costs, and net in the quote token, plus a USD estimate.
+4. A buy opens a `Position` in the bucket's `PositionBook`. A sell closes it
+   (`book.close`), which computes the realized PnL (gross, costs, and net in
+   the quote token, plus a USD estimate) and adds it to the book's totals.
 5. `gateway.record_fill(...)` stores the order JSON and the PnL on the
    intent row. That is what `gateway.restore`, `main.py pnl` and `ledger list`
    read later.

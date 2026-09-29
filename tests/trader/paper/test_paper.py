@@ -160,12 +160,12 @@ class TestPaperProvider:
         await account.buy(Decimal("100"), Decimal("0.1"))
         await account.sell(Decimal("110"), Decimal("0.1"))
 
-        assert account.current_position is None
+        assert account.book.position is None
         # bruto: 11 - 10 USDC; custos: 2 x 5000 lamports, convertidos com o
         # preço do SOL de cada perna (100 e 110 USD)
-        assert account.total_gross_quote == Decimal("1")
-        assert account.total_costs_sol == Decimal("0.00001")
-        assert account.total_net_quote == Decimal("1") - Decimal("0.00105")
-        assert account.get_total_realized_pnl() == Decimal("1") - Decimal("0.00105")
-        assert account.incomplete_trades == 0
+        assert account.book.gross_quote == Decimal("1")
+        assert account.book.costs_sol == Decimal("0.00001")
+        assert account.book.net_quote == Decimal("1") - Decimal("0.00105")
+        assert account.book.realized_usd == Decimal("1") - Decimal("0.00105")
+        assert account.book.incomplete == 0
         assert wallet.balance(USDC.mint) == Decimal("101")

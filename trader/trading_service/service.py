@@ -118,9 +118,7 @@ class TradeService:
 
     def _cap(self, bucket: _Bucket) -> Decimal:
         assert bucket.budget_usd is not None
-        return remaining_budget(
-            bucket.budget_usd, bucket.account.get_total_realized_pnl()
-        )
+        return remaining_budget(bucket.budget_usd, bucket.account.book.realized_usd)
 
     async def get_bucket(self, name: str) -> BucketSnapshot:
         bucket = self._bucket(name)
@@ -131,11 +129,11 @@ class TradeService:
         return BucketSnapshot(
             bucket=name,
             available_usd=available,
-            position=account.get_position(),
-            realized_usd=account.get_total_realized_pnl(),
+            position=account.book.position,
+            realized_usd=account.book.realized_usd,
             budget_usd=bucket.budget_usd,
             status=bucket.status,
-            pnl_summary=account.pnl_summary(),
+            pnl_summary=account.book.summary(),
         )
 
     async def submit_order(self, name: str, request: OrderRequest) -> OrderReply:
@@ -170,7 +168,7 @@ class TradeService:
 
     async def close_bucket(self, name: str, price: Decimal) -> OrderReply | None:
         """Vende a posição aberta do bucket; None se não há posição."""
-        position = self._bucket(name).account.get_position()
+        position = self._bucket(name).account.book.position
         if position is None:
             return None
         request = OrderRequest(

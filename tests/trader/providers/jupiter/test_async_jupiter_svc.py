@@ -118,25 +118,6 @@ class TestAsyncJupiterProvider:
         ]
 
 
-class TestGetPriceTicker:
-    async def test_get_price_ticker_data(self):
-        jupiter_client = AsyncMock(spec=AsyncJupiterClient)
-        get_price = AsyncMock(return_value=Decimal("2"))
-        jupiter_client.get_price = get_price
-        provider = AsyncJupiterProvider.on_chain(
-            Keypair(),
-            rpc_client=AsyncMock(spec=AsyncRPCClient),
-            jupiter_client=jupiter_client,
-        )
-        price = await provider.get_price_ticker_data(
-            SOLANA_MINTS.get_by_symbol("SOL").pubkey
-        )
-        assert price == Decimal("2")
-        get_price.assert_has_calls(
-            [mock.call("So11111111111111111111111111111111111111112")]
-        )
-
-
 class TestPlaceOrder:
     @pytest.fixture(autouse=True)
     def setup_tests(self):

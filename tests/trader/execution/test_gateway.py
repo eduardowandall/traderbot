@@ -206,7 +206,7 @@ class TestAccountWithGateway:
         with pytest.raises(PolicyDeniedError):
             await account.buy(Decimal("100"), Decimal("0.1"))
 
-        assert account.current_position is None
+        assert account.book.position is None
         account.provider.buy.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_restart_restores_open_position_and_pnl(self, tmp_path):
@@ -220,12 +220,10 @@ class TestAccountWithGateway:
         restarted = _account(gateway)
         restarted.restore_from_ledger()
 
-        assert restarted.current_position is not None
-        assert first.current_position is not None
-        assert (
-            restarted.current_position.entry_order == first.current_position.entry_order
-        )
-        assert restarted.get_total_realized_pnl() == Decimal("1.0")
+        assert restarted.book.position is not None
+        assert first.book.position is not None
+        assert restarted.book.position.entry_order == first.book.position.entry_order
+        assert restarted.book.realized_usd == Decimal("1.0")
 
     async def test_restart_after_close_has_no_position(self, tmp_path):
         gateway = _gateway(tmp_path)
@@ -235,12 +233,12 @@ class TestAccountWithGateway:
 
         restarted = _account(gateway)
         restarted.restore_from_ledger()
-        assert restarted.current_position is None
+        assert restarted.book.position is None
 
     async def test_reconcile_flags_missing_tokens(self, tmp_path):
         gateway = _gateway(tmp_path)
         account = _account(gateway, sol="0.05")
-        account.current_position = None
+        account.book.position = None
         await _account(gateway).buy(Decimal("100"), Decimal("0.1"))
         account.restore_from_ledger()
 
@@ -260,11 +258,11 @@ class TestAccountWithGateway:
         gateway = _gateway(tmp_path)
         account = _account(gateway)
         await account.buy(Decimal("100"), Decimal("0.1"))
-        entry = account.current_position
+        entry = account.book.position
         await account.sell(Decimal("110"), Decimal("0.1"))
 
         # ex: estado em memória antigo tentando vender a mesma entrada de novo
-        account.current_position = entry
+        account.book.position = entry
         assert entry
         entry.exit_order = None
         with pytest.raises(DuplicateIntentError):
@@ -295,10 +293,8 @@ def test_order_timestamp_is_preserved_by_restore(tmp_path):
         account_id="dry:SOL-USDC",
     )
     account.restore_from_ledger()
-    assert account.current_position
-    assert account.current_position.entry_order.timestamp == datetime(
-        2026, 1, 1, 10, 30
-    )
+    assert account.book.position
+    assert account.book.position.entry_order.timestamp == datetime(2026, 1, 1, 10, 30)
 
 
 async def test_non_stablecoin_input_has_unknown_notional(tmp_path):

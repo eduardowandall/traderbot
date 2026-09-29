@@ -303,6 +303,28 @@ anything else so each later step has a clean diff.
     compatibility") once nothing calls them; `trader/market/` is the only
     data path.
   - Replace `assert position` with an explicit check.
+- **Design (2026-09-29):**
+  - `trader/models/book.py` (core, plain data): `PositionBook(quote_symbol)`
+    holds `position`, `realized_usd` and the native totals (`gross_quote`,
+    `net_quote`, `costs_sol`, `incomplete`).
+    - `open(entry) -> Position`;
+    - `close(exit) -> ClosedPosition(position, pnl, realized_usd)`, which
+      books the PnL and clears the position;
+    - `restored(quote_symbol, realized_usd, gross_quote, net_quote,
+      costs_sol, incomplete, entry)`, a classmethod that takes plain values,
+      so the core layer never imports the ledger's `AccountState`;
+    - `summary()`, the old `pnl_summary()` text.
+  - `AsyncAccount` gets a `book` attribute and keeps balances, sizing,
+    intents and `Fill → Order` conversion. Its PnL fields (`total_pnl`,
+    `total_gross_quote`, ..., `current_position`) and the accessors
+    `get_position`, `get_total_realized_pnl`, `get_unrealized_pnl` (unused)
+    and `pnl_summary` go away; callers read `account.book`.
+  - `can_sell()` returns the open position, so `sell` has no `assert`.
+  - Dead code removed: `AsyncAccount.get_price` / `get_candles`, the
+    provider's `get_price_ticker_data` / `get_candles` (market data is only
+    `trader/market/`), and `ReplayQuoteClient.get_price` / `get_candles`.
+  - The manual bucket keeps no book yet: a manual swap opens no position.
+    Reporting manual swaps on their own is B5.
 
 #### A4. USD value for every trade — M
 - **Problem:** the price feed is USD, balances and fills are in the input
@@ -520,7 +542,7 @@ The unified entry point for humans and agents.
 | A0 Commit | **done** (2026-09-29) | `f434d2e` |
 | A1 One trade pipeline | **done** (2026-09-29) | 443 tests (11 new). `execute_trade` is the only cost fetch; backtests use `TradeGateway.in_memory()`. Checked live: a 300-candle random backtest made 161 legs through it |
 | A2 Manual swaps as a bucket | **done** (2026-09-29) | 451 tests (8 new). `TradeService.swap` + `trading_service/manual.py`; `main._execute_swap` removed. Checked live in paper (isolated data dir): USDC->SOL and SOL->JUP recorded with costs, an over-limit swap denied |
-| A3 Split `AsyncAccount` | not started | |
+| A3 Split `AsyncAccount` | **done** (2026-09-29) | 454 tests (4 new); live suite green. `PositionBook` in `trader/models/book.py`; `AsyncAccount` 520 -> 427 lines; dead market-data passthroughs removed from the account, the provider and `ReplayQuoteClient` |
 | A4 USD value for every trade | not started | |
 | A5 Split the ledger | not started | |
 | A6 Split `main.py` | not started | |

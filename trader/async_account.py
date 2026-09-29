@@ -1,3 +1,11 @@
+"""`AsyncAccount`: a conta de um bucket (um par, uma posição por vez).
+
+Cuida do que depende da carteira e do par: saldos (com cache), a reserva de
+SOL para taxas, o teto do bucket, as intenções de compra e venda e a
+conversão do fill em `Order`. A posição e o PnL ficam no `PositionBook`
+(`self.book`, camada core); a execução passa por `execute_trade`.
+"""
+
 import logging
 from collections.abc import Callable
 from dataclasses import asdict
@@ -8,26 +16,20 @@ from solders.pubkey import Pubkey
 
 from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
 from trader.execution.fills import Fill, execute_trade
-from trader.models.costs import PnLResult, trade_rates
+from trader.models.book import PositionBook
+from trader.models.costs import trade_rates
 from trader.models.intent import IntentSide, TradeIntent, with_idempotency_key
+from trader.models.position import Position
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
 
-from .models import (
-    SOLANA_MINTS,
-    Order,
-    OrderSide,
-    Position,
-    PositionType,
-    TickerData,
-)
+from .models import SOLANA_MINTS, Order, OrderSide
 
 # saldos lidos do provider valem por este tempo (invalidados a cada ordem)
 BALANCE_CACHE_TTL = timedelta(minutes=3)
+SOL = SOLANA_MINTS.get_by_symbol("SOL").pubkey
 
 
 class AsyncAccount:
-    """Classe responsável por gerenciar balanço, posições e execução de ordens"""
-
     def __init__(
         self,
         provider: AsyncJupiterProvider,
@@ -53,38 +55,23 @@ class AsyncAccount:
         self.source = source
         self.input_mint = input_mint
         self.output_mint = output_mint
-
-        self.current_position: Position | None = None
         self.logger = logging.getLogger(self.__module__)
-        self.total_pnl = Decimal("0.0")
 
         # o feed de preços é em USD: fills e valores só batem com ele quando
         # o input_mint é uma stablecoin de dólar
         quote = SOLANA_MINTS.get(input_mint)
         self._quote_is_usd = quote is not None and quote.is_usd_stable
-        sol_mint = SOLANA_MINTS.get_by_symbol("SOL").pubkey
-        self._quote_is_sol = input_mint == sol_mint
-        self._token_is_sol = output_mint == sol_mint
-        self.quote_symbol = SOLANA_MINTS.symbol_of(input_mint)
-
-        # PnL nativo (token de cotação) das posições fechadas; total_pnl acima
-        # é a estimativa líquida em USD
-        self.total_gross_quote = Decimal("0")
-        self.total_net_quote = Decimal("0")
-        self.total_costs_sol = Decimal("0")
-        self.incomplete_trades = 0
+        self._quote_is_sol = input_mint == SOL
+        self._token_is_sol = output_mint == SOL
+        self.book = PositionBook(SOLANA_MINTS.symbol_of(input_mint))
 
         self.balances = None
         self.balances_last_update: datetime | None = None
 
     def __repr__(self):
-        return f"{self.__class__.__name__} for {self.input_mint=} and {self.output_mint=} with current_position on {self.current_position}"
+        return f"{self.__class__.__name__}({self.account_id}, {self.book.position})"
 
-    async def get_price(self, mint: Pubkey) -> Decimal:
-        return await self.provider.get_price_ticker_data(mint)
-
-    async def get_candles(self, mint: Pubkey) -> list[TickerData]:
-        return await self.provider.get_candles(mint)
+    # --- saldos ------------------------------------------------------------
 
     async def get_balance(self, mint: Pubkey) -> Decimal:
         # Cache para evitar chamadas repetidas ao RPC; expira após
@@ -113,9 +100,59 @@ class AsyncAccount:
         0.02 SOL on-chain e em paper, zero no backtest (sem taxas de rede).
         """
         balance = await self.get_balance(mint)
-        if mint == SOLANA_MINTS.get_by_symbol("SOL").pubkey:
+        if mint == SOL:
             balance -= self.provider.native_fee_reserve
         return max(balance, Decimal("0"))
+
+    # --- estado do ledger --------------------------------------------------
+
+    def restore_from_ledger(self) -> None:
+        """Reconstrói o livro (posição aberta e PnL) do ledger, após reinício."""
+        state = self.gateway.restore(self.account_id)
+        totals = state.totals
+        self.book = PositionBook.restored(
+            self.book.quote_symbol,
+            realized_usd=state.realized_usd,
+            gross_quote=totals.gross_quote,
+            net_quote=totals.net_quote,
+            costs_sol=totals.costs_sol,
+            incomplete=totals.incomplete,
+            entry=state.open_entry,
+        )
+        entry = state.open_entry
+        if entry is not None:
+            self.logger.warning(
+                f"Posição restaurada do ledger: {entry.quantity} @ {entry.price} "
+                f"(intenção {state.entry_intent_id})"
+            )
+
+    async def reconcile_position(self) -> bool:
+        """Confere a posição do ledger contra o saldo da carteira.
+
+        Retorna False (e registra no ledger) se a carteira tem menos do que a
+        posição registrada; a posição não é alterada automaticamente.
+        """
+        if self.book.position is None:
+            return True
+        expected = self.book.position.entry_order.quantity
+        balance = await self.get_balance(self.output_mint)
+        # tolerância para taxas/arredondamento
+        if balance >= expected * Decimal("0.99"):
+            return True
+        self.logger.warning(
+            f"Carteira tem {balance} mas o ledger registra posição de {expected}"
+        )
+        self.gateway.add_event(
+            "reconcile_mismatch",
+            {
+                "account": self.account_id,
+                "expected": expected,
+                "wallet_balance": balance,
+            },
+        )
+        return False
+
+    # --- fill -> Order -----------------------------------------------------
 
     def _fill_amounts(self, fill: Fill) -> tuple[Decimal, Decimal, Decimal]:
         """(quantidade do token, preço em cotação por token, valor em cotação).
@@ -171,50 +208,6 @@ class AsyncAccount:
             costs=fill.costs,
         )
 
-    def restore_from_ledger(self) -> None:
-        """Recupera posição aberta e PnL realizado do ledger (após reinício)."""
-        state = self.gateway.restore(self.account_id)
-        self.total_pnl = state.realized_usd
-        self.total_gross_quote = state.totals.gross_quote
-        self.total_net_quote = state.totals.net_quote
-        self.total_costs_sol = state.totals.costs_sol
-        self.incomplete_trades = state.totals.incomplete
-        entry = state.open_entry
-        if entry is not None:
-            self.current_position = Position(
-                type=PositionType.LONG, entry_order=entry, exit_order=None
-            )
-            self.logger.warning(
-                f"Posição restaurada do ledger: {entry.quantity} @ {entry.price} "
-                f"(intenção {state.entry_intent_id})"
-            )
-
-    async def reconcile_position(self) -> bool:
-        """Confere a posição do ledger contra o saldo da carteira.
-
-        Retorna False (e registra no ledger) se a carteira tem menos do que a
-        posição registrada; a posição não é alterada automaticamente.
-        """
-        if self.current_position is None:
-            return True
-        expected = self.current_position.entry_order.quantity
-        balance = await self.get_balance(self.output_mint)
-        # tolerância para taxas/arredondamento
-        if balance >= expected * Decimal("0.99"):
-            return True
-        self.logger.warning(
-            f"Carteira tem {balance} mas o ledger registra posição de {expected}"
-        )
-        self.gateway.add_event(
-            "reconcile_mismatch",
-            {
-                "account": self.account_id,
-                "expected": expected,
-                "wallet_balance": balance,
-            },
-        )
-        return False
-
     async def _execute_order(
         self,
         intent: TradeIntent,
@@ -235,38 +228,7 @@ class AsyncAccount:
             self.logger.error(f"Erro ao executar ordem: {str(ex)}")
             raise
 
-    def _record_order(
-        self,
-        intent: TradeIntent,
-        order: Order,
-        pnl: PnLResult | None = None,
-        realized_usd: Decimal | None = None,
-    ) -> None:
-        self.gateway.record_fill(intent.intent_id, order, realized_usd, pnl)
-
-    def _book(self, pnl: PnLResult | None) -> None:
-        """Acumula o PnL nativo de uma posição fechada."""
-        if pnl is None:
-            self.incomplete_trades += 1
-            return
-        self.total_gross_quote += pnl.gross_quote
-        self.total_costs_sol += pnl.costs_sol
-        net = pnl.net_quote
-        self.total_net_quote += pnl.gross_quote if net is None else net
-        self.incomplete_trades += 0 if pnl.complete else 1
-
-    def pnl_summary(self) -> str:
-        """PnL realizado: líquido nativo, estimativa USD, bruto e custos."""
-        flag = (
-            f" [!] {self.incomplete_trades} trade(s) incompleto(s)"
-            if self.incomplete_trades
-            else ""
-        )
-        return (
-            f"PNL líquido {self.total_net_quote:+.6f} {self.quote_symbol} "
-            f"(~${self.total_pnl:+.4f}); bruto {self.total_gross_quote:+.6f}, "
-            f"custos {self.total_costs_sol:.9f} SOL{flag}"
-        )
+    # --- intenções ---------------------------------------------------------
 
     def _notional_usd(self, price: Decimal, quantity: Decimal) -> Decimal | None:
         """Valor do trade em USD, quando dá para saber.
@@ -307,17 +269,11 @@ class AsyncAccount:
         )
         return with_idempotency_key(intent, idempotency_key)
 
-    def get_position(self) -> Position | None:
-        """Retorna a posição atual"""
-        return self.current_position
+    # --- ordens ------------------------------------------------------------
 
-    async def can_buy(self):
+    async def can_buy(self) -> None:
         """Verifica se é possível executar uma compra"""
-        # Não pode comprar se já tem posição long
-        if (
-            self.current_position is not None
-            and self.current_position.type == PositionType.LONG
-        ):
+        if self.book.position is not None:
             raise ValueError(
                 "Não é possível executar compra no momento. Já existe posicão"
             )
@@ -329,13 +285,10 @@ class AsyncAccount:
                 "Não é possível executar compra no momento. Sem valor minimo"
             )
 
-    async def can_sell(self):
-        """Verifica se é possível executar uma venda"""
-        # Só pode vender se tem posição long
-        if (
-            self.current_position is None
-            or self.current_position.type != PositionType.LONG
-        ):
+    async def can_sell(self) -> Position:
+        """Verifica se é possível vender e devolve a posição a fechar."""
+        position = self.book.position
+        if position is None:
             raise ValueError(
                 "Não é possível executar venda no momento. Sem posicão de compra"
             )
@@ -346,6 +299,7 @@ class AsyncAccount:
             raise ValueError(
                 "Não é possível executar venda no momento. Sem valor minimo"
             )
+        return position
 
     async def place_order(
         self,
@@ -418,18 +372,14 @@ class AsyncAccount:
             price,
         )
         self.logger.debug(f"ORDER PLACED: {asdict(order)}", extra=asdict(order))
-        self._record_order(intent, order)
-        self.current_position = Position(
-            type=PositionType.LONG, entry_order=order, exit_order=None
-        )
+        self.gateway.record_fill(intent.intent_id, order)
+        self.book.open(order)
         return order
 
     async def sell(
         self, price: Decimal, quantity: Decimal, rationale: str | None = None
     ) -> Order:
-        await self.can_sell()
-        position = self.current_position
-        assert position  # garantido por can_sell
+        position = await self.can_sell()
 
         # a quantidade recebida na compra pode ser menor que a pedida
         # (slippage/taxas); nunca tenta vender mais do que a carteira tem
@@ -470,20 +420,8 @@ class AsyncAccount:
             f"ORDER PLACED: order={asdict(order)} position={asdict(position)}",
             extra=asdict(order),
         )
-        position.exit_order = order
-        detail = position.realized_pnl_detail()
-        realized = position.realized_pnl
-        self._record_order(intent, order, detail, realized)
-        self.total_pnl += realized
-        self._book(detail)
-        self.current_position = None
+        closed = self.book.close(order)
+        self.gateway.record_fill(
+            intent.intent_id, order, closed.realized_usd, closed.pnl
+        )
         return order
-
-    def get_total_realized_pnl(self) -> Decimal:
-        return self.total_pnl
-
-    def get_unrealized_pnl(self, current_price: Decimal) -> Decimal:
-        """Retorna o PnL não realizado da posição atual"""
-        if self.current_position:
-            return self.current_position.unrealized_pnl(current_price)
-        return Decimal("0.0")

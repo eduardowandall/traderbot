@@ -47,7 +47,7 @@ def _long_position(mi, mo):
 
 async def test_can_buy_raises_when_long_position_exists():
     acc, mi, mo = _make_account()
-    acc.current_position = _long_position(mi, mo)
+    acc.book.position = _long_position(mi, mo)
 
     with pytest.raises(ValueError, match="Já existe posicão"):
         await acc.can_buy()
@@ -87,7 +87,7 @@ async def test_can_sell_raises_when_balance_below_minimum():
             MintBalance(mint=mo.pubkey, available=Decimal("0.000001")),
         ]
     )
-    acc.current_position = _long_position(mi, mo)
+    acc.book.position = _long_position(mi, mo)
 
     with pytest.raises(ValueError, match="Sem valor minimo"):
         await acc.can_sell()
@@ -95,7 +95,7 @@ async def test_can_sell_raises_when_balance_below_minimum():
 
 async def test_can_sell_allows_with_long_position_and_sufficient_balance():
     acc, mi, mo = _make_account()
-    acc.current_position = _long_position(mi, mo)
+    acc.book.position = _long_position(mi, mo)
 
     await acc.can_sell()
 
@@ -157,9 +157,9 @@ async def test_buy_records_quote_fill():
     assert order.requested_quantity == Decimal("0.5")
     assert order.requested_price == Decimal("100")
 
-    assert acc.current_position
-    assert acc.current_position.entry_order == order
-    assert acc.current_position.exit_order is None
+    assert acc.book.position
+    assert acc.book.position.entry_order == order
+    assert acc.book.position.exit_order is None
 
 
 async def test_buy_is_capped_at_spendable_balance():
@@ -175,7 +175,7 @@ async def test_buy_is_capped_at_spendable_balance():
 async def test_sell_records_fill_and_realized_pnl():
     acc = _usdc_sol_account(sol="1")
     await acc.buy(Decimal("100"), Decimal("0.5"))
-    entry = acc.current_position
+    entry = acc.book.position
 
     order = await acc.sell(Decimal("110"), Decimal("0.5"))
 
@@ -183,15 +183,15 @@ async def test_sell_records_fill_and_realized_pnl():
     assert order.side == OrderSide.SELL
     assert order.quantity == Decimal("0.5")
     assert order.price == Decimal("110")
-    assert acc.current_position is None
+    assert acc.book.position is None
     assert entry and entry.exit_order == order
-    assert acc.get_total_realized_pnl() == Decimal("5")
+    assert acc.book.realized_usd == Decimal("5")
 
 
 async def test_sell_is_capped_at_wallet_balance():
     # a compra recebeu menos que o pedido (slippage): vende só o que existe
     acc = _usdc_sol_account(sol="0.098")
-    acc.current_position = _long_position(USDC, SOL)
+    acc.book.position = _long_position(USDC, SOL)
 
     order = await acc.sell(Decimal("100.0"), Decimal("0.1"))
 
@@ -203,7 +203,7 @@ async def test_sell_is_capped_at_wallet_balance():
 
 async def test_sell_refuses_to_touch_sol_fee_reserve():
     acc = _usdc_sol_account(sol="0.015")
-    acc.current_position = _long_position(USDC, SOL)
+    acc.book.position = _long_position(USDC, SOL)
 
     with pytest.raises(ValueError, match="reservado para taxas"):
         await acc.sell(Decimal("100.0"), Decimal("0.1"))
@@ -248,8 +248,8 @@ async def test_pnl_uses_usd_price_when_input_is_not_a_stablecoin():
     assert order.quantity == Decimal("4.537732")
     assert order.price == market_price
     assert order.fill_price == Decimal("0.039077338") / Decimal("4.537732")
-    assert acc.current_position
-    pnl = acc.current_position.unrealized_pnl_percent(Decimal("0.999787081"))
+    assert acc.book.position
+    pnl = acc.book.position.unrealized_pnl_percent(Decimal("0.999787081"))
     assert abs(pnl) < Decimal("0.01")
 
 
