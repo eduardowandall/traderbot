@@ -4,7 +4,15 @@ from contextvars import ContextVar
 from datetime import datetime
 from logging.config import DictConfigurator
 
+from rich.console import Console
+from rich.logging import RichHandler
+
 botname: ContextVar[str | None] = ContextVar("botname", default=None)
+
+
+def stderr_rich_handler(**kwargs) -> RichHandler:
+    """RichHandler no stderr: o stdout fica livre para as saídas `--json`."""
+    return RichHandler(console=Console(stderr=True), **kwargs)
 
 
 class BotLoggerFileHandler(logging.FileHandler):
@@ -87,7 +95,7 @@ LOGGING = {
     },
     "handlers": {
         "console": {
-            "class": "rich.logging.RichHandler",
+            "()": stderr_rich_handler,
             "formatter": "console",
             "level": "DEBUG",
             "filters": ["consolefilter"],

@@ -13,6 +13,7 @@ dependencies = [
     "websockets>=15.0.1",
     "solana>=0.40.1",
     "httpx>=0.28.1",
+    "pydantic>=2.13",
 ]
 
 [dependency-groups]

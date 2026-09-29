@@ -141,6 +141,10 @@ covers orders from strategies and from `swap`.
   section are rejected.
 - **Ledger**: `.data/ledger-<mode>.sqlite3`. On restart, open positions and
   PnL are restored from it.
+- **Locations**: `.data/` and `policy.toml` are always read from the project
+  root, whatever directory you run commands from, so `halt` always reaches the
+  running bot. Override them with `TRADER_DATA_DIR` and `TRADER_POLICY_FILE`
+  (relative values are taken from the project root).
 
 ```bash
 uv run main.py ledger list dry          # recent intents (executed / denied / failed)

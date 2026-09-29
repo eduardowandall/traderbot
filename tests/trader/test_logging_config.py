@@ -12,6 +12,15 @@ def test_http_loggers_do_not_log_urls_with_secrets():
         assert level >= logging.WARNING, name
 
 
+def test_console_logs_go_to_stderr_not_stdout():
+    # o stdout é reservado para as saídas `--json` dos comandos de agente
+    handler = logging_config.stderr_rich_handler()
+    assert handler.console.stderr
+    assert logging_config.LOGGING["handlers"]["console"]["()"] is (
+        logging_config.stderr_rich_handler
+    )
+
+
 def test_console_filter_allows_bot_logs_and_warnings_only():
     f = logging_config.ConsoleFilter()
 

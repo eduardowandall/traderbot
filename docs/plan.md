@@ -7,6 +7,13 @@ Status as of 2026-09-23. This document combines a full code review, an
 adversarially verified strategy/execution audit, and three independent
 architecture proposals (safety-first, incremental-MVP, interface-first).
 
+> **2026-09-28: the agent model changed.** Agents now **author strategies**
+> (declarative specs run by the bot) instead of proposing individual trades.
+> The new design, phases and progress tracker are in
+> [`agent-strategies.md`](agent-strategies.md). It supersedes Phases 3–5
+> below and the agent-facing parts of §5 (the MCP `propose_trade` surface).
+> The rest of this document (fixes, open issues, guardrails) still applies.
+
 ---
 
 ## 1. Verdict
@@ -393,6 +400,9 @@ Each phase ships on its own and has exit criteria that tests can check.
 
 ### Phase 3 — Read-only and dry MCP server
 
+> **Superseded** (2026-09-28) by [`agent-strategies.md`](agent-strategies.md):
+> the CLI + JSON service layer comes first; MCP wraps it later.
+
 - Add an `mcp` command to `main.py`. Tools: every read tool plus `quote` and
   `preview_trade`. Use the official `mcp` Python SDK.
 - **Exit criteria:** an agent (Claude Desktop or Claude Code) can inspect the
@@ -400,6 +410,9 @@ Each phase ships on its own and has exit criteria that tests can check.
   from the MCP process.
 
 ### Phase 4 — Agents propose, in dry mode
+
+> **Superseded** (2026-09-28) by [`agent-strategies.md`](agent-strategies.md):
+> agents author strategy specs and never propose trades.
 
 - `propose_trade`, `cancel_intent`, `halt`, and event notifications (fills,
   denials, halts).
@@ -411,6 +424,10 @@ Each phase ships on its own and has exit criteria that tests can check.
   bypasses, and budgets and rate limits exercised.
 
 ### Phase 5 — Isolated executor + real mode with a human in the loop
+
+> **Mostly superseded** (2026-09-28) by [`agent-strategies.md`](agent-strategies.md):
+> the per-mode trade-runner is the only process with the key. Transaction
+> inspection and the hot-wallet advice below still apply.
 
 - The executor runs as a separate process and is the only one with
   `SOLANA_PRIVATE_KEY`. It communicates over a local socket with an auth token

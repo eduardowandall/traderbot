@@ -1,33 +1,20 @@
 from decimal import Decimal
 
 import pytest
+from factories import make_intent
 
 from trader.models import SOLANA_MINTS
-from trader.models.intent import IntentSide, TradeIntent
+from trader.models.intent import IntentSide
+from trader.paths import PROJECT_ROOT
 from trader.policy import Policy, PolicyState, evaluate, load_policy
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 
 
-def _intent(
-    side=IntentSide.BUY, notional: str | None = "10", spend_amount="10", **kwargs
-):
-    return TradeIntent(
-        source="test",
-        account="dry:SOL-USDC",
-        side=side,
-        spend_mint=kwargs.pop("spend_mint", USDC),
-        receive_mint=kwargs.pop("receive_mint", SOL),
-        spend_amount=Decimal(spend_amount),
-        notional_usd=None if notional is None else Decimal(notional),
-        **kwargs,
-    )
-
-
 def _eval(intent=None, policy=None, state=None, halted=False, real_mode=False):
     return evaluate(
-        intent or _intent(),
+        intent or make_intent(),
         policy or Policy(),
         state or PolicyState(),
         halted=halted,
@@ -54,40 +41,40 @@ class TestEvaluate:
         decision = _eval(state=state)
         assert not decision.allowed
         assert "abc" in decision.reasons[0]
-        assert not _eval(_intent(side=IntentSide.SELL), state=state).allowed
+        assert not _eval(make_intent(side=IntentSide.SELL), state=state).allowed
 
     def test_circuit_breaker(self):
         assert not _eval(state=PolicyState(consecutive_failures=3)).allowed
         assert _eval(state=PolicyState(consecutive_failures=2)).allowed
 
     def test_unknown_mint(self):
-        decision = _eval(_intent(receive_mint="NotAMint"))
+        decision = _eval(make_intent(receive_mint="NotAMint"))
         assert "mint desconhecido: NotAMint" in decision.reasons
 
     def test_allow_list(self):
         policy = Policy(allowed_symbols=("USDC", "SOL"))
         assert _eval(policy=policy).allowed
         jup = SOLANA_MINTS.get_by_symbol("JUP").mint
-        decision = _eval(_intent(receive_mint=jup), policy=policy)
+        decision = _eval(make_intent(receive_mint=jup), policy=policy)
         assert "símbolo não permitido: JUP" in decision.reasons
 
     def test_spend_amount_must_be_positive(self):
-        assert not _eval(_intent(spend_amount="0")).allowed
+        assert not _eval(make_intent(spend_amount="0")).allowed
 
     def test_unknown_notional(self):
-        assert not _eval(_intent(notional=None)).allowed
+        assert not _eval(make_intent(notional=None)).allowed
         assert _eval(
-            _intent(notional=None), policy=Policy(allow_unknown_notional=True)
+            make_intent(notional=None), policy=Policy(allow_unknown_notional=True)
         ).allowed
 
     def test_max_trade(self):
-        assert _eval(_intent(notional="25")).allowed
-        assert not _eval(_intent(notional="25.01")).allowed
+        assert _eval(make_intent(notional="25")).allowed
+        assert not _eval(make_intent(notional="25.01")).allowed
 
     def test_daily_notional(self):
         state = PolicyState(daily_notional_usd=Decimal("95"))
-        assert _eval(_intent(notional="5"), state=state).allowed
-        assert not _eval(_intent(notional="5.01"), state=state).allowed
+        assert _eval(make_intent(notional="5"), state=state).allowed
+        assert not _eval(make_intent(notional="5.01"), state=state).allowed
 
     def test_trades_per_hour(self):
         assert not _eval(state=PolicyState(trades_last_hour=10)).allowed
@@ -106,14 +93,14 @@ class TestEvaluate:
             trades_last_hour=99,
             daily_realized_pnl_usd=Decimal("-500"),
         )
-        sell = _intent(side=IntentSide.SELL, notional="1000")
+        sell = make_intent(side=IntentSide.SELL, notional="1000")
         assert _eval(sell, state=state).allowed
 
     def test_swaps_are_budgeted(self):
-        assert not _eval(_intent(side=IntentSide.SWAP, notional="100")).allowed
+        assert not _eval(make_intent(side=IntentSide.SWAP, notional="100")).allowed
 
     def test_collects_every_reason(self):
-        decision = _eval(_intent(notional="1000"), halted=True, real_mode=True)
+        decision = _eval(make_intent(notional="1000"), halted=True, real_mode=True)
         assert len(decision.reasons) == 4
 
 
@@ -158,6 +145,14 @@ class TestLoadPolicy:
         path.write_text(content, encoding="utf-8")
         with pytest.raises(ValueError):
             load_policy(path)
+
+
+@pytest.mark.parametrize("mode", [None, "real", "dry", "paper"])
+def test_example_policy_file_is_valid_and_documents_the_defaults(mode):
+    # o exemplo é o que o dono copia para `policy.toml`: precisa ser TOML
+    # válido e, sem seções por modo ativas, bater com os padrões do código
+    example = PROJECT_ROOT / "policy.example.toml"
+    assert load_policy(example, mode=mode) == Policy()
 
 
 def test_every_policy_field_has_a_parser():

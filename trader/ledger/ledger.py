@@ -12,6 +12,8 @@ nunca se misture com o real.
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -29,9 +31,9 @@ from trader.models.intent import (
     TradeIntent,
 )
 from trader.models.order import SwapResult
+from trader.paths import data_dir
 from trader.policy import PolicyState
 
-DATA_DIR = Path(".data")
 GENESIS_HASH = "0" * 64
 
 _SCHEMA = """
@@ -126,7 +128,7 @@ def _in(statuses) -> tuple[str, tuple[str, ...]]:
 
 
 def ledger_path(mode: str) -> Path:  # aceita RunningMode (StrEnum)
-    return DATA_DIR / f"ledger-{mode}.sqlite3"
+    return data_dir() / f"ledger-{mode}.sqlite3"
 
 
 def _dec(value: str | None) -> Decimal | None:
@@ -191,6 +193,20 @@ class Ledger:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    @contextmanager
+    def _write(self) -> Iterator[None]:
+        """Transação de escrita que já começa com o lock (`BEGIN IMMEDIATE`).
+
+        Sem isso, `_add_event` leria o último hash fora da transação: outro
+        processo (a CLI ou outro runner) poderia gravar um evento entre a
+        leitura e o INSERT, e os dois eventos apontariam para o mesmo
+        `prev_hash`, bifurcando a cadeia. Não guarde o hash em memória pelo
+        mesmo motivo.
+        """
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            yield
+
     # --- eventos ---------------------------------------------------------------
 
     def _add_event(self, type_: str, intent_id: str | None, payload: dict) -> None:
@@ -208,7 +224,7 @@ class Ledger:
         )
 
     def add_event(self, type_: str, payload: dict, intent_id: str | None = None):
-        with self.conn:
+        with self._write():
             self._add_event(type_, intent_id, payload)
 
     def verify_chain(self) -> int | None:
@@ -234,7 +250,7 @@ class Ledger:
     def record_intent(self, intent: TradeIntent, decision: PolicyDecision) -> None:
         status = IntentStatus.EXECUTING if decision.allowed else IntentStatus.DENIED
         now = datetime.now(UTC).isoformat()
-        with self.conn:
+        with self._write():
             self.conn.execute(
                 "INSERT INTO intents (intent_id, idempotency_key, created_at, "
                 "updated_at, source, account, side, spend_mint, receive_mint, "
@@ -274,7 +290,7 @@ class Ledger:
     def _update(self, intent_id: str, event: str, payload: dict, **columns) -> None:
         columns["updated_at"] = datetime.now(UTC).isoformat()
         assignments = ", ".join(f"{k} = ?" for k in columns)
-        with self.conn:
+        with self._write():
             cursor = self.conn.execute(
                 f"UPDATE intents SET {assignments} WHERE intent_id = ?",
                 (*columns.values(), intent_id),

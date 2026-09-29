@@ -17,6 +17,7 @@ from trader.notification.notification_service import (
     TelegramNotificationService,
 )
 from trader.paper import PaperJupiterProvider
+from trader.paths import policy_file
 from trader.trading_strategy import (
     RandomStrategy,
     StrategyComposer,
@@ -132,9 +133,9 @@ allow_unknown_notional = true
 
 
 def _invoke_swap(argv, policy: str | None = PERMISSIVE_POLICY):
-    # roda num diretório temporário (fixture isolated_workdir)
+    # policy_file() aponta para o diretório do teste (fixture isolated_workdir)
     if policy is not None:
-        Path("policy.toml").write_text(policy, encoding="utf-8")
+        policy_file().write_text(policy, encoding="utf-8")
     mock_provider = mock.Mock()
     mock_provider.swap = mock.AsyncMock(
         return_value=SwapResult("sig123", "in", "out", 1, 1)
@@ -374,7 +375,9 @@ def test_run_paper_needs_no_private_key(monkeypatch):
     assert config.provider.wallet.balance(
         SOLANA_MINTS.get_by_symbol("USDC").mint
     ) == Decimal("100")
-    assert "Carteira paper criada" in result.output
+    # vai para o stderr: o stdout fica reservado para saídas `--json`
+    assert "Carteira paper criada" in result.stderr
+    assert "Carteira paper criada" not in result.stdout
 
 
 def test_run_record_ticks_passes_recorder(tmp_path):
@@ -440,9 +443,7 @@ def test_backtest_requires_a_source():
 
 
 def test_paper_uses_its_own_policy_section():
-    Path("policy.toml").write_text(
-        "[paper.limits]\nmax_trade_usd = 1000\n", encoding="utf-8"
-    )
+    policy_file().write_text("[paper.limits]\nmax_trade_usd = 1000\n", encoding="utf-8")
     paper = main_module._build_gateway(RunningMode.PAPER)
     dry = main_module._build_gateway(RunningMode.DRY)
     try:

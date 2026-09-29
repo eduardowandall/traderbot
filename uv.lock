@@ -722,6 +722,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "pandas" },
+    { name = "pydantic" },
     { name = "requests" },
     { name = "rich" },
     { name = "solana" },
@@ -744,6 +745,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pandas", specifier = ">=2.1.0" },
+    { name = "pydantic", specifier = ">=2.13" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "rich", specifier = ">=13.5.2" },
     { name = "solana", specifier = ">=0.40.1" },

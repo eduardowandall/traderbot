@@ -4,6 +4,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import make_intent, open_ledger
 
 from trader.async_account import AsyncAccount
 from trader.execution import (
@@ -12,7 +13,6 @@ from trader.execution import (
     PolicyDeniedError,
     TradeGateway,
 )
-from trader.ledger import Ledger
 from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.intent import (
@@ -31,25 +31,9 @@ SOL = SOLANA_MINTS.get_by_symbol("SOL")
 RESULT = SwapResult("sig", USDC.mint, SOL.mint, 10_000_000, 100_000_000)
 
 
-_OPEN_LEDGERS: list[Ledger] = []
-
-
-@pytest.fixture(autouse=True)
-def _close_ledgers():
-    yield
-    while _OPEN_LEDGERS:
-        _OPEN_LEDGERS.pop().close()
-
-
-def _ledger() -> Ledger:
-    ledger = Ledger()
-    _OPEN_LEDGERS.append(ledger)
-    return ledger
-
-
 def _gateway(tmp_path, policy=None, real_mode=False):
     return TradeGateway(
-        _ledger(),
+        open_ledger(),
         policy or Policy(),
         KillSwitch(tmp_path / "HALT"),
         real_mode=real_mode,
@@ -62,25 +46,11 @@ def _record(gateway: TradeGateway, intent: TradeIntent) -> IntentRecord:
     return record
 
 
-def _intent(key=None, notional="10"):
-    extra = {"idempotency_key": key} if key else {}
-    return TradeIntent(
-        source="test",
-        account="dry:SOL-USDC",
-        side=IntentSide.BUY,
-        spend_mint=USDC.mint,
-        receive_mint=SOL.mint,
-        spend_amount=Decimal("10"),
-        notional_usd=Decimal(notional),
-        **extra,
-    )
-
-
 class TestSubmit:
     async def test_executes_and_records(self, tmp_path):
         gateway = _gateway(tmp_path)
         execute = AsyncMock(return_value=RESULT)
-        intent = _intent()
+        intent = make_intent()
 
         assert await gateway.submit(intent, execute) == RESULT
         execute.assert_awaited_once()
@@ -89,16 +59,16 @@ class TestSubmit:
     async def test_same_idempotency_key_executes_once(self, tmp_path):
         gateway = _gateway(tmp_path)
         execute = AsyncMock(return_value=RESULT)
-        await gateway.submit(_intent(key="k"), execute)
+        await gateway.submit(make_intent(key="k"), execute)
 
         with pytest.raises(DuplicateIntentError):
-            await gateway.submit(_intent(key="k"), execute)
+            await gateway.submit(make_intent(key="k"), execute)
         execute.assert_awaited_once()
 
     async def test_denied_intent_never_executes(self, tmp_path):
         gateway = _gateway(tmp_path)
         execute = AsyncMock(return_value=RESULT)
-        intent = _intent(notional="1000")
+        intent = make_intent(notional="1000")
 
         with pytest.raises(PolicyDeniedError) as ex:
             await gateway.submit(intent, execute)
@@ -110,11 +80,11 @@ class TestSubmit:
     async def test_real_mode_denied_by_default(self, tmp_path):
         gateway = _gateway(tmp_path, real_mode=True)
         with pytest.raises(PolicyDeniedError):
-            await gateway.submit(_intent(), AsyncMock(return_value=RESULT))
+            await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
     async def test_failure_before_send_is_recorded_and_retryable(self, tmp_path):
         gateway = _gateway(tmp_path)
-        intent = _intent(key="k")
+        intent = make_intent(key="k")
         with pytest.raises(RuntimeError):
             await gateway.submit(intent, AsyncMock(side_effect=RuntimeError("rota")))
         record = _record(gateway, intent)
@@ -122,11 +92,13 @@ class TestSubmit:
         assert record.error and "rota" in record.error
 
         # a mesma chave pode tentar de novo: nada foi executado
-        assert await gateway.submit(_intent(key="k"), AsyncMock(return_value=RESULT))
+        assert await gateway.submit(
+            make_intent(key="k"), AsyncMock(return_value=RESULT)
+        )
 
     async def test_unconfirmed_blocks_all_trading(self, tmp_path):
         gateway = _gateway(tmp_path)
-        intent = _intent()
+        intent = make_intent()
         with pytest.raises(TransactionSubmittedError):
             await gateway.submit(
                 intent, AsyncMock(side_effect=TransactionSubmittedError("timeout"))
@@ -134,14 +106,14 @@ class TestSubmit:
         assert _record(gateway, intent).status == IntentStatus.UNCONFIRMED
 
         with pytest.raises(PolicyDeniedError, match="sem confirmação"):
-            await gateway.submit(_intent(), AsyncMock(return_value=RESULT))
+            await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
         gateway.ledger.resolve(intent.intent_id, IntentStatus.FAILED, "explorer")
-        assert await gateway.submit(_intent(), AsyncMock(return_value=RESULT))
+        assert await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
     async def test_cancellation_mid_execution_is_unconfirmed(self, tmp_path):
         gateway = _gateway(tmp_path)
-        intent = _intent()
+        intent = make_intent()
         with pytest.raises(asyncio.CancelledError):
             await gateway.submit(
                 intent, AsyncMock(side_effect=asyncio.CancelledError())
@@ -152,24 +124,26 @@ class TestSubmit:
         gateway = _gateway(tmp_path)
         for _ in range(3):
             with pytest.raises(RuntimeError):
-                await gateway.submit(_intent(), AsyncMock(side_effect=RuntimeError()))
+                await gateway.submit(
+                    make_intent(), AsyncMock(side_effect=RuntimeError())
+                )
 
         with pytest.raises(PolicyDeniedError, match="circuit breaker"):
-            await gateway.submit(_intent(), AsyncMock(return_value=RESULT))
+            await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
         gateway.resume("verificado")
-        assert await gateway.submit(_intent(), AsyncMock(return_value=RESULT))
+        assert await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
     async def test_kill_switch(self, tmp_path):
         gateway = _gateway(tmp_path)
         gateway.halt("teste")
         execute = AsyncMock(return_value=RESULT)
         with pytest.raises(PolicyDeniedError, match="kill switch"):
-            await gateway.submit(_intent(), execute)
+            await gateway.submit(make_intent(), execute)
         execute.assert_not_awaited()
 
         gateway.resume()
-        assert await gateway.submit(_intent(), execute)
+        assert await gateway.submit(make_intent(), execute)
 
 
 def test_kill_switch_fails_closed(tmp_path, monkeypatch):
@@ -300,7 +274,7 @@ class TestAccountWithGateway:
 
 
 def test_order_timestamp_is_preserved_by_restore(tmp_path):
-    ledger = _ledger()
+    ledger = open_ledger()
     order = Order(
         "id",
         USDC.mint,
@@ -310,7 +284,7 @@ def test_order_timestamp_is_preserved_by_restore(tmp_path):
         OrderSide.BUY,
         datetime(2026, 1, 1, 10, 30),
     )
-    intent = _intent()
+    intent = make_intent()
     ledger.record_intent(intent, PolicyDecision(True))
     ledger.mark_executed(intent.intent_id, RESULT)
     ledger.attach_order(intent.intent_id, order)

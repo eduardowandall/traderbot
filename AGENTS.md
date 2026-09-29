@@ -38,6 +38,7 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - `trader/execution/gateway.py` — `TradeGateway.submit(intent, execute)`: idempotency → `policy.evaluate` → ledger → execute. The only path to a swap for the bot (via `AsyncAccount(gateway=...)`) and `main.py swap`.
 - `trader/policy/policy.py` — pure `evaluate()` + TOML loader (`policy.toml` / `TRADER_POLICY_FILE`); defaults deny real mode. `load_policy(mode=...)` merges `[trading]`/`[limits]` with `[<mode>.trading]`/`[<mode>.limits]` (real/dry/paper); all sections are validated regardless of mode.
 - `trader/ledger/ledger.py` — SQLite `.data/ledger-<mode>.sqlite3`; hash-chained `events`; positions/PnL restored on startup.
+- `trader/paths.py` — `data_dir()` (`TRADER_DATA_DIR`, else `<project root>/.data`) and `policy_file()` (`TRADER_POLICY_FILE`, else `<project root>/policy.toml`). All state (ledger, `HALT`, paper wallet) derives from these, never from the cwd, so `halt`/`resume`/`ledger resolve` reach the running bot from any directory. Relative env values resolve against the project root. Read per call, so env changes apply after import. Never use a bare `Path(".data")`.
 - `trader/paper/` — `SimulatedWallet` + `PaperJupiterProvider` (overrides `_do_swap` only). `trader/backtest/` — `TickRecorder`/`load_ticks` + `Backtester` (synthetic quotes via `ReplayQuoteClient`).
 - `trader/logging_config.py` — console filter shows only `bot`/`trader.trading_strategy` at DEBUG (others WARNING); file logs → `.logs/`.
 
@@ -52,11 +53,11 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - Telegram credentials: `TELEGRAM_CHAT_ID`/`TELEGRAM_BOT_TOKEN` env vars.
 - Jupiter quote/swap calls go to `api.jup.ag` (the old `lite-api.jup.ag` is being sunset). Override with `JUPITER_API_URL`; `JUPITER_API_KEY` is sent as `x-api-key` when set (optional — unauthenticated requests still work at a lower rate limit). The undocumented websocket price feed (`trench-stream.jup.ag`) and candles (`datapi.jup.ag`) are untouched by this — still frontend endpoints, still no fallback.
 - `policy.toml`'s `[paper.limits]` must override `max_trade_usd` too (not just `max_daily_notional_usd`/`max_trades_per_hour`), or the first paper buy gets silently denied forever: the default paper wallet (100 USDC/0.5 SOL) times the default strategies' 50-100%-of-balance sizing is $50-100/trade, well above the base `max_trade_usd=25`. Denied intents still show up in `ledger list`/the `events` table (`intent_denied`, reason `"trade de N USD acima do limite 25 USD"`) — check there first if paper trading looks stuck.
-- Tests run in a temp cwd (`isolated_workdir` autouse fixture) so `.data/`, `HALT` and `policy.toml` never touch the real ones. Close `Ledger`s you open (`-W error::ResourceWarning` stays clean).
+- Tests are isolated by the `isolated_workdir` autouse fixture: it points `TRADER_DATA_DIR`/`TRADER_POLICY_FILE` at `tmp_path` (so the ledger, `HALT` and `policy.toml` never touch the real ones) and also chdirs there to contain incidental relative writes (logs, tick CSVs). Write test policies with `policy_file().write_text(...)`. Close `Ledger`s you open (`-W error::ResourceWarning` stays clean).
 - UNCONFIRMED intents block all trading until `main.py ledger resolve`; `main.py resume <mode>` re-arms the circuit breaker.
 - On Windows, `timeout -s INT` doesn't reach the bot; stop a test run with `taskkill /PID <uv pid> /T /F`.
 - Strategies must use `self.clock()` / `self.rng` (not `datetime.now()` / `random`) so backtests stay deterministic; `StrategyComposer` propagates `set_clock`/`seed` to children.
-- Ruff runs mccabe `C90` (`max-complexity = 10`); split functions rather than suppress.
+- Ruff runs mccabe `C90` with `max-complexity = 5` (`pyproject.toml`); split functions or use table-driven dispatch rather than suppress.
 - Costs and net PnL:
   - `AsyncAccount._execute_order` calls `provider.fetch_swap_costs(result)`
     only after the gateway has marked the intent EXECUTED. That method must
@@ -70,6 +71,7 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
     columns only in `_SCHEMA`.
   - The Windows console is cp1252: avoid non-Latin-1 symbols in
     log/CLI output (use `[!]`).
-- Agent-integration roadmap and open issues: `docs/plan.md`. Code-quality refactoring backlog: `docs/refactoring-backlog.md` (update it when you fix or add items).
+- Docs: `docs/architecture.md` is a step-by-step tour of the code (read it first). `docs/agent-strategies.md` is the current roadmap: agents author strategy specs, and strategy-runners talk to a per-mode trade-runner. It has a phase list and a progress table, so keep them current. `docs/plan.md` holds the earlier hardening roadmap and open issues. `docs/refactoring-backlog.md` is the code-quality backlog, with items scheduled into agent-strategies phases; update it when you fix or add items. Plan in `docs/` first, then implement.
+- Layering is enforced by `tests/test_architecture.py`. Every `trader/` module is mapped to a layer (core, strategy, market, venue, risk, execution, strategy-side, app), and imports across layers are checked. A new module must be added to its map. Strategy code and the strategy-side layer must never import the execution, venue or risk layers.
 - `trader/logging_config.py` `BotLoggerFileHandler` + `DictConfigurator` are legacy/complex — flag for a future refactor.
 - `main.py start` is a near-duplicate of `run` — flag for a future broader strategy-wiring refactor.

@@ -12,7 +12,6 @@ from trader.backtest import Backtester, TickRecorder, load_ticks, ticks_from_can
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.execution import KillSwitch, TradeGateway
 from trader.ledger import Ledger, ledger_path
-from trader.ledger.ledger import DATA_DIR
 from trader.models import SOLANA_MINTS
 from trader.models.bot_config import (
     RunningMode,
@@ -30,6 +29,7 @@ from trader.paper import (
     SimulatedWallet,
     parse_balances,
 )
+from trader.paths import data_dir
 from trader.policy import load_policy
 from trader.providers.jupiter.async_jupiter_client import Interval
 from trader.providers.jupiter.async_jupiter_svc import (
@@ -47,7 +47,7 @@ app.add_typer(paper_app, name="paper")
 
 
 def _paper_wallet_path():
-    return DATA_DIR / "paper-wallet.json"
+    return data_dir() / "paper-wallet.json"
 
 
 def _build_provider(mode: RunningMode, **kwargs) -> AsyncJupiterProvider:
@@ -56,9 +56,11 @@ def _build_provider(mode: RunningMode, **kwargs) -> AsyncJupiterProvider:
         wallet = SimulatedWallet(_paper_wallet_path())
         if wallet.is_empty:
             wallet.reset(DEFAULT_PAPER_BALANCES)
+            # stderr: não pode sujar o stdout dos comandos `--json`
             typer.echo(
                 f"Carteira paper criada com {DEFAULT_PAPER_BALANCES} "
-                "(mude com `main.py paper reset`)"
+                "(mude com `main.py paper reset`)",
+                err=True,
             )
         return PaperJupiterProvider(wallet, **kwargs)
     return AsyncJupiterProvider(

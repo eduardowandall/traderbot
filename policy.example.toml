@@ -1,5 +1,6 @@
 # Política de risco do bot. Copie para `policy.toml` (ou aponte
-# TRADER_POLICY_FILE para outro arquivo) e ajuste os limites.
+# TRADER_POLICY_FILE para outro arquivo, relativo à raiz do projeto) e
+# ajuste os limites.
 # Sem arquivo, valem os padrões abaixo. Chaves desconhecidas são erro.
 #
 # Toda ordem (estratégias e `main.py swap`) passa por esta política antes de
@@ -35,9 +36,9 @@ max_consecutive_failures = 3
 # estratégias padrão dimensionam 50-100% do saldo: sem isso, a primeira
 # compra já esbarra no max_trade_usd=25 herdado e fica sempre recusada
 # ("trade de N USD acima do limite 25 USD" em `ledger list`)
-max_trade_usd = 1000
-max_daily_notional_usd = 10000
-max_trades_per_hour = 60
+# max_trade_usd = 1000
+# max_daily_notional_usd = 10000
+# max_trades_per_hour = 60
 #
 # [real.trading]
 # real_trading_enabled = true

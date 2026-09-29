@@ -1,7 +1,6 @@
 import json
 import sqlite3
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -16,6 +15,7 @@ from trader.ledger.ledger import _SCHEMA
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentSide, IntentStatus, PolicyDecision, TradeIntent
 from trader.paper import PaperJupiterProvider, SimulatedWallet
+from trader.paths import data_dir
 from trader.policy import Policy
 from trader.providers import JupiterQuoteResponse
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
@@ -199,4 +199,4 @@ def test_resolve_failed_backfills_fee():
     rpc.get_confirmed_transaction.assert_awaited_once_with("sig-y")
     with Ledger(ledger_path("real")) as ledger:
         assert ledger.pnl_report()["real:SOL-USDC"].failed_fee_lamports == 7000
-    assert Path(".data").exists()
+    assert data_dir().exists()

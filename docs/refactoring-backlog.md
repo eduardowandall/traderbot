@@ -9,6 +9,11 @@ File references name functions rather than line numbers, because line numbers
 drift. Size: **S** is under an hour and self-contained, **M** touches several
 modules, **L** is a design change.
 
+**Scheduling (2026-09-28):** every open item was re-checked against the code,
+and all of them are still present. Most are now scheduled into the phases of
+[`agent-strategies.md`](agent-strategies.md) §5.0, which has the full table.
+Each item below carries a *Scheduled* line.
+
 ---
 
 ## 1. Structural (design changes)
@@ -34,8 +39,10 @@ modules, **L** is a design change.
   `SimulatedExecutor(wallet, fee_lamports)`. `AsyncJupiterProvider` would take a
   `jupiter_client` and an executor, and would keep quoting, the price-impact
   cap and retries shared between them.
-- **Unlocks:** 1.4, 2.1 and 2.2 become trivial. `keypair` becomes required
+- **Unlocks:** 2.1 and 2.2 become trivial. `keypair` becomes required
   again, inside `OnChainExecutor`.
+- **Scheduled:** agent-strategies Phase 1 (read-only `MarketData` split) and
+  Phase 2 (`Executor`).
 
 ### 1.2 USD value for pairs whose input is not a stablecoin — **M**
 - **Where:**
@@ -59,6 +66,8 @@ modules, **L** is a design change.
   - **Update 2026-09-25:** net PnL now uses rates taken from the trade itself
     (`trade_rates`). A SOL→USD price source would complete the cost conversion
     for pairs without SOL, which are flagged `[!] incompleto` today.
+- **Scheduled:** agent-strategies Phase 6. Until then, strategy specs are
+  limited to USDC/USDT inputs.
 
 ### 1.3 Gateway as the only path to the ledger — **S**
 - **Where:**
@@ -73,24 +82,25 @@ modules, **L** is a design change.
   - Add a `TradeGateway.for_mode(mode)` factory to replace `main._build_gateway`.
   - `halt` must keep working without loading the policy, so it needs a
     policy-free path, e.g. `for_mode(mode, policy=None)`.
+- **Scheduled:** agent-strategies Phase 2.
 
-### 1.4 Data paths independent of the working directory — **S–M**
-- **Where:**
-  - `trader/ledger/ledger.py` `DATA_DIR = Path(".data")`, imported by
-    `trader/execution/gateway.py` (`KillSwitch`) and `main.py` (paper wallet)
-  - `trader/policy/policy.py` `DEFAULT_POLICY_PATH`
-  - the `tests/conftest.py` `isolated_workdir` fixture
-- **Problem:** Every state path is relative to the current directory. **This
-  is a real operational risk:** running `main.py halt` from another folder
-  writes a `HALT` file the running bot never sees. The ledger and the policy
-  file would also silently point at different files. The test fixture hides
-  this by changing directory.
-- **Change:** Add one `data_dir()` resolver that reads `TRADER_DATA_DIR` and
-  falls back to the project root rather than the current directory. Derive
-  `ledger_path`, the `KillSwitch` default, the paper wallet path and the
-  default policy path from it. Tests then set the env var instead of changing
-  directory.
-- **Priority:** do this first; it is cheap and closes a safety gap.
+### 1.5 The package init loads the strategy registry — **S** (new 2026-09-28)
+- **Where:** `trader/__init__.py` imports `trading_strategy` to build
+  `STRATEGIES`.
+- **Problem:** every `import trader.<anything>` loads every strategy, which
+  couples the package root to the strategy layer.
+- **Change:** move the registry to `trader/strategies_registry.py` and leave
+  `trader/__init__.py` empty.
+- **Scheduled:** agent-strategies Phase 1.
+
+### 1.6 Wiring lives in the models package — **S** (new 2026-09-28)
+- **Where:** `trader/models/bot_config.py` imports `TradeGateway`,
+  `AsyncJupiterProvider`, `TradingStrategy` and the notification services.
+- **Problem:** `trader/models` is meant to be plain data with no
+  dependencies, but this module pulls in execution, venue and strategy code.
+- **Change:** move `BotConfig` / `create_bot_config` / `get_keypair_from_env`
+  to `trader/bot/config.py`. Keep `RunningMode` in models.
+- **Scheduled:** agent-strategies Phase 2.
 
 ---
 
@@ -109,6 +119,7 @@ modules, **L** is a design change.
 - **Why skipped:** a new provider attribute breaks the many
   `AsyncMock(spec=AsyncJupiterProvider)` mocks, because a spec'd mock returns a
   `Mock`, not a `Decimal`. Do it together with 1.1.
+- **Scheduled:** agent-strategies Phase 2.
 
 ### 2.2 Replace the mode string check with a provider fact — **S** (after 1.1)
 - **Where:** `trader/bot/async_websocket_bot.py` `_startup`
@@ -118,6 +129,7 @@ modules, **L** is a design change.
   property of the provider, not of the mode.
 - **Change:** Check a `balances_track_fills` attribute on the provider or
   executor.
+- **Scheduled:** agent-strategies Phase 2.
 
 ### 2.3 Inject a clock into `AsyncAccount` — **S**
 - **Where:** `trader/async_account.py`: the balance cache expiry in
@@ -128,6 +140,7 @@ modules, **L** is a design change.
   does not.
 - **Change:** Accept `clock: Callable[[], datetime]`, the same type as
   `TradingStrategy.set_clock`, and have the backtester pass the replay clock.
+- **Scheduled:** agent-strategies Phase 1.
 
 ### 2.4 Move Telegram off the event loop — **S**
 - **Where:** `trader/notification/notification_service.py`
@@ -138,6 +151,7 @@ modules, **L** is a design change.
 - **Change:** Make it an async `send_message` using `httpx.AsyncClient`, or
   wrap it with `asyncio.to_thread`, or fire-and-forget it as a task. Also
   listed in `docs/plan.md` §3.2.
+- **Scheduled:** agent-strategies Phase 4 (the trade-runner).
 
 ### 2.5 Log volume in strategies — **S**
 - **Where:** `trader/trading_strategy.py` `TargetValueStrategy.on_market_refresh`
@@ -151,6 +165,9 @@ modules, **L** is a design change.
   - Log only when the target or state changes, or rate-limit the message.
   - Silence strategy loggers during `backtest`.
 - **Why skipped:** it changes the log output people read.
+- **Scheduled:** agent-strategies Phase 1, for new code and for silencing
+  strategy logs in backtests. The old strategies' INFO lines stay until the
+  composer strategies are deprecated.
 
 ### 2.6 Strategy class-level `clock` / `rng` defaults — **S**
 - **Where:** `trader/trading_strategy.py` `TradingStrategy`. It declares
@@ -160,6 +177,7 @@ modules, **L** is a design change.
   used by subclasses that skip `super().__init__()`.
 - **Change:** Make those subclasses (test fakes such as `FakeStrategy`) call
   `super().__init__()`, then keep annotation-only class declarations.
+- **Scheduled:** agent-strategies Phase 1.
 
 ### 2.7 Test factories — **S**
 - **Where:**
@@ -174,6 +192,10 @@ modules, **L** is a design change.
     `JupiterQuoteResponse.single_route`.
 - **Change:** Add `make_intent(**overrides)` and a `ledger` fixture to
   `tests/conftest.py`.
+- **Done 2026-09-28** (agent-strategies Phase 0). The helpers live in
+  `tests/factories.py` (`make_intent`, `open_ledger`). The conftest has an
+  autouse fixture that closes them and a `ledger` fixture. The
+  `mock_jupiter_client` / `single_route` point is still open.
 
 ### 2.8 Identical consecutive denials — **S**
 - **Where:** `trader/execution/gateway.py` `_authorize` records every denial.
@@ -184,6 +206,8 @@ modules, **L** is a design change.
 - **Change:** Collapse consecutive identical denials, keyed by (account, side,
   reasons), into one row with a counter. Alternatively, cache the
   `PolicyDecision` until an input to `policy_state` changes.
+- **Scheduled:** agent-strategies Phase 4, where many strategy-runners share
+  one gateway.
 
 ### 2.9 Ledger write batching — **S**
 - **Where:** `trader/ledger/ledger.py`. Each executed trade makes three
@@ -194,13 +218,18 @@ modules, **L** is a design change.
 - **Do not** cache the last hash in memory. The CLI (`halt`, `resume`,
   `ledger resolve`) writes to the same database while the bot runs, so a
   cached hash would break the chain.
+- **Related race:** `_add_event` reads the last hash *before* the INSERT opens
+  the write transaction, so two processes can fork the chain. Take the lock
+  first (`BEGIN IMMEDIATE`).
+- **Lock done 2026-09-28** (agent-strategies Phase 0): every write goes
+  through `Ledger._write()` (`BEGIN IMMEDIATE`). The single commit is still
+  scheduled for Phase 2, in `TradeGateway.record_fill`.
 
 ### 2.10 Minor
 - **Unused re-exports.** `trader/paper/__init__.py` exports
-  `DEFAULT_FEE_LAMPORTS`, `trader/backtest/__init__.py` exports
-  `ReplayQuoteClient`, and `trader/policy/__init__.py` exports
-  `DEFAULT_POLICY_PATH`. None of these is used outside its own package. Trim
-  them, or keep them deliberately as public API.
+  `DEFAULT_FEE_LAMPORTS` and `trader/backtest/__init__.py` exports
+  `ReplayQuoteClient`. Neither is used outside its own package. Trim them, or
+  keep them deliberately as public API.
 - **`TickRecorder.record`** flushes on every tick. That is cheap and gives
   crash safety. Flush every N ticks or once a second if tick volume grows.
 - **`load_ticks`** always sorts. Check whether the list is already sorted
@@ -211,8 +240,45 @@ modules, **L** is a design change.
   argument when it is `None`.
 - **`main.py start`** is a near-duplicate of `run`. This was already flagged
   in `AGENTS.md`.
+- **Scheduled:** the idempotency default and the `start` removal are in
+  agent-strategies Phase 2. The other minor items are not scheduled.
+
+### 2.11 Swap error classes live in the venue module — **S** (new 2026-09-28)
+- **Where:** `SwapRejectedError` and `TransactionSubmittedError` are defined
+  in `trader/providers/jupiter/async_jupiter_svc.py`. They are imported by
+  `trader/execution/gateway.py` and `trader/paper/wallet.py`.
+- **Change:** move them to `trader/models/errors.py` and re-export them from
+  the old location.
+- **Scheduled:** agent-strategies Phase 2.
+
+### 2.12 `Interval` lives in the market client — **S** (new 2026-09-28)
+- **Where:** `trader/providers/jupiter/async_jupiter_client.py`.
+- **Problem:** strategy specs need the timeframe enum, but the strategy layer
+  may import only core modules.
+- **Change:** move it to `trader/models/public_data.py`, and have the client
+  re-export it.
+- **Scheduled:** agent-strategies Phase 1.
 
 ---
+
+## Done on 2026-09-28 (for reference)
+
+- **Ledger hash-chain race** (part of 2.9): see 2.9 above.
+- **Test factories** (2.7): see 2.7 above.
+
+- **Data paths independent of the working directory** (was 1.4). New
+  `trader/paths.py`:
+  - `data_dir()` reads `TRADER_DATA_DIR` and falls back to
+    `<project root>/.data`.
+  - `policy_file()` reads `TRADER_POLICY_FILE` and falls back to
+    `<project root>/policy.toml`.
+  - Relative values resolve against the project root, never the cwd.
+
+  `ledger_path`, the `KillSwitch` default and the paper wallet derive from
+  `data_dir()`, and `load_policy` uses `policy_file()`. `DATA_DIR` and
+  `DEFAULT_POLICY_PATH` are gone. The test fixture now isolates state through
+  the env vars. `tests/trader/test_paths.py` covers `halt` run from another
+  directory reaching the bot. That test failed before the change.
 
 ## Done on 2026-09-25 (for reference)
 

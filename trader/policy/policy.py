@@ -4,8 +4,9 @@
 ledger e se o kill switch está ativo, e devolve uma `PolicyDecision`. Isso a
 torna fácil de testar e impossível de burlar por quem só propõe trades.
 
-A política vem de um arquivo TOML do dono (padrão: `policy.toml`, ou
-`TRADER_POLICY_FILE`). Sem arquivo, valem os limites conservadores abaixo.
+A política vem de um arquivo TOML do dono (padrão: `policy.toml` na raiz do
+projeto, ou `TRADER_POLICY_FILE`; veja `trader.paths`). Sem arquivo, valem
+os limites conservadores abaixo.
 """
 
 import hashlib
@@ -19,10 +20,9 @@ from pathlib import Path
 
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentSide, PolicyDecision, TradeIntent
+from trader.paths import policy_file
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_POLICY_PATH = "policy.toml"
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ def load_policy(
     """
     if mode is not None and mode not in MODES:
         raise ValueError(f"modo desconhecido: {mode!r}")
-    policy_path = Path(path or os.getenv("TRADER_POLICY_FILE") or DEFAULT_POLICY_PATH)
+    policy_path = Path(path) if path else policy_file()
     if not policy_path.exists():
         logger.info(f"Política {policy_path} não encontrada; usando padrões")
         return Policy()

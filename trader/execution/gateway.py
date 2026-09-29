@@ -13,9 +13,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from trader.ledger import Ledger
-from trader.ledger.ledger import DATA_DIR
 from trader.models.intent import IntentRecord, TradeIntent
 from trader.models.order import SwapResult
+from trader.paths import data_dir
 from trader.policy import Policy, evaluate
 from trader.providers.jupiter.async_jupiter_svc import TransactionSubmittedError
 
@@ -44,7 +44,7 @@ class KillSwitch:
     """Arquivo-flag: se existe, nenhum trade é executado (fail-closed)."""
 
     def __init__(self, path: str | Path | None = None):
-        self.path = Path(path) if path else DATA_DIR / "HALT"
+        self.path = Path(path) if path else data_dir() / "HALT"
 
     def is_active(self) -> bool:
         try:

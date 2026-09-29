@@ -1,5 +1,4 @@
 from .policy import (
-    DEFAULT_POLICY_PATH,
     Policy,
     PolicyState,
     evaluate,
@@ -7,7 +6,6 @@ from .policy import (
 )
 
 __all__ = [
-    "DEFAULT_POLICY_PATH",
     "Policy",
     "PolicyState",
     "evaluate",

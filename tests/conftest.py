@@ -3,6 +3,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import close_open_ledgers, open_ledger
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, VersionedTransaction
 
@@ -95,8 +96,22 @@ def mock_sleep():
 
 
 @pytest.fixture(autouse=True)
+def _close_open_ledgers():
+    yield
+    close_open_ledgers()
+
+
+@pytest.fixture
+def ledger():
+    """Ledger em memória (use `factories.open_ledger()` fora de fixtures)."""
+    return open_ledger()
+
+
+@pytest.fixture(autouse=True)
 def isolated_workdir(tmp_path, monkeypatch):
-    # ledger (.data/), kill switch e policy.toml são relativos ao cwd: cada
-    # teste roda num diretório vazio para nunca tocar nos arquivos reais
+    # o estado (.data/: ledger, HALT, carteira paper) e o policy.toml apontam
+    # para o diretório do teste, nunca para os arquivos reais do projeto; o
+    # chdir só contém escritas relativas incidentais (logs, CSVs de ticks)
+    monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path / ".data"))
+    monkeypatch.setenv("TRADER_POLICY_FILE", str(tmp_path / "policy.toml"))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("TRADER_POLICY_FILE", raising=False)
