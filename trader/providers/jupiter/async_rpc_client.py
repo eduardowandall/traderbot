@@ -35,7 +35,9 @@ class AsyncRPCClient:
             self.client = client
         else:
             rpc_url = os.getenv("HELIUS_RPC_URL")
-            assert rpc_url, "RPC URL não definida"
+            if not rpc_url:
+                # `assert` some com `python -O`
+                raise ValueError("HELIUS_RPC_URL não definida")
             self.client = AsyncClient(rpc_url)
         self._client_connected = False
         self.is_dryrun = is_dryrun

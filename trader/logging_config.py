@@ -1,13 +1,23 @@
+"""Logging: console (stderr, filtrado) e um arquivo por processo em `.logs/`.
+
+Cada linha do arquivo leva o nome do bot (`[%(botname)s]`), vindo da
+ContextVar `botname` que o bot define por task: vários bots num processo
+continuam distinguíveis num arquivo só.
+"""
+
 import logging
+import logging.config
 import os
+import re
+import time
 from contextvars import ContextVar
-from datetime import datetime
-from logging.config import DictConfigurator
 
 from rich.console import Console
 from rich.logging import RichHandler
 
 botname: ContextVar[str | None] = ContextVar("botname", default=None)
+
+LOG_DIR = ".logs"
 
 
 def stderr_rich_handler(**kwargs) -> RichHandler:
@@ -15,53 +25,43 @@ def stderr_rich_handler(**kwargs) -> RichHandler:
     return RichHandler(console=Console(stderr=True), **kwargs)
 
 
-class BotLoggerFileHandler(logging.FileHandler):
-    def __init__(self, *args, **kwargs):
-        _folder = ".logs/"
-        os.makedirs(_folder, exist_ok=True)
-        self.filename_format = f"{_folder}%s-{int(datetime.now().timestamp())}.log"
-        self.bot_name = None
-        super().__init__(self.filename_format % "bot")
+def file_handler(**kwargs) -> logging.FileHandler:
+    """`.logs/trader-<timestamp>.log`, aberto só no primeiro registro."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    path = os.path.join(LOG_DIR, f"trader-{int(time.time())}.log")
+    return logging.FileHandler(path, encoding="utf-8", delay=True, **kwargs)
 
-    def should_setup_filename(self, record):
-        if self.bot_name is None:
-            # tenta extrair o nome do bot do logger
-            logger_name = botname.get(None)
-            if logger_name:
-                self.bot_name = logger_name.split(".")[0]
-                return True
-        return False
 
-    def setup_filename(self):
-        """Troca o arquivo `bot-<ts>.log` pelo arquivo com o nome do bot."""
-        if self.stream:
-            self.stream.close()
-            self.stream = None  # type: ignore
-        if self.bot_name:
-            self._move_to_bot_file(self.filename_format % self.bot_name)
-        if not self.delay:
-            self.stream = self._open()
+# segredos que podem aparecer em URLs: a api-key da HELIUS_RPC_URL e o token
+# do bot do Telegram (api.telegram.org/bot<token>/...)
+_SECRETS = (
+    (re.compile(r"(api[-_]key=)[^&\s\"']+", re.IGNORECASE), r"\1***"),
+    (re.compile(r"(/bot)\d+:[\w-]+"), r"\1***"),
+)
 
-    def _move_to_bot_file(self, dfn: str):
-        if os.path.exists(dfn):
-            os.remove(dfn)
-        elif os.path.exists(self.baseFilename):
-            os.rename(self.baseFilename, dfn)
-        self.baseFilename = dfn
 
-    def emit(self, record):
-        """
-        Emit a record.
+def redact(text: str) -> str:
+    for pattern, replacement in _SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
 
-        Output the record to the file, catering for rollover as described
-        in doRollover().
-        """
-        try:
-            if self.should_setup_filename(record):
-                self.setup_filename()
-            logging.FileHandler.emit(self, record)
-        except Exception:
-            self.handleError(record)
+
+class RedactingFormatter(logging.Formatter):
+    """Mascara segredos na linha inteira, inclusive tracebacks e notas."""
+
+    def format(self, record):
+        return redact(super().format(record))
+
+    def formatException(self, ei):
+        return redact(super().formatException(ei))
+
+
+class BotNameFilter(logging.Filter):
+    """Põe o nome do bot da task atual em `record.botname` ("-" fora de bots)."""
+
+    def filter(self, record):
+        record.botname = botname.get(None) or "-"
+        return True
 
 
 class ConsoleFilter(logging.Filter):
@@ -72,29 +72,29 @@ class ConsoleFilter(logging.Filter):
         "trader.strategy_spec.strategy",
     ]
 
-    def __init__(self, param=None):
-        self.param = param
-
     def filter(self, record):
         if record.name in ConsoleFilter.ALLOWED_LOGGERS:
             return True
-        else:
-            return record.levelno >= logging.WARNING
+        return record.levelno >= logging.WARNING
 
 
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "filters": {
-        "consolefilter": {
-            "()": ConsoleFilter,
-        }
+        "consolefilter": {"()": ConsoleFilter},
+        "botname": {"()": BotNameFilter},
     },
     "formatters": {
         "default": {
-            "format": "%(asctime)s %(levelname)s %(name)s.%(funcName)s %(message)s",
+            "()": RedactingFormatter,
+            "format": (
+                "%(asctime)s %(levelname)s [%(botname)s] "
+                "%(name)s.%(funcName)s %(message)s"
+            ),
         },
         "console": {
+            "()": RedactingFormatter,
             "format": "%(message)s",
         },
     },
@@ -106,9 +106,10 @@ LOGGING = {
             "filters": ["consolefilter"],
         },
         "file": {
-            "class": BotLoggerFileHandler,
+            "()": file_handler,
             "formatter": "default",
             "level": "DEBUG",
+            "filters": ["botname"],
         },
     },
     "root": {
@@ -119,17 +120,15 @@ LOGGING = {
         "httpcore": {
             "level": "ERROR",
         },
-        # httpx loga URLs em INFO (HELIUS_RPC_URL contém a api-key) e urllib3
-        # loga o path em DEBUG (a URL do Telegram contém o token do bot)
-        "httpx": {
-            "level": "WARNING",
-        },
-        "urllib3": {
-            "level": "WARNING",
-        },
+        # httpx loga cada URL em INFO: a HELIUS_RPC_URL contém a api-key e a
+        # URL do Telegram contém o token do bot. O solana-py usa o fork
+        # `httpx2`/`httpcore2`, que loga igual (vazou a api-key em .logs/)
+        "httpx": {"level": "WARNING"},
+        "httpx2": {"level": "WARNING"},
+        "httpcore2": {"level": "ERROR"},
     },
 }
 
 
 def setup_logging():
-    DictConfigurator(LOGGING).configure()
+    logging.config.dictConfig(LOGGING)

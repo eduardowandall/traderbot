@@ -1,4 +1,4 @@
-from .executor import DEFAULT_FEE_LAMPORTS, SimulatedExecutor
+from .executor import SimulatedExecutor
 from .provider import paper_provider
 from .wallet import (
     DEFAULT_PAPER_BALANCES,
@@ -8,7 +8,6 @@ from .wallet import (
 )
 
 __all__ = [
-    "DEFAULT_FEE_LAMPORTS",
     "DEFAULT_PAPER_BALANCES",
     "InsufficientFundsError",
     "SimulatedExecutor",

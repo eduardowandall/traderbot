@@ -4,7 +4,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import memory_gateway
+from factories import bonk_quote, memory_gateway
 from solders.keypair import Keypair
 
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
@@ -14,9 +14,6 @@ from trader.models import SOLANA_MINTS, Interval, OrderSide, OrderSignal, Positi
 from trader.notification import NullNotificationService
 from trader.providers import (
     AsyncJupiterProvider,
-    JupiterQuoteResponse,
-    JupiterRoutePlan,
-    JupiterSwapInfo,
 )
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.trading_service.local import LocalTradeClient
@@ -121,46 +118,15 @@ def assert_market_mock_calls(market_client):
     )
 
 
-def _quote():
-    return JupiterQuoteResponse(
-        inputMint=USDC.mint,
-        inAmount="50000000",
-        outputMint=BONK.mint,
-        outAmount="5000000",
-        otherAmountThreshold="4975000",
-        swapMode="ExactIn",
-        slippageBps=50,
-        platformFee=None,
-        priceImpactPct="0.005",
-        routePlan=[
-            JupiterRoutePlan(
-                swapInfo=JupiterSwapInfo(
-                    ammKey="FksffEqnBRixYGR791Qw2MgdU7zNCpHVFYBL4Fa4qVuH",
-                    label="HumidiFi",
-                    inputMint=BONK.mint,
-                    outputMint=USDC.mint,
-                    inAmount="50000000",
-                    outAmount="7106793162",
-                    feeAmount="0",
-                    feeMint=BONK.mint,
-                ),
-                percent=100,
-            )
-        ],
-        contextSlot=123456789,
-        timeTaken=0.5,
-    )
-
-
 def assert_jupiter_mock_calls(mock_jupiter_client, keypair):
     _assert_calls(
         mock_jupiter_client,
         [
             mock.call.get_quote(USDC.mint, BONK.mint, 50000000, 50),
-            mock.call.get_swap_transaction(_quote(), keypair.pubkey()),
+            mock.call.get_swap_transaction(bonk_quote(), keypair.pubkey()),
             # venda de 50 BONK (5 decimais) = 5_000_000 raw
             mock.call.get_quote(BONK.mint, USDC.mint, 5000000, 50),
-            mock.call.get_swap_transaction(_quote(), keypair.pubkey()),
+            mock.call.get_swap_transaction(bonk_quote(), keypair.pubkey()),
             mock.call.aclose(),
         ],
     )
@@ -297,6 +263,8 @@ async def test_cancellation_closes_and_propagates():
     market.aclose.assert_awaited_once()
     assert trader.closed == 1
     notifier.send_message.assert_called_with("Bot interrompido pelo usuário")
+    # o encerramento espera o envio pendente da mensagem acima
+    notifier.aclose.assert_awaited_once()
 
 
 async def test_shutdown_survives_close_errors():

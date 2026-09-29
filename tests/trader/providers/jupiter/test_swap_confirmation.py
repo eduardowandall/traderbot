@@ -148,3 +148,45 @@ class TestNoRetryAfterBroadcast:
         provider._do_swap = do_swap
         assert await provider._do_swap_with_retry("a", "b", 1000) == "sig"
         assert do_swap.await_count == 2
+
+
+class TestSendErrorsCountAsSubmitted:
+    """Um erro no envio pode chegar depois de o nó aceitar a transação."""
+
+    def _ready(self, provider):
+        provider._get_quote_with_route = AsyncMock()
+        provider.executor._get_swap_transaction = AsyncMock()
+        signed = mock.Mock()
+        signed.signatures = [Signature.new_unique()]
+        provider.executor._get_signed_transaction = AsyncMock(return_value=signed)
+        return signed
+
+    async def test_a_send_that_times_out_is_never_resent(self, provider, mock_sleep):
+        signed = self._ready(provider)
+        send = AsyncMock(side_effect=TimeoutError("sem resposta do RPC"))
+        provider.executor.rpc_client.send_transaction = send
+
+        with pytest.raises(TransactionSubmittedError) as ex:
+            await provider._do_swap_with_retry("mint_in", "mint_out", 1000)
+
+        send.assert_awaited_once()
+        provider._get_quote_with_route.assert_awaited_once()  # nenhuma nova quote
+        # a assinatura vai para o ledger (UNCONFIRMED), para conferir depois
+        assert ex.value.signature == str(signed.signatures[0])
+
+    async def test_a_failed_simulation_is_still_retried(self, provider, mock_sleep):
+        self._ready(provider)
+        provider.executor.rpc_client.simulate_transaction = AsyncMock(
+            side_effect=[Exception("simulação falhou"), None]
+        )
+        provider.executor.rpc_client.send_transaction = AsyncMock(
+            return_value=SendTransactionResp(value=Signature.new_unique())
+        )
+        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
+            return_value=True
+        )
+
+        await provider._do_swap_with_retry("mint_in", "mint_out", 1000)
+
+        assert provider._get_quote_with_route.await_count == 2
+        provider.executor.rpc_client.send_transaction.assert_awaited_once()

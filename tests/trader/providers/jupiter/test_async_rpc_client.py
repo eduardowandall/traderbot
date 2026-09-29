@@ -79,3 +79,10 @@ async def test_simulate_transaction(mock_signed_transaction):
         mock_signed_transaction
     )
     assert resp.value is not None
+
+
+def test_missing_rpc_url_is_a_clear_error_even_under_python_O(monkeypatch):
+    monkeypatch.delenv("HELIUS_RPC_URL", raising=False)
+
+    with pytest.raises(ValueError, match="HELIUS_RPC_URL"):
+        AsyncRPCClient()

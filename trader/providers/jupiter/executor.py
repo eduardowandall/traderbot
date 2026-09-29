@@ -137,8 +137,19 @@ class OnChainExecutor:
     async def _send_signed_transaction(
         self, new_tx: VersionedTransaction
     ) -> SendTransactionResp:
+        # simulação: nada saiu ainda, uma falha aqui pode ser re-tentada
         await self.rpc_client.simulate_transaction(new_tx)
-        return await self.rpc_client.send_transaction(new_tx)
+        try:
+            return await self.rpc_client.send_transaction(new_tx)
+        except Exception as ex:
+            # o nó pode ter aceitado a transação antes de o erro chegar (ex:
+            # timeout na resposta): conta como enviada e nunca é re-tentada,
+            # senão um novo envio poderia duplicar o swap
+            signature = _signature_of(new_tx)
+            raise TransactionSubmittedError(
+                f"Envio da transação {signature} sem resposta: {ex}",
+                signature=signature,
+            ) from ex
 
     async def _wait_for_confirmation(
         self, signature, timeout=CONFIRMATION_TIMEOUT_SECONDS
@@ -215,3 +226,11 @@ class OnChainExecutor:
     async def aclose(self) -> None:
         # só o RPC é exclusivo do executor; o cliente Jupiter é do provider
         await self.rpc_client.aclose()
+
+
+def _signature_of(tx: VersionedTransaction) -> str | None:
+    """A assinatura da transação assinada (conhecida antes do envio)."""
+    try:
+        return str(tx.signatures[0])
+    except Exception:
+        return None

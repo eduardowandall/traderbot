@@ -5,11 +5,9 @@ description = "Solana trading bot (Jupiter DEX)"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "requests>=2.31.0",
     "tenacity>=9.0.0",
     "typer>=0.16.0",
     "rich>=13.5.2",
-    "pandas>=2.1.0",
     "websockets>=15.0.1",
     "solana>=0.40.1",
     "httpx>=0.28.1",

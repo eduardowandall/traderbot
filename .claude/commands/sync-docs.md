@@ -14,10 +14,9 @@ working-tree diff).
      Keep it terse; it is loaded into every session.
    - `docs/architecture.md`: the step-by-step tour, covering new or moved
      modules and changed call flows.
-   - `docs/agent-strategies.md`: the phase list and the **progress table**.
-   - `docs/refactoring-backlog.md`: mark fixed items, and add any new debt you
-     noticed along with the phase it is scheduled into.
-   - `docs/plan.md`: only for the earlier hardening items or open issues.
+   - `docs/plan.md`: the **progress table** (§6), the score (§2), known
+     issues (§7), and any new debt you noticed, added as an item in the stage
+     where it belongs.
 3. Remove anything the code no longer supports, such as deleted modules,
    renamed functions or dead commands. Grep for them:
    `grep -rn "<old name>" --include=*.md .`

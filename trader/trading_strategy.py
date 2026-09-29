@@ -1,16 +1,15 @@
 import logging
 import random
 from abc import ABC, abstractmethod
-from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-import pandas as pd
-
 from trader.models.public_data import TickerData
 
 from .models import OrderSide, OrderSignal, Position
+
+_UNSET = object()
 
 
 class TradingStrategy(ABC):
@@ -26,6 +25,14 @@ class TradingStrategy(ABC):
         self.logger = logging.getLogger(self.__module__)
         self.clock = datetime.now
         self.rng = random.Random()
+        # último estado logado por chave (`_log_on_change`)
+        self._logged_states: dict[str, object] = {}
+
+    def _log_on_change(self, key: str, state: object, msg: str, *args) -> None:
+        """Loga (DEBUG) só quando `state` muda: nada de uma linha por tick."""
+        if self._logged_states.get(key, _UNSET) != state:
+            self._logged_states[key] = state
+            self.logger.debug(msg, *args)
 
     def set_clock(self, clock: Callable[[], datetime]) -> None:
         self.clock = clock
@@ -52,9 +59,25 @@ class TradingStrategy(ABC):
 
     def __repr__(self):
         _vars = vars(self)
-        hidden = ("logger", "clock", "rng")
+        hidden = ("logger", "clock", "rng", "_logged_states")
         _vars = {k: str(v) for k, v in vars(self).items() if k not in hidden}
         return f"{self.__class__.__name__} with {_vars}"
+
+
+class _CappedSizing:
+    """Compra `order_usd` quando o saldo cobre; senão `balance_percent` dele.
+
+    Em unidades do token de entrada, que são USD nas entradas stablecoin que
+    estas estratégias exigem.
+    """
+
+    order_usd: Decimal
+    balance_percent: Decimal
+
+    def calculate_quantity(self, balance: Decimal, price: Decimal) -> Decimal:
+        if balance >= self.order_usd:
+            return self.order_usd / price
+        return (balance * (self.balance_percent / Decimal("100"))) / price
 
 
 class RandomStrategy(TradingStrategy):
@@ -94,7 +117,7 @@ class RandomStrategy(TradingStrategy):
         return None
 
 
-class TargetValueStrategy(TradingStrategy):
+class TargetValueStrategy(_CappedSizing, TradingStrategy):
     """
     Estratégia de valor alvo com stop loss dinâmico.
 
@@ -102,11 +125,14 @@ class TargetValueStrategy(TradingStrategy):
     Acompanha o valor até atingir um percentual de ganho configurado.
     Quando atingir esse percentual, ativa um stop loss de 1% (vende se cair 1%).
 
+    Congelada (legado): novas estratégias são specs (`trader/strategy_spec/`).
+
     Args:
         target_buy_price (Decimal|str): Preço alvo para compra
         target_profit_percent (Decimal|str): Percentual de ganho alvo (ex: 5 para 5%)
         stop_loss_percent (Decimal|str): Percentual de stop loss após atingir ganho alvo (padrão: 1 para 1%)
         balance_percent (Decimal|str): Percentual do saldo a usar na compra (padrão: 80 para 80%)
+        order_usd (Decimal|str): Valor por compra quando o saldo cobre (padrão: 5)
     """
 
     def __init__(
@@ -116,95 +142,20 @@ class TargetValueStrategy(TradingStrategy):
         stop_loss_percent: Decimal | str = "1",
         balance_percent: Decimal | str = "80",
         max_spread: Decimal | str = "1.5",
+        order_usd: Decimal | str = "5",
     ):
         super().__init__()
         self.target_buy_price = Decimal(str(target_buy_price))
         self.target_profit_percent = Decimal(str(target_profit_percent))
         self.stop_loss_percent = Decimal(str(stop_loss_percent))
         self.balance_percent = Decimal(str(balance_percent))
-        self.max_position_periods = 10
         self.max_spread = Decimal(str(max_spread))
+        self.order_usd = Decimal(str(order_usd))
 
         # Estado interno
         self.target_profit_reached = False
         self.highest_price_after_target = Decimal("0")
-        self.position_periods = 0
         self.last_price = None
-        self.max_history_size = 60 * 60 * 4 // 10  # 4h
-        self.price_history: deque[Decimal] = deque(maxlen=self.max_history_size)
-        self.same_target_count = 0
-        self.report_interval = 60 * 60 / 10  # 1h
-
-    def _recalculate_target_buy_price(self):
-        """
-        Calcula o target buy (preço-alvo de compra) com base em uma lista de preços históricos (Decimal).
-        Segue a mesma lógica da função original, mas sem puxar dados de candles da API.
-        """
-        if len(self.price_history) < 200:
-            return
-
-        # -----------------------
-        # 1. Converter lista em DataFrame
-        # -----------------------
-        df = pd.DataFrame({"c": [float(p) for p in self.price_history]})
-        df.index = pd.RangeIndex(start=0, stop=len(df))
-
-        # Como não temos high/low, podemos derivar deles:
-        # assumindo que o preço oscilou ±0.2% em cada candle
-        df["h"] = df["c"] * 1.005
-        df["l"] = df["c"] * 0.995
-
-        # -----------------------
-        # 2. Calcular EMA50 e EMA200
-        # -----------------------
-        df["EMA50"] = df["c"].ewm(span=50, adjust=False).mean()
-        df["EMA200"] = df["c"].ewm(span=200, adjust=False).mean()
-
-        # -----------------------
-        # 3. Calcular ATR (Average True Range)
-        # -----------------------
-        df["H-L"] = df["h"] - df["l"]
-        df["H-PC"] = abs(df["h"] - df["c"].shift(1))
-        df["L-PC"] = abs(df["l"] - df["c"].shift(1))
-        df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
-        df["ATR"] = df["TR"].rolling(window=60).mean()
-
-        # -----------------------
-        # 4. Calcular RSI14
-        # -----------------------
-        delta = df["c"].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / avg_loss
-        df["RSI14"] = 100 - (100 / (1 + rs))
-
-        # -----------------------
-        # 5. Calcular Target Buy
-        # -----------------------
-        latest = df.iloc[-1]
-        k = 1.5 if latest["EMA50"] > latest["EMA200"] else 2.2
-        target_buy = latest["EMA50"] - k * latest["ATR"]
-
-        # -----------------------
-        # 6. Exibir resultados
-        # -----------------------
-        self.logger.info(f"Último preço: {latest['c']:.8f}")
-        self.logger.info(f"EMA50: {latest['EMA50']:.8f}")
-        self.logger.info(f"EMA200: {latest['EMA200']:.8f}")
-        self.logger.info(f"ATR: {latest['ATR']:.8f}")
-        self.logger.info(f"RSI14: {latest['RSI14']:.2f}")
-        self.logger.info(f"Target buy calculado: {target_buy:.8f}")
-
-        self.target_buy_price = target_buy
-
-    def calculate_quantity(self, balance: Decimal, price: Decimal) -> Decimal:
-        """Calcula a quantidade a comprar baseado no saldo disponível"""
-        if balance >= Decimal("5"):
-            return Decimal("5") / price
-        quantity = (balance * (self.balance_percent / Decimal("100"))) / price
-        return quantity
 
     def on_market_refresh(
         self,
@@ -213,53 +164,40 @@ class TargetValueStrategy(TradingStrategy):
         balance: Decimal,
         current_position: Position | None,
     ) -> OrderSignal | None:
-        self._track_price(price)
         if current_position:
             signal, decided = self._check_sell(price, current_position)
         else:
             signal, decided = self._check_buy(price, spread, balance)
         if decided:
             return signal
-
-        msg = f"Current price: {price:.9f}; target buy: {self.target_buy_price:.9f}"
-        self.logger.info(msg)
         self.last_price = price
         return None
-
-    def _track_price(self, price: Decimal) -> None:
-        self.price_history.append(price)  # deque descarta o mais antigo
-        self.same_target_count += 1
 
     def _check_buy(
         self, price: Decimal, spread: Decimal | None, balance: Decimal
     ) -> tuple[OrderSignal | None, bool]:
         """Sem posição. Retorna (sinal, decidido); decidido=False segue o fluxo."""
-        # if self.same_target_count > self.max_history_size:
-        #     self._recalculate_target_buy_price()
-        #     self.same_target_count = 0
         # Reset do estado quando não há posição
         self.target_profit_reached = False
         self.highest_price_after_target = Decimal("0")
 
         # Compra quando o preço atingir ou estiver abaixo do valor alvo
         if price > self.target_buy_price:
+            self._log_on_change(
+                "buy", "above", "Aguardando alvo de compra %s", self.target_buy_price
+            )
             return None, False
-        detail = (
-            f"Current price: {price}; target buy: {self.target_buy_price}; "
-            f"spread: {spread}"
-        )
         if spread is not None and spread > self.max_spread:
-            self.logger.info(f"Skip buying for high spread = {spread}")
-            self.logger.info(detail)
+            self._log_on_change("buy", "spread", "Sem compra: spread alto (%s)", spread)
             return None, True
         if self.last_price is None or price < self.last_price:
-            self.logger.info("Skip buying - waiting for price to stop dropping")
-            self.logger.info(detail)
+            self._log_on_change(
+                "buy", "dropping", "Sem compra: preço ainda caindo (%s)", price
+            )
             self.last_price = price
             return None, True
-        self.position_periods = 0
-        self.logger.info(
-            f"Current price: {price} <= Target buy: {self.target_buy_price} - BUYING!"
+        self._log_on_change(
+            "buy", "buy", "Preço %s <= alvo %s: comprando", price, self.target_buy_price
         )
         return OrderSignal(OrderSide.BUY, self.calculate_quantity(balance, price)), True
 
@@ -278,11 +216,11 @@ class TargetValueStrategy(TradingStrategy):
         if not in_target_band:
             return None, False
 
-        self.position_periods += 1
         if not self.target_profit_reached:
             # Primeira vez que atinge o ganho alvo
             self.target_profit_reached = True
             self.highest_price_after_target = price
+            self.logger.debug("Lucro alvo atingido em %s", price)
         # Atualiza o preço mais alto após atingir o ganho alvo
         self.highest_price_after_target = max(self.highest_price_after_target, price)
 
@@ -293,7 +231,7 @@ class TargetValueStrategy(TradingStrategy):
 
         # Ativa stop loss se cair o percentual configurado
         if drop_percent >= self.stop_loss_percent:
-            self.logger.info(f"Current price: {price} - SELLING!")
+            self.logger.debug("Preço %s: vendendo (stop após o alvo)", price)
             return OrderSignal(OrderSide.SELL, position.entry_order.quantity), True
         return None, False
 
@@ -371,26 +309,27 @@ class WeightedMovingAverageStrategy(TradingStrategy):
 
         short_wma = self.weighted_moving_average(self.price_history, self.short_window)
         long_wma = self.weighted_moving_average(self.price_history, self.long_window)
-        msg = f"(S{self.short_window} L{self.long_window} {'B' if self.buy_when_short_below else 'A'} = "
-        if not current_position:
-            if self.buy_when_short_below and short_wma < long_wma:
-                self.logger.info(msg + "OK)")
-                return OrderSignal(
-                    OrderSide.BUY,
-                    quantity=self.calculate_quantity(balance, price),
-                )
-
-            if not self.buy_when_short_below and short_wma > long_wma:
-                self.logger.info(msg + "OK)")
-                return OrderSignal(
-                    OrderSide.BUY,
-                    quantity=self.calculate_quantity(balance, price),
-                )
-        self.logger.info(msg + "NOK)")
+        wants = (
+            short_wma < long_wma if self.buy_when_short_below else short_wma > long_wma
+        )
+        self._log_on_change(
+            "wma",
+            wants,
+            "(S%s L%s %s = %s)",
+            self.short_window,
+            self.long_window,
+            "B" if self.buy_when_short_below else "A",
+            "OK" if wants else "NOK",
+        )
+        if wants and not current_position:
+            return OrderSignal(
+                OrderSide.BUY,
+                quantity=self.calculate_quantity(balance, price),
+            )
         return None
 
 
-class TrailingStopLossStrategy(TradingStrategy):
+class TrailingStopLossStrategy(_CappedSizing, TradingStrategy):
     """
     Estratégia de stop loss dinâmico.
     Acompanha o preço após a compra e ativa um stop loss quando o preço cai um percentual configurado.
@@ -400,20 +339,15 @@ class TrailingStopLossStrategy(TradingStrategy):
         self,
         stop_loss_percent: Decimal | str = "1",
         balance_percent: Decimal | str = "80",
+        order_usd: Decimal | str = "5",
     ):
         super().__init__()
         self.stop_loss_percent = Decimal(str(stop_loss_percent))
         self.balance_percent = Decimal(str(balance_percent))
+        self.order_usd = Decimal(str(order_usd))
 
         # Estado interno
         self.highest_price_after_target = Decimal("0")
-
-    def calculate_quantity(self, balance: Decimal, price: Decimal) -> Decimal:
-        """Calcula a quantidade a comprar baseado no saldo disponível"""
-        if balance >= Decimal("5"):
-            return Decimal("5") / price
-        quantity = (balance * (self.balance_percent / Decimal("100"))) / price
-        return quantity
 
     def on_market_refresh(
         self,
@@ -446,11 +380,13 @@ class TrailingStopLossStrategy(TradingStrategy):
                 (self.highest_price_after_target - current_price)
                 / self.highest_price_after_target
             ) * Decimal("100")
-            self.logger.info(
-                f"Trail SL: P{drop_percent * -1:.2f}%  SL{self.stop_loss_percent * -1:.2f}%"
-            )
             # Ativa stop loss se cair o percentual configurado
             if drop_percent >= self.stop_loss_percent:
+                self.logger.debug(
+                    "Trailing stop: queda de %.2f%% >= %s%%",
+                    drop_percent,
+                    self.stop_loss_percent,
+                )
                 return OrderSignal(
                     OrderSide.SELL, current_position.entry_order.quantity
                 )
@@ -458,7 +394,7 @@ class TrailingStopLossStrategy(TradingStrategy):
         return None
 
 
-class TargetPercentStrategy(TradingStrategy):
+class TargetPercentStrategy(_CappedSizing, TradingStrategy):
     """
     Estratégia de Porcentagem de lucro alvo.
     Ao conseguir porcentagem, vende.
@@ -469,19 +405,12 @@ class TargetPercentStrategy(TradingStrategy):
         self,
         target_percent: Decimal | str = "1",
         balance_percent: Decimal | str = "80",
+        order_usd: Decimal | str = "5",
     ):
         super().__init__()
         self.target_percent = Decimal(str(target_percent))
         self.balance_percent = Decimal(str(balance_percent))
-
-        # Estado interno
-
-    def calculate_quantity(self, balance: Decimal, price: Decimal) -> Decimal:
-        """Calcula a quantidade a comprar baseado no saldo disponível"""
-        if balance >= Decimal("5"):
-            return Decimal("5") / price
-        quantity = (balance * (self.balance_percent / Decimal("100"))) / price
-        return quantity
+        self.order_usd = Decimal(str(order_usd))
 
     def on_market_refresh(
         self,
@@ -505,12 +434,11 @@ class TargetPercentStrategy(TradingStrategy):
                 (current_price - current_position.entry_order.price)
                 / current_position.entry_order.price
             ) * Decimal("100")
-            self.logger.info(
-                f"Target: P{current_percent:.2f}%  T{self.target_percent:.2f}%"
-            )
-
-            # Ativa stop loss se cair o percentual configurado
+            # Vende ao atingir o lucro alvo
             if current_percent >= self.target_percent:
+                self.logger.debug(
+                    "Lucro alvo: %.2f%% >= %s%%", current_percent, self.target_percent
+                )
                 return OrderSignal(
                     OrderSide.SELL, current_position.entry_order.quantity
                 )
@@ -605,7 +533,8 @@ class StrategyComposer(TradingStrategy):
             signal = all(s and s.side == side for s in signals)
         elif mode == "any":
             signal = any(s and s.side == side for s in signals)
-        self.logger.info(f"[{str(side) if signal else 'HOLD'}]")
+        label = str(side) if signal else "HOLD"
+        self._log_on_change("signal", label, "[%s]", label)
         return signal
 
     def on_market_refresh(

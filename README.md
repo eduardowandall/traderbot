@@ -173,9 +173,10 @@ CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every p
 
 ### Architecture
 
-- `main.py` — CLI entry point (`run`, `start`, `swap`)
-- `trader/bot/` — main loop: fetch price → run strategy → place order
-- `trader/trading_strategy.py` — strategy base + implementations + `StrategyComposer`
+- `main.py` — entry point; the commands live in `trader/cli/` (`run`, `swap`, `backtest`, `pnl`, `halt`/`resume`, `ledger`, `paper`) and `trader/agent_api/cli.py` (`market`, `strategy`, JSON output)
+- `trader/bot/` — main loop: fetch price → run strategy → submit the order to its bucket (`trader/trading_service/`)
+- `trader/strategy_spec/` — declarative JSON strategy specs (the way to write new strategies)
+- `trader/trading_strategy.py` — strategy base + legacy implementations (frozen) + `StrategyComposer`
 - `trader/providers/jupiter/` — Jupiter HTTP client, Solana/Helius RPC, swap service
 - `trader/models/` — data models + `SOLANA_MINTS` (known tokens, symbol ↔ mint)
 - `trader/policy/` — risk policy (`evaluate()` is pure; loaded from `policy.toml`)
@@ -189,4 +190,4 @@ CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every p
 ### Notes
 
 - New tokens must be added to `SOLANA_MINTS` in `trader/models/mints.py`.
-- New top-level strategies must be registered in `STRATEGIES` in `trader/__init__.py`.
+- New top-level strategies must be registered in `STRATEGIES` in `trader/strategies_registry.py` (`trader/__init__.py` must stay empty). Prefer writing a spec (`run paper SOL-USDC spec 'file=spec.json'`).

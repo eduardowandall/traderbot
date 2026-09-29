@@ -3,54 +3,21 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import close_open_ledgers, open_ledger
+from factories import bonk_quote, close_open_ledgers, open_ledger
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, VersionedTransaction
 
 from trader.models import SOLANA_MINTS
-from trader.providers import JupiterQuoteResponse, JupiterRoutePlan, JupiterSwapInfo
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
 
 
 @pytest.fixture
 def mock_jupiter_client():
-    usdc = SOLANA_MINTS.get_by_symbol("USDC")
-    bonk = SOLANA_MINTS.get_by_symbol("BONK")
     _mock = AsyncMock(spec=AsyncJupiterClient)
     _mock.get_candles = AsyncMock(return_value=[])
     _mock.get_price = AsyncMock(return_value=Decimal("1.0"))
-    _mock.get_quote = AsyncMock(
-        return_value=JupiterQuoteResponse(
-            inputMint=usdc.mint,
-            inAmount="50000000",
-            outputMint=bonk.mint,
-            outAmount="5000000",
-            otherAmountThreshold="4975000",
-            swapMode="ExactIn",
-            slippageBps=50,
-            platformFee=None,
-            # fração (0.005 == 0.5%), não percentual
-            priceImpactPct="0.005",
-            routePlan=[
-                JupiterRoutePlan(
-                    swapInfo=JupiterSwapInfo(
-                        ammKey="FksffEqnBRixYGR791Qw2MgdU7zNCpHVFYBL4Fa4qVuH",
-                        label="HumidiFi",
-                        inputMint=bonk.mint,
-                        outputMint=usdc.mint,
-                        inAmount="50000000",
-                        outAmount="7106793162",
-                        feeAmount="0",
-                        feeMint=bonk.mint,
-                    ),
-                    percent=100,
-                )
-            ],
-            contextSlot=123456789,
-            timeTaken=0.5,
-        )
-    )
+    _mock.get_quote = AsyncMock(return_value=bonk_quote())
     _mock.get_swap_transaction = AsyncMock(return_value=AsyncMock(VersionedTransaction))
     return _mock
 

@@ -127,7 +127,7 @@ class AsyncWebsocketTradingBot:
 
     async def _shutdown(self):
         self.is_running = False
-        for resource in (self.market, self.trader):
+        for resource in (self.market, self.trader, self.notification_service):
             try:
                 await resource.aclose()
             except Exception as ex:

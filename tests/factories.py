@@ -13,6 +13,7 @@ from trader.models.intent import IntentSide, TradeIntent
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
+BONK = SOLANA_MINTS.get_by_symbol("BONK").mint
 
 _OPEN_LEDGERS: list[Ledger] = []
 
@@ -89,6 +90,18 @@ def make_spec(**overrides) -> dict:
     }
     spec.update(overrides)
     return spec
+
+
+def bonk_quote():
+    """A quote dos mocks da Jupiter: 50 USDC -> 50 BONK, impacto de 0.5%.
+
+    `priceImpactPct` é fração (0.005 == 0.5%), não percentual.
+    """
+    from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
+
+    return JupiterQuoteResponse.single_route(
+        USDC, 50_000_000, BONK, 5_000_000, price_impact_pct="0.005"
+    )
 
 
 def mock_provider(**attrs):

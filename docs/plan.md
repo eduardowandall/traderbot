@@ -28,7 +28,8 @@ implement.
 
 ## 2. Where we are
 
-**Overall: about 61% of the end goal.** The foundations (safety, ledger,
+**Overall: about 58% of the end goal** (down from 61% after the
+recheck found real accounting and evaluation gaps, see stage R). The foundations (safety, ledger,
 execution seam, spec format) are largely in place. What is missing is mostly
 the part that makes strategies *live*: storing them, running many at once, and
 approving them for real money.
@@ -37,9 +38,9 @@ approving them for real money.
 |---|---|---|---|
 | 1. One gateway to create strategies that run automatically | Spec format, `strategy schema/validate/backtest` (JSON CLI), `TradeService` seam, `run ... spec` | Storing specs (`submit`), a registry, runners that start stored specs, real-mode approval | **35%** |
 | 2. Manual trades | `swap` runs in the `manual` bucket through the same pipeline as strategies; the fill (real amounts) and costs are recorded and show in `pnl` / `ledger list` | Allowed to spend funds that buckets hold; no SOL fee reserve | **80%** |
-| 3. Structured strategy building | Spec v1: 13 condition types, required stop, warm-up, validation, backtest | One sizer only, USDC/USDT inputs only, no expression language; the legacy strategies live outside the spec | **65%** |
-| 4. One wallet, bucket per strategy | In-process buckets with a budget cap that shrinks after losses; per-bucket ledger account; buckets on one wallet can't double-spend | One strategy per process, budgets not persisted, no wallet-level allocation view or aggregate reconcile | **45%** |
-| 5. Accurate trades and costs | Real mode reads real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; hash-chained ledger; every registry pair gets USD values (Price API V3 fills what the trade can't price) | No mark-to-market; paper/backtest fills are the quote's; USD values depend on the Price API being up | **80%** |
+| 3. Structured strategy building | Spec v1: 13 condition types, required stop, warm-up, validation, backtest | Indicators and backtests are not yet faithful (R7); spec limits not enforced live (R6); one sizer, USDC/USDT inputs only, no expression language | **60%** |
+| 4. One wallet, bucket per strategy | In-process buckets with a budget cap that shrinks after losses; per-bucket ledger account; buckets on one wallet can't double-spend | One strategy per process, budgets not persisted, no wallet-level allocation view or aggregate reconcile; a bucket without a budget can spend another bucket's tokens (B2) | **40%** |
+| 5. Accurate trades and costs | Real mode reads real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; hash-chained ledger; every registry pair gets USD values (Price API V3 fills what the trade can't price) | A failure after EXECUTED can lose a fill (R1); partial sells close the whole position (R5); no mark-to-market; paper/backtest fills are the quote's | **75%** |
 | (Foundations: safety, tests, layering) | Policy, kill switch, breaker, idempotency, UNCONFIRMED blocking, 432 tests, enforced layering | Key still shares a process with strategies | 85% |
 
 The overall figure is the plain average of goals 1–5.
@@ -473,11 +474,46 @@ anything else so each later step has a clean diff.
 - Log at DEBUG with lazy arguments, and only on state changes; remove the
   INFO-per-tick lines of `TargetValueStrategy` and the composer.
 - Freeze them: no new features. Their future (port to specs or delete) is B6.
+- **Design (2026-09-29):**
+  - The cap becomes `order_usd` (default `"5"`, so behavior is unchanged)
+    on `TargetValueStrategy`, `TrailingStopLossStrategy` and
+    `TargetPercentStrategy`. It is shared by one base helper,
+    `_capped_quantity(balance, price)`: spend `order_usd` when the balance
+    covers it, otherwise `balance_percent` of the balance. It is in input
+    units, which equal USD for the stable inputs these strategies need.
+  - `TradingStrategy._log_on_change(key, state, msg, *args)` logs at DEBUG,
+    lazily, only when `state` changes for `key`. The console shows
+    `trader.trading_strategy` at DEBUG, so moving lines to DEBUG alone would
+    not reduce them.
+    - `TargetValueStrategy`: the per-tick "Current price" line goes away,
+      and the "skip buying" reasons log once per change.
+    - WMA: logs its OK/NOK once per change.
+    - Trailing stop and target percent: log when they fire, not on every
+      tick.
+    - Composer: logs `[BUY]`, `[SELL]` or `[HOLD]` once per change.
+  - Dead code removed: `TargetValueStrategy._recalculate_target_buy_price`
+    (its only call was commented out) and its unused state
+    (`max_position_periods`, `same_target_count`, `report_interval`,
+    `max_history_size`, `price_history`, `position_periods`). With it goes
+    the `pandas` dependency, which nothing else uses.
 
 #### A8. Notifications off the event loop — S
 - `TelegramNotificationService` uses sync `requests.post` (10s timeout) inside
   the loop. Make `Notifier.send_message` async over `httpx.AsyncClient` and
   schedule it as a task, so it can never stall the trade-runner's submit lock.
+- **Design (2026-09-29):**
+  - `Notifier` (`trader/bot/config.py`) is `send_message(message) -> None`,
+    which never blocks and never raises, plus `async aclose()`.
+  - `TelegramNotificationService.send_message` inside a running loop
+    schedules `_send` as a task. The service keeps a reference to it so it
+    isn't garbage-collected. Outside a loop (no event loop to stall), it
+    runs `_send` directly.
+  - `_send` posts with a short-lived `httpx.AsyncClient(timeout=10)`: there
+    are only a few messages per session, and there is no client tied to one
+    loop. Errors are logged with the token redacted.
+  - `aclose()` waits up to 5s for pending sends. The bot calls it in
+    `_shutdown`, so "Bot interrompido" still goes out on Ctrl+C.
+  - `requests` is no longer used and leaves the dependencies.
 
 #### A9. Small clean-ups — S
 - `AsyncRPCClient` validates `rpc_url` with `assert`; raise `ValueError`.
@@ -490,6 +526,23 @@ anything else so each later step has a clean diff.
   `load_ticks` always sorts.
 - Delete `botconfigs.example.yaml` (never wired; specs replace it) — pending
   owner answer (§9).
+- **Done (2026-09-29):**
+  - `AsyncRPCClient` raises `ValueError("HELIUS_RPC_URL não definida")`.
+  - The Jupiter mocks share one `factories.bonk_quote()` (built with
+    `single_route`). It replaces two hand-written copies, in the conftest
+    and the bot test.
+  - The re-exports are trimmed from `trader.paper` and `trader.backtest`.
+  - `logging_config`: the file handler that renamed its open file once the
+    bot name appeared is replaced by a plain `FileHandler`
+    (`.logs/trader-<ts>.log`, one per process, opened lazily) plus a
+    `BotNameFilter` that tags every line with `[<bot name>]`. It uses
+    `logging.config.dictConfig`. Log files are no longer named after the
+    bot; the name is on every line instead, which also works with several
+    bots per process.
+  - **Won't do:** `load_ticks` sorting (Timsort is linear on input that is
+    already sorted) and the per-tick `TickRecorder` flush (it is cheap, and
+    it survives a kill).
+  - **Still open:** `botconfigs.example.yaml` (§9).
 
 #### A10. Automated live checks — S (added 2026-09-29)
 - **Problem:** each step so far was checked by hand against the real Jupiter
@@ -515,6 +568,150 @@ anything else so each later step has a clean diff.
     keeps the event chain intact and records ticks; replaying those ticks
     twice gives identical results.
 - **Rule from now on:** a live check done by hand is added to this suite.
+
+### Stage R — Recheck fixes (added 2026-09-29)
+
+A full review after stage A covered the money path, the strategy side, and
+operations and tests. Every finding below was traced in the code. The two
+worst were fixed right away (R0). The rest come **before stage B**, because
+B1 (the backtest gate), B2 (allocation) and B3 (many processes on one
+ledger) build directly on them.
+
+#### R0. Fixed during the recheck — done
+- **The Helius API key leaked into `.logs/`.** solana-py uses the `httpx2`
+  fork, which logs every request URL at INFO, and only `httpx` was
+  silenced. 81 lines in 6 files, from 2026-09-24/25, contain `?api-key=`.
+  - Fix: `httpx2`/`httpcore2` are set to WARNING/ERROR, and a
+    `RedactingFormatter` on both handlers masks `api-key=` and Telegram
+    `bot<token>` in every line and traceback. A test covers both.
+  - **Owner:** delete those log files and rotate the Helius key (§9).
+- **A send could be retried after it went out.** `simulate` and
+  `send_raw_transaction` ran outside the `try` that raises
+  `TransactionSubmittedError`. A send that timed out after the node had
+  accepted it was re-quoted and **sent again**.
+  - Fix: simulation stays retryable; any error from the send onward is
+    `TransactionSubmittedError` with the signature, so the intent becomes
+    UNCONFIRMED and fails closed.
+  - A regression test fails on the old code: it sent the swap more than
+    once.
+- Stale `.claude/commands/phase.md` and `sync-docs.md` (they pointed at the
+  deleted docs) and README (`start`, the registry location) were fixed.
+
+#### R1. Never lose a fill after EXECUTED — M
+- **Problem:** after `mark_executed`, several steps can still raise, and
+  the fill is then lost or misreported:
+  - `_to_order` raises when the on-chain delta is 0;
+  - `record_fill` can hit `database is locked`;
+  - `mark_executed` itself can fail, with the signature only in memory.
+
+  A lost buy leaves tokens orphaned, and the strategy buys again. A lost
+  sell leaves the book closed in memory but open in the ledger; after a
+  restart the fixed sell key makes every later sell a duplicate, so the
+  bucket is stuck. `ledger resolve ... executed` writes no order, which has
+  the same effect.
+- **Change:**
+  - one never-raise `order_from_fill(...)` that falls back to the quote's
+    values, shared by `AsyncAccount` and the manual swap (the two
+    Fill→Order copies and `_priced_mints` merge);
+  - one ledger transaction that writes EXECUTED, the order, costs and PnL.
+    Costs are still fetched after the swap: the intent is marked EXECUTED
+    first and is completed, never re-executed. The signature is logged at
+    ERROR if even that write fails;
+  - `ledger resolve ... executed` rebuilds the order from `getTransaction`
+    (moved here from B2);
+  - one `SOL` constant (it is defined in four modules).
+
+#### R2. Atomic authorization — S
+- **Problem:** `_authorize` reads `find_by_idempotency_key` and
+  `policy_state()` outside the write transaction, and there is no unique
+  index on the key. Two processes (bot and CLI, or two runners) can both
+  pass the daily limit, or both use one idempotency key.
+- **Change:** check and insert in one `BEGIN IMMEDIATE`, plus a partial
+  unique index on the key for moved-funds statuses. This is a prerequisite
+  for B3.
+
+#### R3. Balance reads fail loudly — S
+- `AsyncRPCClient.get_account_balance` swallows `SolanaRpcException` and
+  returns partial or empty balances, which the account caches for 3 minutes
+  as zeros. That gives false reconcile mismatches and sells sized to zero.
+  Change: raise, never cache a partial read, and sum several token accounts
+  of one mint.
+- The `get_lamports` retry waits on `httpx.ReadTimeout`, but solana-py
+  wraps everything in `SolanaRpcException`, so it never fires.
+
+#### R4. Rate limits and startup resilience — S
+- One tenacity policy for the Jupiter HTTP calls: exponential backoff on
+  429, 5xx and timeouts, honoring `Retry-After`. It applies before the
+  broadcast only. Today only `get_quote` sleeps, once, for 1.5s.
+- `_startup` (candles, reconcile) runs inside the loop's backoff; today one
+  429 at startup exits the bot.
+- A minimum tick interval, plus skipping the websocket for N seconds after
+  it fails, so a dead feed does not hammer the Price API fallback.
+
+#### R5. Sells stay within the position — S
+- A sell is capped at the position's quantity, not at the wallet's balance.
+  The request's quantity comes from the client, and sells skip every budget
+  rule.
+- A partial sell (the fee reserve, dust) keeps the remainder open instead
+  of `book.close` closing the whole position and dropping its cost from
+  PnL.
+
+#### R6. A spec run enforces its own limits — S
+- `run ... spec` never calls `validate()`, gives the bucket no
+  `budget_usd`, and ignores `max_loss_usd` (nothing reads it). The backtest
+  applies the budget; the live run does not.
+- **Change:** validate against the mode's policy when loading, pass
+  `spec.budget_usd` to the bucket, and stop the bucket and close its
+  position once realized PnL reaches `-max_loss_usd`. The bucket is named
+  `strategy:<spec_id>`, not the pair, so a spec never adopts a position it
+  did not open.
+
+#### R7. Faithful indicators and backtests — M
+The B1 gate trusts backtests, so they must not be optimistic.
+- **Indicators:** they are computed over a short sliding window, seeded
+  with only `lookback` bars. EMA equals the SMA at start, and RSI14 read 78
+  live against 67 in `market summary` on the same data. Change: incremental
+  Wilder/EMA state updated on bar close, seeded with 3–5× the period, and
+  shared with `market summary`.
+- **Fills:** a backtest fills at the same close that triggered the signal,
+  checks stops on closes only, and has no slippage. Change: fill at the
+  next bar's open plus slippage, and check stops against the bar's low and
+  high.
+- **Timestamps:** candle timestamps are probably the bar's open. Check this
+  live and stamp ticks at the close.
+- **Warnings:** a backtest with fewer bars than the lookback, or zero
+  evaluated bars, reports `ok: true` silently. It must error or warn.
+- **Entries:** entry conditions are states, so a strategy re-buys right
+  after `take_profit`. Add `crosses_above`/`crosses_below` conditions (or
+  re-arming), and default the cooldown to one bar.
+
+#### R8. Agent-facing contract — S
+- `json_errors` catches only `ValueError`/`OSError`: `httpx` errors,
+  `KeyError`, `LookupError` and Typer's parameter errors print a traceback
+  instead of `{"ok": false}`. Add a catch-all, and keep `spec_id` in failed
+  `validate` output.
+- Schema: add descriptions and units per field, bounds on the
+  Decimal-as-string branch, and a relative `ttl_days` expiry. The example
+  spec can then validate.
+- `spec_id` hashes `name`/`rationale`/`agent_id`; hash only the behavioral
+  fields, so `supersedes` survives a reworded rationale.
+
+#### R9. Operations — S
+- Logs: use `RotatingFileHandler`, put the directory under the project root
+  (the `paths.py` rule), and lower the per-tick DEBUG volume. `.logs/` is
+  155 MB today.
+- Remove `traceback.print_exc()` from the bot's `_on_error`: it bypasses the
+  console filter and the redaction.
+- CI:
+  - add a `windows-latest` job (the target platform);
+  - bring `main.py` and `tests/` into the pyright scope;
+  - add a manual or scheduled `pytest -m live` workflow.
+- Paper wallet: save before changing the in-memory balances (a failed save
+  is retried and applies the swap twice), and reload before each swap (the
+  CLI and the bot overwrite each other's file).
+- One default mode across the CLI (`pnl` uses paper, the others use dry).
+- `ledger resolve real ... failed` needs `HELIUS_RPC_URL` for the fee
+  backfill, but it only checks after writing. Check first.
 
 ### Stage B — Features
 
@@ -554,9 +751,15 @@ The unified entry point for humans and agents.
 - **Aggregate reconcile:** for each mint, the sum of bucket positions must be
   at most the wallet balance. A mismatch records an event and blocks buys on
   that mint until resolved.
-- Fix: a trade resolved by hand as `executed` has no order JSON, so its
-  position is not restored. `ledger resolve` should take the fill amounts (or
-  read them from the signature) and write the order.
+- **Wallet treasury (from the recheck):** one balance cache in
+  `TradeService`, invalidated on every fill; today each account caches the
+  shared wallet separately for up to 3 minutes. Per-bucket reservations of
+  quote allocation, token holdings and the fee reserve, so a bucket without a
+  budget can no longer spend SOL that another bucket holds as its position.
+  Budgets become USD values converted with the A4 oracle; today `_cap` (USD)
+  is compared with input-token amounts, which is only safe for stable
+  inputs. The ATA rent is tracked as refundable.
+- (The `ledger resolve` order fix moved to R1.)
 
 #### B3. Trade-runner and strategy-runners — L
 - **`trader/runners/trade_runner.py`** (`trader serve <mode>`, owner):
@@ -645,10 +848,20 @@ The unified entry point for humans and agents.
 | A4 USD value for every trade | **done** (2026-09-29) | 472 tests (18 new); live suite 6/6 (new: Price API vs websocket, fallback). `trader/market/prices.py` (`JupiterPriceOracle`, `usd_snapshot`), `with_sol_usd`, notional for every pair, websocket fallback. Strategy-side price units moved to B6 |
 | A5 Split the ledger | **done** (2026-09-29) | 476 tests (4 new); live suite 6/6. `trader/ledger/{store,intents,reports,policy_state}.py` behind the `Ledger` facade (the old 663-line module is now 34 lines); order codec in `models/order.py`; identical consecutive denials collapse (`repeat_count`, `ledger list` shows `(xN)`) |
 | A6 Split `main.py` | **done** (2026-09-29) | 476 tests; live suite 6/6. `trader/cli/` (7 modules, app layer); `main.py` is 10 lines; same commands, arguments and output |
-| A7 Legacy strategies clean-up | not started | |
-| A8 Async notifications | not started | |
-| A9 Small clean-ups | not started | |
+| A7 Legacy strategies clean-up | **done** (2026-09-29) | `order_usd` replaces the hard-coded cap (default 5, unchanged); `_log_on_change` logs state changes only; dead `_recalculate_target_buy_price` and the `pandas` dependency removed |
+| A8 Async notifications | **done** (2026-09-29) | Telegram over `httpx` as a task, `Notifier.aclose()` drains at shutdown (5s cap); `requests` dependency removed |
+| A9 Small clean-ups | **done** (2026-09-29) | 486 tests. RPC `ValueError`, shared `bonk_quote()`, trimmed re-exports, simpler logging (`trader-<ts>.log` + `[bot]` per line). `botconfigs.example.yaml` waits for the owner |
 | A10 Automated live checks | **done** (2026-09-29) | `tests/live/` (5 tests, ~45s, `uv run pytest -m live`): market data, spec and random backtests on real candles, paper swaps, a 30s paper bot on the websocket plus a deterministic replay of its ticks. First run caught that the example spec can never pass `validate` (fixed 2099 expiry); the test uses a fresh copy |
+| R0 Recheck: key leak, double send | **done** (2026-09-29) | 489 tests. `httpx2` silenced + `RedactingFormatter`; send errors are `TransactionSubmittedError` (regression test fails on the old code). Owner: purge the 6 leaked log files, rotate the Helius key |
+| R1 Never lose a fill | not started | |
+| R2 Atomic authorization | not started | |
+| R3 Balance reads fail loudly | not started | |
+| R4 Rate limits + startup | not started | |
+| R5 Sells within the position | not started | |
+| R6 Spec runs enforce limits | not started | |
+| R7 Faithful indicators/backtests | not started | |
+| R8 Agent contract | not started | |
+| R9 Operations | not started | |
 | B1 Registry + submit | not started | |
 | B2 Wallet allocation + reconcile | not started | |
 | B3 Trade-runner / strategy-runners | not started | |
@@ -749,6 +962,10 @@ Owner task, outside the code: a one-week paper soak run.
 
 ## 9. Open questions for the owner
 
+- **Urgent:** delete the six `.logs/` files from 2026-09-24/25 that contain
+  the Helius `api-key`, and rotate the key (R0). Nothing new leaks now.
+- `policy.toml` (loosened paper limits) is tracked in git next to
+  `policy.example.toml`. Should it be gitignored?
 - Which pairs, and what maximum notional per trade and per day, are you
   comfortable with in real mode?
 - May a manual swap spend funds allocated to a bucket, or only unallocated

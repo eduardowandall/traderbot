@@ -17,7 +17,11 @@ from trader.trading_strategy import TradingStrategy
 
 
 class Notifier(Protocol):
+    # não bloqueia nem levanta: o envio corre fora do loop do bot
     def send_message(self, message: str) -> None: ...
+
+    # espera (por tempo limitado) os envios pendentes
+    async def aclose(self) -> None: ...
 
 
 @dataclass
