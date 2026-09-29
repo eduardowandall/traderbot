@@ -4,6 +4,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import memory_gateway
 from solders.keypair import Keypair
 
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
@@ -73,7 +74,7 @@ async def test_async_websocket_bot_complete(
         keypair, rpc_client=mock_rpc_client, jupiter_client=mock_jupiter_client
     )
     trader = LocalTradeClient(
-        TradeService(provider, gateway=None),
+        TradeService(provider, memory_gateway()),
         "BONK-USDC",
         USDC.mint,
         BONK.mint,

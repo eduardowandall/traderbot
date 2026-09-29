@@ -11,12 +11,15 @@ aumenta. Como todos os buckets dividem a carteira, cada compra relê o saldo e
 as ordens passam uma por vez (`asyncio.Lock`). A política do gateway continua
 valendo para cada ordem, por cima do bucket.
 
+Swaps manuais (`swap`) passam pelo mesmo lock e pelo mesmo caminho, no
+bucket `manual` (ver `manual.py`).
+
 O modo (real/dry/paper) é só do serviço: quem pede ordens nunca o conhece.
 """
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -25,19 +28,23 @@ from solders.pubkey import Pubkey
 
 from trader.async_account import AsyncAccount
 from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
-from trader.models import OrderSide
+from trader.models import Order, OrderSide
 from trader.models.errors import SwapRejectedError
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
+from trader.trading_service.manual import execute_swap
 from trader.trading_service.protocol import (
     BucketSnapshot,
     BucketStatus,
     OrderReply,
     OrderRequest,
+    SwapRequest,
 )
 
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
+# bucket dos swaps manuais: conta "<modo>:manual", sem posição nem orçamento
+MANUAL_BUCKET = "manual"
 
 
 @dataclass
@@ -56,12 +63,12 @@ class TradeService:
     def __init__(
         self,
         provider: AsyncJupiterProvider,
-        gateway: TradeGateway | None,
+        gateway: TradeGateway,
         mode: str | None = None,
         clock: Callable[[], datetime] = datetime.now,
     ):
         self.provider = provider
-        # None só em backtest: executa direto, sem ledger nem política
+        # no backtest, `TradeGateway.in_memory()`
         self.gateway = gateway
         self.mode = mode
         self.clock = clock
@@ -134,7 +141,32 @@ class TradeService:
     async def submit_order(self, name: str, request: OrderRequest) -> OrderReply:
         account = self._bucket(name).account
         async with self._lock:
-            return await _place(account, request)
+            return await _reply(
+                account.account_id,
+                lambda: account.place_order(
+                    request.price,
+                    request.side,
+                    request.quantity,
+                    rationale=request.rationale,
+                    idempotency_key=request.idempotency_key,
+                ),
+            )
+
+    async def swap(self, request: SwapRequest, source: str = "cli") -> OrderReply:
+        """Swap manual no bucket `manual` (qualquer par, sem posição)."""
+        account = self.account_id(MANUAL_BUCKET)
+        async with self._lock:
+            return await _reply(
+                account,
+                lambda: execute_swap(
+                    self.gateway,
+                    self.provider,
+                    account,
+                    request,
+                    source,
+                    self.clock(),
+                ),
+            )
 
     async def close_bucket(self, name: str, price: Decimal) -> OrderReply | None:
         """Vende a posição aberta do bucket; None se não há posição."""
@@ -153,22 +185,19 @@ class TradeService:
         await self.provider.aclose()
 
 
-async def _place(account: AsyncAccount, request: OrderRequest) -> OrderReply:
+async def _reply(
+    account_id: str, execute: Callable[[], Awaitable[Order]]
+) -> OrderReply:
+    """Executa e classifica o desfecho; nenhuma exceção de execução escapa."""
     try:
-        order = await account.place_order(
-            request.price,
-            request.side,
-            request.quantity,
-            rationale=request.rationale,
-            idempotency_key=request.idempotency_key,
-        )
+        order = await execute()
     except (PolicyDeniedError, DuplicateIntentError) as ex:
         return OrderReply.of_denial(_reasons(ex))
     except (ValueError, SwapRejectedError) as ex:
         # nada foi executado: saldo, orçamento, impacto de preço...
         return OrderReply.of_rejection(str(ex))
     except Exception as ex:
-        logger.error(f"Erro ao executar ordem de {account.account_id}: {ex}")
+        logger.error(f"Erro ao executar ordem de {account_id}: {ex}")
         return OrderReply.of_error(f"{type(ex).__name__}: {ex}")
     return OrderReply.of_fill(order)
 

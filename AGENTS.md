@@ -5,6 +5,7 @@ Solana trading bot (Jupiter DEX). Python 3.14, `uv`-managed.
 ## Commands
 - Setup: `uv sync --system-certs` (always pass `--system-certs`; this machine uses a corporate TLS cert store that `uv`'s bundled CA bundle doesn't trust). Dev tools live in the `dev` dependency group, installed by default.
 - Test: `uv run pytest .` · single test: `uv run pytest tests/trader/bot/test_async_websocket_bot.py::test_name`
+- Live checks: `uv run pytest -m live` runs `tests/live/` against the real Jupiter endpoints (paper and read-only; the conftest strips the key/RPC/Telegram env vars; ~1 min). `pytest .` and CI skip it (`addopts -m "not live"`). When you check something live by hand, add it to that suite.
 - Lint: `uv run ruff check .` / auto-fix: `uv run ruff check --fix .`
 - Format: `uv run ruff format .` · Types: `uv run pyright .`
 - CI: `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, `pyright`, `pytest` on push/PR.
@@ -46,8 +47,8 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 ```
 - `quantity` is in UI units of `SYMBOL_IN` (the token being spent), parsed as `Decimal`; converted via `ui_to_raw`.
 - `--max-price-impact` (default 1%) rejects quotes above it (`SwapRejectedError`, not retried).
-- `slippage_bps` (default 50, max 1000) is forwarded to `AsyncJupiterProvider.swap`; retries escalate to `slippage_bps + 25`, capped at `max_slippage_bps` (100).
-- Replaces the deleted `manual_swap.py` capability; built on `trader/providers/jupiter/async_jupiter_svc.py`.
+- `slippage_bps` (default 50, max 1000) is forwarded to `AsyncJupiterProvider.swap_with_details`; retries escalate to `slippage_bps + 25`, capped at `max_slippage_bps` (100).
+- Runs as `TradeService.swap` in the `manual` bucket (ledger account `<mode>:manual`; older ledgers also have `<mode>:swap` rows): same lock, gateway and `execute_trade` pipeline as strategies, with the fill and costs recorded (`trader/trading_service/manual.py`). A denied/rejected/failed swap prints reasons to stderr and exits 1.
 
 ## Architecture
 - `main.py` — Typer CLI (`run`, `swap`, `backtest`, `halt`/`resume`, `ledger`, `paper`, `market`, `strategy`). It only parses arguments; the per-mode wiring lives in `trader/wiring.py` (`build_provider`, `build_gateway`, `build_trade_service`, `keypair_from_env`).
@@ -71,7 +72,7 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - `trader/policy/policy.py` — pure `evaluate()` + TOML loader (`policy.toml` / `TRADER_POLICY_FILE`); defaults deny real mode. `load_policy(mode=...)` merges `[trading]`/`[limits]` with `[<mode>.trading]`/`[<mode>.limits]` (real/dry/paper); all sections are validated regardless of mode.
 - `trader/ledger/ledger.py` — SQLite `.data/ledger-<mode>.sqlite3`; hash-chained `events`; positions/PnL restored on startup.
 - `trader/paths.py` — `data_dir()` (`TRADER_DATA_DIR`, else `<project root>/.data`) and `policy_file()` (`TRADER_POLICY_FILE`, else `<project root>/policy.toml`). All state (ledger, `HALT`, paper wallet) derives from these, never from the cwd, so `halt`/`resume`/`ledger resolve` reach the running bot from any directory. Relative env values resolve against the project root. Read per call, so env changes apply after import. Never use a bare `Path(".data")`.
-- `trader/paper/` — `SimulatedWallet` + `SimulatedExecutor` + `paper_provider()`. `trader/backtest/` — `TickRecorder`/`load_ticks` + `Backtester`, which runs on `TradeService(gateway=None)` + `LocalTradeClient` with synthetic quotes via `ReplayQuoteClient` (optional `budget_usd`).
+- `trader/paper/` — `SimulatedWallet` + `SimulatedExecutor` + `paper_provider()`. `trader/backtest/` — `TickRecorder`/`load_ticks` + `Backtester`, which runs on `TradeService(TradeGateway.in_memory())` + `LocalTradeClient` (in-memory ledger, `Policy.unlimited()`, ignores the live `HALT`) with synthetic quotes via `ReplayQuoteClient` (optional `budget_usd`).
 - `trader/logging_config.py` — console filter shows only `bot`/`trader.trading_strategy` at DEBUG (others WARNING); file logs → `.logs/`.
 
 ## Known issues / quirks
@@ -93,8 +94,9 @@ uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [
 - Strategies must use `self.clock()` / `self.rng` (not `datetime.now()` / `random`) so backtests stay deterministic; `StrategyComposer` propagates `set_clock`/`seed` to children.
 - Ruff runs mccabe `C90` with `max-complexity = 5` (`pyproject.toml`); split functions or use table-driven dispatch rather than suppress.
 - Costs and net PnL:
-  - `AsyncAccount._execute_order` calls `provider.fetch_swap_costs(result)`
-    only after the gateway has marked the intent EXECUTED. That method must
+  - `trader/execution/fills.py::execute_trade` is the only caller of
+    `provider.fetch_swap_costs(result)`, and calls it only after the gateway
+    has marked the intent EXECUTED. Every trade must go through it. That method must
     never raise; anything that can fail after confirmation must not go inside
     `_do_swap`, because retries would double-execute.
   - The parser is `trader/providers/jupiter/swap_costs.py`; the models are in

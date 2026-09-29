@@ -49,6 +49,18 @@ class OrderRequest:
 
 
 @dataclass(frozen=True)
+class SwapRequest:
+    """Swap manual (qualquer par, sem posição), no bucket `manual`."""
+
+    spend_mint: str
+    receive_mint: str
+    amount: Decimal  # do token gasto, em unidades de UI
+    slippage_bps: int = 50
+    rationale: str | None = None
+    idempotency_key: str | None = None
+
+
+@dataclass(frozen=True)
 class OrderReply:
     status: ReplyStatus
     order: Order | None = None

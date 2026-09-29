@@ -28,7 +28,7 @@ implement.
 
 ## 2. Where we are
 
-**Overall: about 55% of the end goal.** The foundations (safety, ledger,
+**Overall: about 58% of the end goal.** The foundations (safety, ledger,
 execution seam, spec format) are largely in place. What is missing is mostly
 the part that makes strategies *live*: storing them, running many at once, and
 approving them for real money.
@@ -36,10 +36,10 @@ approving them for real money.
 | Goal | Done | Missing | Score |
 |---|---|---|---|
 | 1. One gateway to create strategies that run automatically | Spec format, `strategy schema/validate/backtest` (JSON CLI), `TradeService` seam, `run ... spec` | Storing specs (`submit`), a registry, runners that start stored specs, real-mode approval | **35%** |
-| 2. Manual trades | `swap` goes through gateway, policy and ledger | Not in a bucket; costs and the order are not recorded, so manual trades are missing from `pnl` | **60%** |
+| 2. Manual trades | `swap` runs in the `manual` bucket through the same pipeline as strategies; the fill (real amounts) and costs are recorded and show in `pnl` / `ledger list` | Allowed to spend funds that buckets hold; no SOL fee reserve; no USD value when neither side is a stable | **75%** |
 | 3. Structured strategy building | Spec v1: 13 condition types, required stop, warm-up, validation, backtest | One sizer only, USDC/USDT inputs only, no expression language; the legacy strategies live outside the spec | **65%** |
 | 4. One wallet, bucket per strategy | In-process buckets with a budget cap that shrinks after losses; per-bucket ledger account; buckets on one wallet can't double-spend | One strategy per process, budgets not persisted, no wallet-level allocation view or aggregate reconcile | **45%** |
-| 5. Accurate trades and costs | Real mode reads real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; hash-chained ledger | Costs of non-SOL pairs have no USD value (`[!] incompleto`); no USD value for non-stable inputs; manual swaps skip costs; no mark-to-market | **65%** |
+| 5. Accurate trades and costs | Real mode reads real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; hash-chained ledger | Costs of non-SOL pairs have no USD value (`[!] incompleto`); no USD value for non-stable inputs; no mark-to-market | **70%** |
 | (Foundations: safety, tests, layering) | Policy, kill switch, breaker, idempotency, UNCONFIRMED blocking, 432 tests, enforced layering | Key still shares a process with strategies | 85% |
 
 The overall figure is the plain average of goals 1–5.
@@ -205,7 +205,7 @@ A7–A9 are cheap and remove known rough edges before more code builds on them.
 ### Stage A — Foundations (refactor first)
 
 #### A0. Commit the current work — S
-Phases 0–2 of the old roadmap (39 files) are uncommitted. Commit them before
+Phases 0–2 of the old roadmap (39 files) were uncommitted. Commit them before
 anything else so each later step has a clean diff.
 
 #### A1. One trade pipeline — M
@@ -224,6 +224,34 @@ anything else so each later step has a clean diff.
     backtests exercise the same path as live.
 - **Exit:** there is a single call site of `fetch_swap_costs`, and
   `AsyncAccount` has no `gateway is None` branch.
+- **Design (2026-09-29):**
+  - `trader/execution/fills.py` (execution layer):
+    - `Fill(result, costs)`, with `amounts()` returning the raw (in, out)
+      amounts: the on-chain ones when known, otherwise the quote's. This
+      replaces `async_account._actual_amounts`.
+    - `execute_trade(gateway, provider, intent, call) -> Fill`: runs
+      `gateway.submit(intent, call)` and only then
+      `provider.fetch_swap_costs(result)`. It is the only caller of
+      `fetch_swap_costs`. A non-`TradeCosts` value (a mock) counts as unknown.
+  - Recording stays `gateway.record_fill(...)`, because only the caller
+    knows how to turn a fill into an `Order` (a bucket knows its pair and
+    position; A2's manual swap knows its own).
+  - `TradeGateway.in_memory(policy=Policy.unlimited())`: an in-memory
+    `Ledger`, a kill switch that is never active (a backtest must not read
+    the live `HALT`), and `real_mode=False`. `Policy.unlimited()` has no USD,
+    rate, loss or breaker limits and allows unknown notional. The replay
+    cannot use the real limits: ledger timestamps are wall-clock, so a
+    1000-candle replay would trip the hourly limit in seconds. Idempotency,
+    the intent lifecycle and the event chain still run.
+  - `AsyncAccount(provider, input_mint, output_mint, gateway, ...)` and
+    `TradeService(provider, gateway, ...)` require the gateway. The
+    `gateway is None` branches in `restore_from_ledger`,
+    `reconcile_position`, `_execute` and `_record_order` go away.
+  - `Backtester` opens `with TradeGateway.in_memory() as gateway:` for each
+    replay. Tests use `factories.memory_gateway()`, which closes itself at
+    the end of the test like `open_ledger()`.
+  - The manual `swap` keeps calling `gateway.submit` until A2 moves it onto
+    `execute_trade`.
 
 #### A2. Manual swaps as a bucket — S (after A1)
 - `swap` goes through `TradeService` into a `manual` bucket
@@ -234,6 +262,33 @@ anything else so each later step has a clean diff.
 - `main._execute_swap` is removed. The `swap` output reports the fill (amounts,
   costs), not just the signature.
 - Spending only unallocated funds is enforced later, in B2.
+- **Design (2026-09-29):**
+  - `protocol.py` gets `SwapRequest(spend_mint, receive_mint, amount,
+    slippage_bps=50, rationale=None, idempotency_key=None)`; `amount` is in
+    UI units of the token spent. The reply is the usual `OrderReply`.
+  - `TradeService.swap(request, source="cli") -> OrderReply` runs under the
+    same submit lock as the buckets and sorts outcomes into replies the same
+    way (`_place` becomes a generic `_reply`). The account is
+    `"<mode>:manual"`; it needs no `open_bucket`. Old manual swaps stay under
+    `"<mode>:swap"` in existing ledgers (they had no order or costs).
+  - `trader/trading_service/manual.py` builds the intent (side `SWAP`,
+    notional known only when the token spent is a USD stable, as today),
+    runs it through `execute_trade`, turns the `Fill` into an `Order` and
+    calls `gateway.record_fill`.
+  - The `Order` of a manual swap: `input_mint` is the token spent,
+    `output_mint` the token received, `side=BUY` ("spend the input"),
+    `quantity` the amount received and `quote_amount` the amount spent (real
+    amounts when known), `fill_price = spent / received`. Its USD rates come
+    from the trade when one side is a USD stable (`quote_usd`, and `sol_usd`
+    when the other side is SOL), so its costs get a USD value. When neither
+    side is a stable, `price` falls back to `fill_price` and the rates are
+    unknown until A4.
+  - `main.py swap` uses `build_trade_service(mode, ...)` and prints the fill
+    (signature, amounts, costs). A denied, rejected or failed swap prints
+    the reasons to stderr and exits with code 1. `main._execute_swap` is
+    removed.
+  - Not in A2: the SOL fee reserve for manual swaps that spend SOL (B2, with
+    the allocation checks, since it needs a balance read).
 
 #### A3. Split `AsyncAccount` — M
 - **Problem:** `trader/async_account.py` (520 lines) mixes the balance cache,
@@ -316,6 +371,31 @@ anything else so each later step has a clean diff.
   `load_ticks` always sorts.
 - Delete `botconfigs.example.yaml` (never wired; specs replace it) — pending
   owner answer (§9).
+
+#### A10. Automated live checks — S (added 2026-09-29)
+- **Problem:** each step so far was checked by hand against the real Jupiter
+  endpoints (quotes, candles, the price websocket). Those checks catch what
+  mocks can't (API drift, units, the paper path end to end), but they were
+  lost after each session.
+- **Change:** an opt-in suite in `tests/live/`, marked `live` by its conftest
+  and excluded by default (`addopts = -m "not live"`), so `pytest .` and CI
+  stay offline. Run it with `uv run pytest -m live`.
+- **Safety:** the live conftest removes `SOLANA_PRIVATE_KEY`,
+  `SOLANA_PUBLIC_KEY`, `HELIUS_RPC_URL` and the Telegram variables, and the
+  usual `isolated_workdir` fixture keeps the ledger, `HALT`, paper wallet and
+  policy in `tmp_path`. Only paper mode and read-only commands run; nothing
+  can sign.
+- **Checks:**
+  - `market price / candles / summary` return sane JSON;
+  - `strategy validate` and `strategy backtest` on the example spec, and a
+    random-strategy `backtest` on real candles makes trades;
+  - paper swaps on real quotes: USDC→SOL records the fee with a USD value,
+    SOL→JUP records rent, an over-limit swap is denied with exit code 1, and
+    both show in `pnl` under `paper:manual`;
+  - a paper bot (`random`) runs on the real websocket for ~30s, trades,
+    keeps the event chain intact and records ticks; replaying those ticks
+    twice gives identical results.
+- **Rule from now on:** a live check done by hand is added to this suite.
 
 ### Stage B — Features
 
@@ -436,10 +516,10 @@ The unified entry point for humans and agents.
 
 | Item | Status | Notes |
 |---|---|---|
-| Hardening, ledger/policy/gateway, paper/backtest, specs, `TradeService` | **done** (2026-09-23 → 29) | 432 tests; ruff, format and pyright clean; uncommitted since Phase 0 |
-| A0 Commit | not started | |
-| A1 One trade pipeline | not started | |
-| A2 Manual swaps as a bucket | not started | |
+| Hardening, ledger/policy/gateway, paper/backtest, specs, `TradeService` | **done** (2026-09-23 → 29) | 432 tests; ruff, format and pyright clean |
+| A0 Commit | **done** (2026-09-29) | `f434d2e` |
+| A1 One trade pipeline | **done** (2026-09-29) | 443 tests (11 new). `execute_trade` is the only cost fetch; backtests use `TradeGateway.in_memory()`. Checked live: a 300-candle random backtest made 161 legs through it |
+| A2 Manual swaps as a bucket | **done** (2026-09-29) | 451 tests (8 new). `TradeService.swap` + `trading_service/manual.py`; `main._execute_swap` removed. Checked live in paper (isolated data dir): USDC->SOL and SOL->JUP recorded with costs, an over-limit swap denied |
 | A3 Split `AsyncAccount` | not started | |
 | A4 USD value for every trade | not started | |
 | A5 Split the ledger | not started | |
@@ -447,6 +527,7 @@ The unified entry point for humans and agents.
 | A7 Legacy strategies clean-up | not started | |
 | A8 Async notifications | not started | |
 | A9 Small clean-ups | not started | |
+| A10 Automated live checks | **done** (2026-09-29) | `tests/live/` (5 tests, ~45s, `uv run pytest -m live`): market data, spec and random backtests on real candles, paper swaps, a 30s paper bot on the websocket plus a deterministic replay of its ticks. First run caught that the example spec can never pass `validate` (fixed 2099 expiry); the test uses a fresh copy |
 | B1 Registry + submit | not started | |
 | B2 Wallet allocation + reconcile | not started | |
 | B3 Trade-runner / strategy-runners | not started | |
@@ -481,7 +562,10 @@ Owner task, outside the code: a one-week paper soak run.
 - **Prices are USD, balances are in the input token.** `Order.price` is the
   real fill only for USDC/USDT inputs; `Order.fill_price` keeps the raw
   input-per-token price. Sizing is only meaningful for stable inputs (A4).
-- **Manual swaps are not in a bucket and record no costs** (A2).
+- **Manual swaps may spend any wallet funds**, including what a bucket
+  holds, and keep no SOL fee reserve (B2). Their `pnl` block shows the
+  costs paid; its gross/net lines are always zero, since a manual swap
+  opens no position (B5 can report manual swaps on their own).
 - **Dry mode is not paper trading.** It reads the real wallet and never
   changes balances; use `paper` to test strategies end to end.
 - **Paper fills use the quoted `outAmount`**, with no slippage model; replays

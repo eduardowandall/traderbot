@@ -46,6 +46,15 @@ def open_ledger() -> Ledger:
     return ledger
 
 
+def memory_gateway(policy=None):
+    """`TradeGateway.in_memory()` com o ledger fechado ao fim do teste."""
+    from trader.execution import TradeGateway
+
+    gateway = TradeGateway.in_memory(policy)
+    _OPEN_LEDGERS.append(gateway.ledger)
+    return gateway
+
+
 def close_open_ledgers() -> None:
     while _OPEN_LEDGERS:
         _OPEN_LEDGERS.pop().close()

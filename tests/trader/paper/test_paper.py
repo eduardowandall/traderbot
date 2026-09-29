@@ -2,6 +2,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import memory_gateway
 
 from trader.async_account import AsyncAccount
 from trader.models import SOLANA_MINTS
@@ -154,7 +155,7 @@ class TestPaperProvider:
             ]
         )
         provider = paper_provider(wallet, jupiter_client=client)
-        account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey)
+        account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey, memory_gateway())
 
         await account.buy(Decimal("100"), Decimal("0.1"))
         await account.sell(Decimal("110"), Decimal("0.1"))

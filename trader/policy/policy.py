@@ -12,6 +12,7 @@ os limites conservadores abaixo.
 import hashlib
 import logging
 import os
+import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -39,6 +40,26 @@ class Policy:
     # permite intenções sem estimativa em USD (ex: swap SOL -> JUP)
     allow_unknown_notional: bool = False
     version: str = field(default="defaults", compare=False)
+
+    @classmethod
+    def unlimited(cls) -> Policy:
+        """Sem limites de valor, ritmo, perda ou falhas (só para replays).
+
+        O backtest não pode usar os limites reais: o ledger usa o relógio de
+        parede, então mil candles reproduzidos em segundos estourariam o
+        limite por hora. As regras de segurança (mints conhecidos, modo real,
+        intenções pendentes) continuam valendo.
+        """
+        unbounded = Decimal("Infinity")
+        return cls(
+            max_trade_usd=unbounded,
+            max_daily_notional_usd=unbounded,
+            max_trades_per_hour=sys.maxsize,
+            max_daily_loss_usd=unbounded,
+            max_consecutive_failures=sys.maxsize,
+            allow_unknown_notional=True,
+            version="unlimited",
+        )
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from factories import memory_gateway
 
 from trader.backtest import (
     Backtester,
@@ -11,7 +12,9 @@ from trader.backtest import (
     load_ticks,
     ticks_from_candles,
 )
+from trader.execution import KillSwitch, TradeGateway
 from trader.models import OrderSide, OrderSignal, TickerData
+from trader.models.intent import IntentStatus
 from trader.trading_strategy import (
     RandomStrategy,
     StrategyComposer,
@@ -65,6 +68,21 @@ class TestBacktester:
         assert result.final_equity == Decimal("110")
         assert result.return_pct == Decimal("10")
         assert not result.open_position
+
+    async def test_replays_through_a_gateway_that_ignores_the_live_halt(
+        self, monkeypatch
+    ):
+        KillSwitch().activate("bot ao vivo parado")
+        gateway = memory_gateway()  # fechado pela fixture, não pelo replay
+        gateway.close = lambda: None  # para o teste ler o ledger depois
+        monkeypatch.setattr(TradeGateway, "in_memory", lambda policy=None: gateway)
+
+        result = await _run(BuyThenSell(sell_at=3), [100, 105, 110])
+
+        assert len(result.trades) == 2
+        records = gateway.ledger.list_intents()
+        assert [r.status for r in records] == [IntentStatus.EXECUTED] * 2
+        assert all(r.order_json for r in records)
 
     async def test_fees_reduce_result(self):
         free = await _run(BuyThenSell(3), [100, 105, 110], fee_bps=Decimal("0"))

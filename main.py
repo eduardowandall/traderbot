@@ -14,13 +14,9 @@ from trader.bot.config import BotConfig
 from trader.execution import KillSwitch, TradeGateway
 from trader.ledger import Ledger, ledger_path
 from trader.market import JupiterMarketData
-from trader.models import SOLANA_MINTS, Interval
-from trader.models.intent import (
-    IntentSide,
-    IntentStatus,
-    TradeIntent,
-    with_idempotency_key,
-)
+from trader.models import SOLANA_MINTS, Interval, Order
+from trader.models.costs import describe_costs
+from trader.models.intent import IntentStatus
 from trader.models.mode import RunningMode
 from trader.notification.notification_service import (
     NullNotificationService,
@@ -34,14 +30,14 @@ from trader.paper import (
 from trader.policy import Policy
 from trader.providers.jupiter.async_jupiter_svc import (
     DEFAULT_MAX_PRICE_IMPACT_PCT,
-    AsyncJupiterProvider,
 )
 from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
 from trader.strategies_registry import get_strategy_factory
 from trader.trading_service.local import LocalTradeClient
+from trader.trading_service.protocol import OrderReply, SwapRequest
+from trader.trading_service.service import TradeService
 from trader.wiring import (
     build_gateway,
-    build_provider,
     build_trade_service,
     paper_wallet_path,
 )
@@ -59,10 +55,6 @@ app.add_typer(strategy_app, name="strategy")
 def _warn(message: str) -> None:
     # stderr: não pode sujar o stdout dos comandos `--json`
     typer.echo(message, err=True)
-
-
-def _build_provider(mode: RunningMode, **limits) -> AsyncJupiterProvider:
-    return build_provider(mode, on_wallet_created=_warn, **limits)
 
 
 @app.command()
@@ -120,7 +112,6 @@ def run(
         notifier=notification_svc,
         on_tick=recorder.record if recorder else None,
     )
-    assert service.gateway is not None
     with service.gateway, recorder or nullcontext():
         _run_bot(AsyncWebsocketTradingBot(config))
 
@@ -170,59 +161,42 @@ def swap(
     if amount <= 0:
         raise typer.BadParameter("quantity deve ser maior que zero")
     max_impact = _parse_decimal(max_price_impact, "max-price-impact")
-
-    provider = _build_provider(mode, max_price_impact_pct=max_impact)
-    gateway = build_gateway(mode)
-    with gateway:
-        signature = asyncio.run(
-            _execute_swap(
-                provider,
-                gateway,
-                f"{mode}:swap",
-                symbol_in,
-                symbol_out,
-                amount,
-                slippage_bps,
-                idempotency_key,
-            )
-        )
-    typer.echo(f"Swap executado: {signature}")
-
-
-async def _execute_swap(
-    provider: AsyncJupiterProvider,
-    gateway: TradeGateway,
-    account: str,
-    symbol_in: str,
-    symbol_out: str,
-    quantity: Decimal,
-    slippage_bps: int,
-    idempotency_key: str | None = None,
-) -> str:
-    mint_in = SOLANA_MINTS.get_by_symbol(symbol_in)
-    mint_out = SOLANA_MINTS.get_by_symbol(symbol_out)
-    raw_quantity = mint_in.ui_to_raw(quantity)
-    intent = TradeIntent(
-        source="cli",
-        account=account,
-        side=IntentSide.SWAP,
-        spend_mint=mint_in.mint,
-        receive_mint=mint_out.mint,
-        spend_amount=quantity,
-        # só dá para estimar em USD quando o token gasto é stablecoin
-        notional_usd=quantity if mint_in.is_usd_stable else None,
+    request = SwapRequest(
+        spend_mint=SOLANA_MINTS.get_by_symbol(symbol_in).mint,
+        receive_mint=SOLANA_MINTS.get_by_symbol(symbol_out).mint,
+        amount=amount,
+        slippage_bps=slippage_bps,
+        idempotency_key=idempotency_key,
     )
-    intent = with_idempotency_key(intent, idempotency_key)
+
+    service = build_trade_service(
+        mode, on_wallet_created=_warn, max_price_impact_pct=max_impact
+    )
+    with service.gateway:
+        reply = asyncio.run(_swap(service, request))
+    if reply.order is None:
+        for reason in reply.reasons or (reply.error or "",):
+            typer.echo(f"Swap {reply.status}: {reason}", err=True)
+        raise typer.Exit(1)
+    typer.echo(_format_swap(reply.order))
+
+
+async def _swap(service: TradeService, request: SwapRequest) -> OrderReply:
     try:
-        result = await gateway.submit(
-            intent,
-            lambda: provider.swap_with_details(
-                mint_in.mint, mint_out.mint, raw_quantity, slippage_bps
-            ),
-        )
-        return result.signature
+        return await service.swap(request)
     finally:
-        await provider.aclose()
+        await service.aclose()
+
+
+def _format_swap(order: Order) -> str:
+    spend = SOLANA_MINTS.symbol_of(order.input_mint)
+    receive = SOLANA_MINTS.symbol_of(order.output_mint)
+    return (
+        f"Swap executado: {order.order_id}\n"
+        f"  gasto {order.quote_amount} {spend} -> recebido {order.quantity} "
+        f"{receive} ({order.fill_price:.9g} {spend}/{receive})\n"
+        f"  {describe_costs(order.costs, order.sol_usd)}"
+    )
 
 
 @app.command()

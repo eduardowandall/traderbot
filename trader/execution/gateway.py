@@ -65,6 +65,19 @@ class KillSwitch:
         self.path.unlink(missing_ok=True)
 
 
+class _NeverHalted(KillSwitch):
+    """Kill switch de replays: nunca lê (nem escreve) o `HALT` da operação."""
+
+    def is_active(self) -> bool:
+        return False
+
+    def activate(self, reason: str) -> None:
+        return None
+
+    def deactivate(self) -> None:
+        return None
+
+
 def _open_entry(last: IntentRecord | None) -> Order | None:
     """A compra da última perna executada, se a posição ainda está aberta."""
     if last is None or last.intent.side != IntentSide.BUY or not last.order_json:
@@ -109,6 +122,21 @@ class TradeGateway:
             policy=load_policy(mode=str(mode)) if policy is None else policy,
             kill_switch=KillSwitch(),
             real_mode=mode == RunningMode.REAL,
+        )
+
+    @classmethod
+    def in_memory(cls, policy: Policy | None = None) -> TradeGateway:
+        """Gateway de replay: ledger em memória, sem kill switch, modo não real.
+
+        O backtest passa pelo mesmo caminho do ao vivo (idempotência, ciclo
+        da intenção, eventos), mas sem os limites da política
+        (`Policy.unlimited()`, veja lá o porquê).
+        """
+        return cls(
+            ledger=Ledger(),
+            policy=Policy.unlimited() if policy is None else policy,
+            kill_switch=_NeverHalted(),
+            real_mode=False,
         )
 
     def close(self) -> None:

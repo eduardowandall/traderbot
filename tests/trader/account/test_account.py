@@ -3,7 +3,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import mock_provider
+from factories import memory_gateway, mock_provider
 
 from trader.async_account import AsyncAccount
 from trader.models import (
@@ -26,7 +26,7 @@ def _make_account(balances=None):
             MintBalance(mint=mo.pubkey, available=Decimal("1.0")),
         ]
     provider.get_account_balance = AsyncMock(return_value=balances)
-    return AsyncAccount(provider, mi.pubkey, mo.pubkey), mi, mo
+    return AsyncAccount(provider, mi.pubkey, mo.pubkey, memory_gateway()), mi, mo
 
 
 def _long_position(mi, mo):
@@ -139,7 +139,7 @@ def _usdc_sol_account(usdc="1000", sol="1", fill_ratio=Decimal("1")):
 
     provider.buy = AsyncMock(side_effect=buy)
     provider.sell = AsyncMock(side_effect=sell)
-    return AsyncAccount(provider, USDC.pubkey, SOL.pubkey)
+    return AsyncAccount(provider, USDC.pubkey, SOL.pubkey, memory_gateway())
 
 
 async def test_buy_records_quote_fill():
@@ -221,7 +221,7 @@ async def test_buy_with_sol_keeps_fee_reserve():
             "sig", SOL.mint, USDC.mint, SOL.ui_to_raw("0.98"), USDC.ui_to_raw("98")
         )
     )
-    acc = AsyncAccount(provider, SOL.pubkey, USDC.pubkey)
+    acc = AsyncAccount(provider, SOL.pubkey, USDC.pubkey, memory_gateway())
 
     # pede 100 USDC a 0.01 SOL/USDC = 1 SOL, mas só 0.98 pode ser gasto
     await acc.buy(Decimal("0.01"), Decimal("100"))
@@ -240,7 +240,7 @@ async def test_pnl_uses_usd_price_when_input_is_not_a_stablecoin():
     provider.buy = AsyncMock(
         return_value=SwapResult("sig", SOL.mint, USDC.mint, 39077338, 4537732)
     )
-    acc = AsyncAccount(provider, SOL.pubkey, USDC.pubkey)
+    acc = AsyncAccount(provider, SOL.pubkey, USDC.pubkey, memory_gateway())
     market_price = Decimal("0.9997936921282948")
 
     order = await acc.buy(market_price, Decimal("0.059085"))

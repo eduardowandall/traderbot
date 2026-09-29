@@ -7,7 +7,8 @@ from decimal import Decimal
 from solders.pubkey import Pubkey
 
 from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
-from trader.models.costs import PnLResult, TradeCosts, trade_rates
+from trader.execution.fills import Fill, execute_trade
+from trader.models.costs import PnLResult, trade_rates
 from trader.models.intent import IntentSide, TradeIntent, with_idempotency_key
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
 
@@ -17,7 +18,6 @@ from .models import (
     OrderSide,
     Position,
     PositionType,
-    SwapResult,
     TickerData,
 )
 
@@ -33,7 +33,7 @@ class AsyncAccount:
         provider: AsyncJupiterProvider,
         input_mint: Pubkey,
         output_mint: Pubkey,
-        gateway: TradeGateway | None = None,
+        gateway: TradeGateway,
         account_id: str | None = None,
         source: str = "strategy",
         clock: Callable[[], datetime] = datetime.now,
@@ -46,8 +46,8 @@ class AsyncAccount:
         # relógio injetável: no backtest é o tempo do tick, para que
         # `Order.timestamp` (e o `max_hold` das estratégias) sigam o replay
         self.clock = clock
-        # com gateway, toda ordem vira uma intenção avaliada pela política e
-        # registrada no ledger; sem ele, executa direto no provider (testes)
+        # toda ordem vira uma intenção avaliada pela política e registrada no
+        # ledger (no backtest, um gateway em memória: `TradeGateway.in_memory`)
         self.gateway = gateway
         self.account_id = account_id or f"{input_mint}:{output_mint}"
         self.source = source
@@ -117,35 +117,32 @@ class AsyncAccount:
             balance -= self.provider.native_fee_reserve
         return max(balance, Decimal("0"))
 
-    def _fill(
-        self, result: SwapResult, costs: TradeCosts | None
-    ) -> tuple[Decimal, Decimal, Decimal]:
+    def _fill_amounts(self, fill: Fill) -> tuple[Decimal, Decimal, Decimal]:
         """(quantidade do token, preço em cotação por token, valor em cotação).
 
         Usa os valores efetivamente movidos on-chain quando conhecidos; senão
         os da quote.
         """
-        in_raw, out_raw = _actual_amounts(result, costs)
+        in_raw, out_raw = fill.amounts()
         token_raw, quote_raw = (
             (out_raw, in_raw)
-            if result.output_mint == str(self.output_mint)
+            if fill.result.output_mint == str(self.output_mint)
             else (in_raw, out_raw)
         )
         quantity = SOLANA_MINTS.raw_to_ui(str(self.output_mint), token_raw)
         quote_amount = SOLANA_MINTS.raw_to_ui(str(self.input_mint), quote_raw)
         if quantity <= 0:
-            raise ValueError(f"Swap sem quantidade executada: {result}")
+            raise ValueError(f"Swap sem quantidade executada: {fill.result}")
         return quantity, quote_amount / quantity, quote_amount
 
     def _to_order(
         self,
-        result: SwapResult,
-        costs: TradeCosts | None,
+        fill: Fill,
         side: OrderSide,
         requested_quantity: Decimal,
         price: Decimal,
     ) -> Order:
-        filled_quantity, fill_price, quote_amount = self._fill(result, costs)
+        filled_quantity, fill_price, quote_amount = self._fill_amounts(fill)
         rates = trade_rates(
             price,
             fill_price,
@@ -154,7 +151,7 @@ class AsyncAccount:
             self._token_is_sol,
         )
         return Order(
-            order_id=result.signature,
+            order_id=fill.result.signature,
             input_mint=str(self.input_mint),
             output_mint=str(self.output_mint),
             quantity=filled_quantity,
@@ -171,13 +168,11 @@ class AsyncAccount:
             quote_usd=rates.quote_usd,
             sol_usd=rates.sol_usd,
             sol_in_quote=rates.sol_in_quote,
-            costs=costs,
+            costs=fill.costs,
         )
 
     def restore_from_ledger(self) -> None:
         """Recupera posição aberta e PnL realizado do ledger (após reinício)."""
-        if self.gateway is None:
-            return
         state = self.gateway.restore(self.account_id)
         self.total_pnl = state.realized_usd
         self.total_gross_quote = state.totals.gross_quote
@@ -200,7 +195,7 @@ class AsyncAccount:
         Retorna False (e registra no ledger) se a carteira tem menos do que a
         posição registrada; a posição não é alterada automaticamente.
         """
-        if self.gateway is None or self.current_position is None:
+        if self.current_position is None:
             return True
         expected = self.current_position.entry_order.quantity
         balance = await self.get_balance(self.output_mint)
@@ -220,11 +215,6 @@ class AsyncAccount:
         )
         return False
 
-    async def _execute(self, intent: TradeIntent, call):
-        if self.gateway is None:
-            return await call()
-        return await self.gateway.submit(intent, call)
-
     async def _execute_order(
         self,
         intent: TradeIntent,
@@ -235,23 +225,15 @@ class AsyncAccount:
     ) -> Order:
         """Executa a intenção e converte o fill em `Order`."""
         try:
-            result = await self._execute(intent, call)
+            fill = await execute_trade(self.gateway, self.provider, intent, call)
             # a carteira mudou: o próximo get_balance relê
             self.balances = None
-            # só depois de executada (e registrada) a intenção: buscar custos
-            # nunca pode fazer o swap ser re-tentado ou marcado como falho
-            costs = await self._fetch_costs(result)
-            return self._to_order(result, costs, side, requested_quantity, price)
+            return self._to_order(fill, side, requested_quantity, price)
         except PolicyDeniedError, DuplicateIntentError:
             raise  # recusa esperada; o bot registra como aviso
         except Exception as ex:
             self.logger.error(f"Erro ao executar ordem: {str(ex)}")
             raise
-
-    async def _fetch_costs(self, result: SwapResult) -> TradeCosts | None:
-        costs = await self.provider.fetch_swap_costs(result)
-        # providers de teste (mocks) não devolvem TradeCosts
-        return costs if isinstance(costs, TradeCosts) else None
 
     def _record_order(
         self,
@@ -260,8 +242,7 @@ class AsyncAccount:
         pnl: PnLResult | None = None,
         realized_usd: Decimal | None = None,
     ) -> None:
-        if self.gateway is not None:
-            self.gateway.record_fill(intent.intent_id, order, realized_usd, pnl)
+        self.gateway.record_fill(intent.intent_id, order, realized_usd, pnl)
 
     def _book(self, pnl: PnLResult | None) -> None:
         """Acumula o PnL nativo de uma posição fechada."""
@@ -506,15 +487,3 @@ class AsyncAccount:
         if self.current_position:
             return self.current_position.unrealized_pnl(current_price)
         return Decimal("0.0")
-
-
-def _actual_amounts(result: SwapResult, costs: TradeCosts | None) -> tuple[int, int]:
-    """(entrada, saída) raw: efetivos quando conhecidos, senão os da quote."""
-    if costs is None:
-        return result.in_amount, result.out_amount
-    in_raw = costs.actual_in_amount
-    out_raw = costs.actual_out_amount
-    return (
-        result.in_amount if in_raw is None else in_raw,
-        result.out_amount if out_raw is None else out_raw,
-    )

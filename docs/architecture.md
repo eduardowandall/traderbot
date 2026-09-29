@@ -80,6 +80,7 @@ trader/
     local.py                    LocalTradeClient: TradeClient for a TradeService in the same process
   async_account.py              AsyncAccount: one bucket's balances and position; turns orders into intents
   execution/gateway.py          TradeGateway (the only path to a swap and to the ledger) + KillSwitch
+  execution/fills.py            execute_trade: gateway, then costs -> Fill (every trade)
   policy/policy.py              Policy, pure evaluate(), TOML loader
   ledger/ledger.py              Ledger (SQLite): intents, events, PnL reports, restore
   providers/jupiter/
@@ -246,7 +247,8 @@ In **dry** mode the RPC client simulates the transaction and never sends it.
 ## Step 7 — After the swap
 
 1. The gateway marks the intent `EXECUTED`.
-2. **Only then** does `AsyncAccount` call `provider.fetch_swap_costs(result)`.
+2. **Only then** does `execute_trade` (`trader/execution/fills.py`, the one
+   pipeline every trade uses) call `provider.fetch_swap_costs(result)`.
    It returns the real network fee, rent, and the real in/out amounts, read
    from the confirmed transaction. It never raises: if it fails, the costs are
    just unknown.
@@ -272,12 +274,20 @@ In **dry** mode the RPC client simulates the transaction and never sends it.
 | Swap | signed and sent | simulated, never sent | applied to `SimulatedWallet` | applied to an in-memory `SimulatedWallet` |
 | Ledger | `ledger-real` | `ledger-dry` | `ledger-paper` | none |
 
-- **`main.py swap`** is a one-off manual swap. It builds a `TradeIntent` and
-  submits it through the same gateway.
+- **`main.py swap`** is a one-off manual swap on any pair. It calls
+  `TradeService.swap`, which runs it in the `manual` bucket (ledger account
+  `"<mode>:manual"`, no position) under the same lock and through the same
+  `execute_trade` pipeline as the strategy buckets
+  (`trader/trading_service/manual.py`). The fill, with real amounts and
+  costs, is recorded, so manual swaps show up in `pnl` and `ledger list`.
 - **`main.py backtest`** runs a strategy over ticks with `Backtester`
   (`trader/backtest/replay.py`).
   - It uses the same `TradeService` → `LocalTradeClient` path as `run`, over
-    a paper provider with a synthetic quote client and no gateway.
+    a paper provider with a synthetic quote client.
+  - Its gateway is `TradeGateway.in_memory()`: an in-memory ledger, a policy
+    with no limits (ledger timestamps are wall-clock, so real limits would
+    trip in seconds), and a kill switch that ignores the live `HALT`.
+    Idempotency and the intent lifecycle still run, as live.
   - An optional `budget_usd` applies the same bucket cap as live.
   - The strategy gets the replay clock and a fixed seed, so results are
     reproducible. That is why strategies must use `self.clock()` /

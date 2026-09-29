@@ -32,6 +32,20 @@ class TestEvaluate:
     def test_kill_switch(self):
         assert "kill switch" in _eval(halted=True).reasons[0]
 
+    def test_unlimited_has_no_budget_limits_but_keeps_safety(self):
+        policy = Policy.unlimited()
+        busy = PolicyState(
+            daily_notional_usd=Decimal("1e12"),
+            trades_last_hour=10**6,
+            daily_realized_pnl_usd=Decimal("-1e12"),
+            consecutive_failures=10**6,
+        )
+        huge = make_intent(notional="1e9", spend_amount="1e9")
+        assert _eval(huge, policy, busy).allowed
+        assert _eval(make_intent(notional=None), policy).allowed
+        assert not _eval(policy=policy, halted=True).allowed
+        assert not _eval(policy=policy, real_mode=True).allowed
+
     def test_real_mode_requires_opt_in(self):
         assert not _eval(real_mode=True).allowed
         assert _eval(real_mode=True, policy=Policy(real_trading_enabled=True)).allowed

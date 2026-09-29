@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 import pytest
-from factories import mock_provider, open_ledger
+from factories import memory_gateway, mock_provider, open_ledger
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
@@ -194,7 +194,7 @@ class TestLifecycle:
     async def test_open_reads_no_balances_and_reconciles_only_when_tracked(self):
         for tracks in (True, False):
             provider = mock_provider(balances_track_fills=tracks)
-            service = TradeService(provider, gateway=None)
+            service = TradeService(provider, memory_gateway())
             await service.open_bucket("a", USDC.mint, JUP.mint)
             provider.get_account_balance.assert_not_awaited()
 

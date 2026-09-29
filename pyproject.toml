@@ -37,7 +37,10 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+# a suíte live (tests/live/) fala com a Jupiter de verdade: só roda com
+# `uv run pytest -m live` (o -m da linha de comando vence o daqui)
+addopts = "-v --tb=short -m 'not live'"
+markers = ["live: hits the real Jupiter endpoints (paper/read-only, no key)"]
 asyncio_mode = "auto"
 
 [tool.ruff]

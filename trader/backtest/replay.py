@@ -1,7 +1,8 @@
 """Backtest determinístico: reproduz ticks gravados por uma estratégia.
 
 Usa o mesmo caminho de execução do paper trading (`TradeService` ->
-`AsyncJupiterProvider` + `SimulatedExecutor` -> `SimulatedWallet`); só a
+`TradeGateway` -> `AsyncJupiterProvider` + `SimulatedExecutor` ->
+`SimulatedWallet`), com um gateway em memória sem limites de política; só a
 quote é sintética, calculada a partir do preço do tick com uma taxa
 (`fee_bps`). A estratégia recebe o
 relógio do replay e uma semente fixa, então a mesma entrada gera sempre o
@@ -19,6 +20,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from trader.backtest.ticks import Tick
+from trader.execution import TradeGateway
 from trader.models import SOLANA_MINTS, Mint, OrderSide
 from trader.models.costs import REPLAY
 from trader.paper.provider import paper_provider
@@ -201,7 +203,11 @@ class Backtester:
             return await self._replay()
 
     async def _replay(self) -> BacktestResult:
-        client, wallet, trader = self._venue()
+        with TradeGateway.in_memory() as gateway:
+            return await self._replay_on(gateway)
+
+    async def _replay_on(self, gateway: TradeGateway) -> BacktestResult:
+        client, wallet, trader = self._venue(gateway)
         await trader.open()
         self.strategy.set_clock(lambda: client.now)
         self.strategy.seed(self.seed)
@@ -227,8 +233,10 @@ class Backtester:
             trades=run.trades,
         )
 
-    def _venue(self) -> tuple[ReplayQuoteClient, SimulatedWallet, LocalTradeClient]:
-        """Mesmo caminho do paper trading: TradeService -> provider -> carteira."""
+    def _venue(
+        self, gateway: TradeGateway
+    ) -> tuple[ReplayQuoteClient, SimulatedWallet, LocalTradeClient]:
+        """Mesmo caminho do paper trading: TradeService -> gateway -> carteira."""
         client = ReplayQuoteClient(self.quote, self.fee_bps)
         wallet = SimulatedWallet(initial={self.quote.symbol: self.initial_balance})
         provider = paper_provider(
@@ -242,8 +250,8 @@ class Backtester:
             account_rent_lamports=0,
             cost_source=REPLAY,  # custos modelados em fee_bps
         )
-        # sem gateway: nada de ledger nem política; ordens no horário do tick
-        service = TradeService(provider, gateway=None, clock=lambda: client.now)
+        # ledger em memória e política sem limites; ordens no horário do tick
+        service = TradeService(provider, gateway, clock=lambda: client.now)
         trader = LocalTradeClient(
             service,
             self.symbol,

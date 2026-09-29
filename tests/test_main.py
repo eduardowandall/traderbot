@@ -138,6 +138,7 @@ def _invoke_swap(argv, policy: str | None = PERMISSIVE_POLICY):
     )
     # o CLI executa via swap_with_details; os testes checam o mesmo mock
     mock_provider.swap_with_details = mock_provider.swap
+    mock_provider.fetch_swap_costs = mock.AsyncMock(return_value=None)
     mock_provider.aclose = mock.AsyncMock()
     with (
         mock.patch(
@@ -155,7 +156,7 @@ def test_swap_command_dry_with_slippage():
     )
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "Swap executado: sig123"
+    assert result.stdout.splitlines()[0] == "Swap executado: sig123"
     provider_cls.assert_called_once_with(
         keypair=mock.ANY, is_dryrun=True, max_price_impact_pct=Decimal("1")
     )
@@ -270,22 +271,26 @@ def test_swap_is_recorded_in_the_ledger():
     assert records[0].status == IntentStatus.EXECUTED
     assert records[0].signature == "sig123"
     assert records[0].intent.notional_usd == Decimal("10")
+    assert records[0].intent.account == "dry:manual"
+    assert records[0].order_json  # o fill foi gravado, não só a assinatura
+    assert "gasto" in result.stdout
+    assert "custos: desconhecidos" in result.stdout
 
 
 def test_default_policy_blocks_real_mode():
     result, mock_provider, _ = _invoke_swap(["real", "USDC", "SOL", "1"], policy=None)
 
     assert result.exit_code != 0
-    assert "real_trading_enabled" in str(result.exception)
+    assert "real_trading_enabled" in result.stderr
     mock_provider.swap.assert_not_awaited()
 
 
 def test_default_policy_blocks_unknown_notional_and_large_trades():
     result, mock_provider, _ = _invoke_swap(["dry", "SOL", "USDC", "1"], policy=None)
-    assert "allow_unknown_notional" in str(result.exception)
+    assert "allow_unknown_notional" in result.stderr
 
     result, mock_provider, _ = _invoke_swap(["dry", "USDC", "SOL", "26"], policy=None)
-    assert "acima do limite" in str(result.exception)
+    assert "acima do limite" in result.stderr
     mock_provider.swap.assert_not_awaited()
 
 
@@ -297,14 +302,14 @@ def test_swap_with_same_idempotency_key_runs_once():
     assert first.exit_code == 0
     provider_1.swap.assert_awaited_once()
     assert second.exit_code != 0
-    assert "duplicada" in str(second.exception)
+    assert "duplicada" in second.stderr
     provider_2.swap.assert_not_awaited()
 
 
 def test_halt_blocks_swaps_until_resume():
     assert CliRunner().invoke(main_module.app, ["halt", "teste"]).exit_code == 0
     blocked, provider, _ = _invoke_swap(["dry", "USDC", "SOL", "1"])
-    assert "kill switch" in str(blocked.exception)
+    assert "kill switch" in blocked.stderr
     provider.swap.assert_not_awaited()
 
     assert CliRunner().invoke(main_module.app, ["resume", "dry"]).exit_code == 0
