@@ -2,8 +2,8 @@
 
 Roda só com `uv run pytest -m live`; `pytest .` e o CI a pulam. Nada aqui
 pode assinar: a chave, o RPC e o Telegram saem do ambiente, e o
-`isolated_workdir` (conftest da raiz) mantém ledger, HALT, carteira paper e
-política em `tmp_path`. Só modo paper e comandos de leitura.
+`isolated_workdir` (conftest da raiz) mantém ledger, carteira paper e
+política em `tmp_path`. Só modo paper e leituras.
 """
 
 import os

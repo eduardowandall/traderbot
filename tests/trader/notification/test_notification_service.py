@@ -6,7 +6,6 @@ import httpx
 
 from trader.notification.notification_service import (
     NotificationService,
-    NullNotificationService,
     TelegramNotificationService,
 )
 
@@ -18,7 +17,7 @@ def _ok():
 
 
 def test_null_notification_service_is_noop():
-    service = NullNotificationService()
+    service = NotificationService()
     assert isinstance(service, NotificationService)
     assert service.send_message("ignored") is None
     asyncio.run(service.aclose())

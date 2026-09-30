@@ -1,9 +1,3 @@
-from pathlib import Path
-
-from typer.testing import CliRunner
-
-import main as main_module
-from trader.execution import KillSwitch
 from trader.ledger import ledger_path
 from trader.paths import PROJECT_ROOT, data_dir, policy_file
 from trader.policy import load_policy
@@ -18,7 +12,6 @@ def test_defaults_are_under_project_root_not_cwd(tmp_path, monkeypatch):
     assert data_dir() == PROJECT_ROOT / ".data"
     assert policy_file() == PROJECT_ROOT / "policy.toml"
     assert ledger_path("real") == PROJECT_ROOT / ".data" / "ledger-real.sqlite3"
-    assert KillSwitch().path == PROJECT_ROOT / ".data" / "HALT"
     assert (PROJECT_ROOT / "pyproject.toml").exists()
 
 
@@ -37,21 +30,6 @@ def test_relative_env_values_resolve_against_project_root(tmp_path, monkeypatch)
 
     assert data_dir() == PROJECT_ROOT / "state"
     assert policy_file() == PROJECT_ROOT / "conf" / "p.toml"
-
-
-def test_halt_from_another_directory_reaches_the_bot(tmp_path, monkeypatch):
-    cli_dir = tmp_path / "cli"
-    bot_dir = tmp_path / "bot"
-    cli_dir.mkdir()
-    bot_dir.mkdir()
-
-    monkeypatch.chdir(cli_dir)
-    result = CliRunner().invoke(main_module.app, ["halt", "teste"])
-    assert result.exit_code == 0, result.output
-
-    monkeypatch.chdir(bot_dir)
-    assert KillSwitch().is_active()
-    assert not Path("HALT").exists() and not Path(".data").exists()
 
 
 def test_policy_is_found_from_another_directory(tmp_path, monkeypatch):

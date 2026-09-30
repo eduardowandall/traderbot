@@ -1,22 +1,13 @@
 import json
-import sqlite3
 from decimal import Decimal
-from types import SimpleNamespace
-from unittest import mock
 from unittest.mock import AsyncMock
 
-from typer.testing import CliRunner
-
-import main as main_module
-from trader.async_account import AsyncAccount
-from trader.execution import KillSwitch, TradeGateway
-from trader.ledger import Ledger, ledger_path
-from trader.ledger.store import _SCHEMA
+from trader.execution import TradeGateway
+from trader.execution.account import AsyncAccount
+from trader.ledger import Ledger
 from trader.models import SOLANA_MINTS
-from trader.models.intent import IntentSide, IntentStatus, PolicyDecision, TradeIntent
 from trader.models.order import order_from_json
 from trader.paper import SimulatedWallet, paper_provider
-from trader.paths import data_dir
 from trader.policy import Policy
 from trader.providers import JupiterQuoteResponse
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
@@ -87,7 +78,7 @@ def _sol_usdc_account(ledger):
             _quote(SOL.mint, SOL.ui_to_raw("0.1"), USDC.mint, USDC.ui_to_raw("11")),
         ],
     )
-    gateway = TradeGateway(ledger, Policy(), KillSwitch("halt-file"), False)
+    gateway = TradeGateway(ledger, Policy(), False)
     return AsyncAccount(
         provider, USDC.pubkey, SOL.pubkey, gateway=gateway, account_id="paper:SOL-USDC"
     )
@@ -105,7 +96,7 @@ class TestLedgerRecordsCostsAndNetPnl:
         assert restored.costs == buy.costs
         assert restored.quote_amount == Decimal("10")
 
-        report = ledger.pnl_report()["paper:SOL-USDC"]
+        report = ledger.pnl_totals("paper:SOL-USDC")
         assert report.quote_symbol == "USDC"
         assert report.closed == 1 and report.trades == 2
         assert report.gross_quote == Decimal("1")
@@ -119,86 +110,4 @@ class TestLedgerRecordsCostsAndNetPnl:
         assert fresh.book.net_quote == account.book.net_quote
         assert fresh.book.costs_sol == account.book.costs_sol
         assert "PNL líquido +0.998950 USDC" in fresh.book.summary()
-        assert ledger.verify_chain() is None
         ledger.close()
-
-    def test_failed_transaction_fee_is_counted(self):
-        ledger = Ledger()
-        intent = TradeIntent(
-            "t", "real:SOL-USDC", IntentSide.BUY, USDC.mint, SOL.mint, Decimal("1")
-        )
-        ledger.record_intent(intent, PolicyDecision(True))
-        ledger.mark_unconfirmed(intent.intent_id, "timeout", signature="sig-x")
-        assert ledger.get(intent.intent_id).signature == "sig-x"  # type: ignore[union-attr]
-        ledger.resolve(intent.intent_id, IntentStatus.FAILED, "explorer")
-        ledger.record_failed_fee(intent.intent_id, 5000)
-
-        report = ledger.pnl_report()["real:SOL-USDC"]
-        assert report.failed_fee_lamports == 5000
-        assert report.paid_sol == Decimal("0.000005")
-        ledger.close()
-
-
-def test_migrates_old_ledger_files(tmp_path):
-    path = tmp_path / "old.sqlite3"
-    conn = sqlite3.connect(path)
-    conn.executescript(_SCHEMA)  # esquema da primeira versão, sem colunas de custo
-    conn.close()
-
-    with Ledger(path) as ledger:
-        columns = {r["name"] for r in ledger.conn.execute("PRAGMA table_info(intents)")}
-        assert {"fee_lamports", "net_pnl_quote", "pnl_complete"} <= columns
-    with Ledger(path):  # migrar de novo é inofensivo
-        pass
-
-
-def test_pnl_command_reports_native_and_usd():
-    with Ledger(ledger_path("paper")) as ledger:
-        import asyncio
-
-        account = _sol_usdc_account(ledger)
-        asyncio.run(account.buy(Decimal("100"), Decimal("0.1")))
-        asyncio.run(account.sell(Decimal("110"), Decimal("0.1")))
-
-    result = CliRunner().invoke(main_module.app, ["pnl", "paper"])
-
-    assert result.exit_code == 0, result.output
-    assert "paper:SOL-USDC: 2 pernas, 1 posições fechadas" in result.stdout
-    assert "líquido +0.998950 USDC" in result.stdout
-    assert "TOTAL líquido: +0.998950 USDC" in result.stdout
-
-    listed = CliRunner().invoke(main_module.app, ["ledger", "list", "paper"])
-    assert "custos=0.000005000SOL[simulated]" in listed.stdout
-    assert "líquido=+0.998950USDC" in listed.stdout
-
-
-def test_pnl_command_without_trades():
-    result = CliRunner().invoke(main_module.app, ["pnl", "paper"])
-    assert "Nenhum trade executado" in result.stdout
-
-
-def test_resolve_failed_backfills_fee(monkeypatch):
-    monkeypatch.setenv("HELIUS_RPC_URL", "https://rpc.test")  # o RPC é mock
-    with Ledger(ledger_path("real")) as ledger:
-        intent = TradeIntent(
-            "t", "real:SOL-USDC", IntentSide.BUY, USDC.mint, SOL.mint, Decimal("1")
-        )
-        ledger.record_intent(intent, PolicyDecision(True))
-        ledger.mark_unconfirmed(intent.intent_id, "timeout", signature="sig-y")
-
-    rpc = mock.Mock()
-    rpc.get_confirmed_transaction = AsyncMock(
-        return_value=SimpleNamespace(meta=SimpleNamespace(fee=7000))
-    )
-    rpc.aclose = AsyncMock()
-    with mock.patch("trader.cli.ledger.AsyncRPCClient", return_value=rpc):
-        result = CliRunner().invoke(
-            main_module.app,
-            ["ledger", "resolve", "real", intent.intent_id, "failed", "--note", "x"],
-        )
-
-    assert result.exit_code == 0, result.output
-    rpc.get_confirmed_transaction.assert_awaited_once_with("sig-y")
-    with Ledger(ledger_path("real")) as ledger:
-        assert ledger.pnl_report()["real:SOL-USDC"].failed_fee_lamports == 7000
-    assert data_dir().exists()

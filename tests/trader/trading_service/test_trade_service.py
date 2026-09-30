@@ -7,7 +7,7 @@ from factories import memory_gateway, mock_provider, open_ledger
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution import KillSwitch, TradeGateway
+from trader.execution import TradeGateway
 from trader.models import SOLANA_MINTS, OrderSide
 from trader.models.intent import IntentSide
 from trader.paper import SimulatedWallet, paper_provider
@@ -46,9 +46,7 @@ class Market:
 
 def _service(tmp_path, wallet, market, policy=LOOSE, ledger=None):
     provider = paper_provider(wallet, jupiter_client=market.client)
-    gateway = TradeGateway(
-        ledger or open_ledger(), policy, KillSwitch(tmp_path / "HALT"), False
-    )
+    gateway = TradeGateway(ledger or open_ledger(), policy, False)
     return TradeService(provider, gateway, mode="paper")
 
 

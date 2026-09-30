@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 
 import main as main_module
 
-# limites folgados para o paper: as estratégias de teste gastam o saldo todo
+# ainda mais folgado que o padrão do paper: o bot aleatório opera a cada tick
 LOOSE_PAPER_POLICY = """
 [paper.limits]
 max_trade_usd = 1000

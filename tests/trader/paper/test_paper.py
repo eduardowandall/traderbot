@@ -4,14 +4,13 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import memory_gateway
 
-from trader.async_account import AsyncAccount
+from trader.execution.account import AsyncAccount
 from trader.models import SOLANA_MINTS
 from trader.paper import (
     InsufficientFundsError,
     SimulatedExecutor,
     SimulatedWallet,
     paper_provider,
-    parse_balances,
 )
 from trader.providers import JupiterQuoteResponse
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
@@ -26,19 +25,6 @@ def _quote(in_mint, in_amount, out_mint, out_amount, impact="0.01"):
     return JupiterQuoteResponse.single_route(
         in_mint, in_amount, out_mint, out_amount, price_impact_pct=impact
     )
-
-
-class TestParseBalances:
-    def test_parses(self):
-        assert parse_balances("USDC=100 SOL=0.5") == {
-            "USDC": Decimal("100"),
-            "SOL": Decimal("0.5"),
-        }
-
-    @pytest.mark.parametrize("spec", ["USDC", "FOO=1", "USDC=-1", "USDC=nan"])
-    def test_rejects(self, spec):
-        with pytest.raises(ValueError):
-            parse_balances(spec)
 
 
 class TestSimulatedWallet:

@@ -130,12 +130,19 @@ def to_utc(ts: datetime) -> datetime:
     return ts.astimezone(UTC)
 
 
+# barras sem tick que ainda são preenchidas com o fechamento anterior; um
+# buraco maior (notebook dormiu, backoff longo, emenda de arquivo de ticks)
+# zera a série, senão a janela vira barras planas (RSI 0/100, volatilidade ~0)
+MAX_GAP_BARS = 5
+
+
 class BarSeries:
     """Fechamentos por barra de `interval`, limitados a `maxlen` barras.
 
     A barra em formação usa o último preço: a série sempre termina no preço
     atual. Um tick de uma barra anterior à atual (fora de ordem)
-    também só atualiza a barra atual.
+    também só atualiza a barra atual. Um buraco de mais de `MAX_GAP_BARS`
+    recomeça a série do zero (a estratégia volta a aquecer).
     """
 
     def __init__(self, interval: Interval, maxlen: int):
@@ -150,10 +157,12 @@ class BarSeries:
         if self._bucket is not None and bucket <= self._bucket:
             self._closes[-1] = price
             return False
-        if self._bucket is not None:
+        missing = 0 if self._bucket is None else bucket - self._bucket - 1
+        if missing > MAX_GAP_BARS:
+            self._closes.clear()
+        elif missing:
             # barras sem tick (feed quieto): repetem o fechamento anterior,
             # como os candles, para os indicadores cobrirem o mesmo tempo
-            missing = min(bucket - self._bucket - 1, self._closes.maxlen or 0)
             self._closes.extend([self._closes[-1]] * missing)
         self._closes.append(price)
         self._bucket = bucket

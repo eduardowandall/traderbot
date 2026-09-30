@@ -14,7 +14,7 @@ from decimal import Decimal
 
 from trader.models.costs import PnLResult, TradeCosts
 from trader.models.order import Order
-from trader.models.position import Position, PositionType
+from trader.models.position import Position
 
 ZERO = Decimal("0")
 # resto abaixo desta fração da entrada é poeira: a posição fecha
@@ -99,7 +99,7 @@ class PositionBook:
     def open(self, entry: Order) -> Position:
         if self.position is not None:
             raise ValueError("já existe uma posição aberta")
-        self.position = Position(PositionType.LONG, entry_order=entry, exit_order=None)
+        self.position = Position(entry)
         return self.position
 
     def close(self, exit_order: Order) -> ClosedPosition:
@@ -113,9 +113,7 @@ class PositionBook:
         entry = self._open().entry_order
         closed = self._realize(exit_order)
         rest = remainder_entry(entry, exit_order.quantity)
-        self.position = (
-            None if rest is None else Position(PositionType.LONG, rest, None)
-        )
+        self.position = None if rest is None else Position(rest)
         return closed
 
     def _open(self) -> Position:
@@ -126,9 +124,8 @@ class PositionBook:
     def _realize(self, exit_order: Order) -> ClosedPosition:
         position = self._open()
         position.exit_order = exit_order
-        closed = ClosedPosition(
-            position, position.realized_pnl_detail(), position.realized_pnl
-        )
+        detail = position.realized_pnl_detail()
+        closed = ClosedPosition(position, detail, position.realized_usd(detail))
         self.realized_usd += closed.realized_usd
         self._book(closed.pnl)
         return closed

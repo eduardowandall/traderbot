@@ -6,13 +6,12 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import make_intent, mock_provider, open_ledger
 
-from trader.async_account import AsyncAccount
 from trader.execution import (
     DuplicateIntentError,
-    KillSwitch,
     PolicyDeniedError,
     TradeGateway,
 )
+from trader.execution.account import AsyncAccount
 from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.intent import (
@@ -34,7 +33,6 @@ def _gateway(tmp_path, policy=None, real_mode=False):
     return TradeGateway(
         open_ledger(),
         policy or Policy(),
-        KillSwitch(tmp_path / "HALT"),
         real_mode=real_mode,
     )
 
@@ -107,8 +105,10 @@ class TestSubmit:
         with pytest.raises(PolicyDeniedError, match="sem confirmação"):
             await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
-        gateway.ledger.resolve(intent.intent_id, IntentStatus.FAILED, "explorer")
-        assert await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
+        # sem comando de resolução: nem um processo novo destrava o ledger
+        again = TradeGateway(gateway.ledger, Policy(), real_mode=False)
+        with pytest.raises(PolicyDeniedError, match="sem confirmação"):
+            await again.submit(make_intent(), AsyncMock(return_value=RESULT))
 
     async def test_cancellation_mid_execution_is_unconfirmed(self, tmp_path):
         gateway = _gateway(tmp_path)
@@ -119,7 +119,7 @@ class TestSubmit:
             )
         assert _record(gateway, intent).status == IntentStatus.UNCONFIRMED
 
-    async def test_circuit_breaker_and_resume(self, tmp_path):
+    async def test_circuit_breaker_rearms_on_restart(self, tmp_path):
         gateway = _gateway(tmp_path)
         for _ in range(3):
             with pytest.raises(RuntimeError):
@@ -130,30 +130,9 @@ class TestSubmit:
         with pytest.raises(PolicyDeniedError, match="circuit breaker"):
             await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
-        gateway.resume("verificado")
-        assert await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
-
-    async def test_kill_switch(self, tmp_path):
-        gateway = _gateway(tmp_path)
-        gateway.halt("teste")
-        execute = AsyncMock(return_value=RESULT)
-        with pytest.raises(PolicyDeniedError, match="kill switch"):
-            await gateway.submit(make_intent(), execute)
-        execute.assert_not_awaited()
-
-        gateway.resume()
-        assert await gateway.submit(make_intent(), execute)
-
-
-def test_kill_switch_fails_closed(tmp_path, monkeypatch):
-    switch = KillSwitch(tmp_path / "HALT")
-    assert not switch.is_active()
-
-    def broken(self):
-        raise OSError("disco")
-
-    monkeypatch.setattr("pathlib.Path.exists", broken)
-    assert switch.is_active()
+        # um processo novo (reinício) só conta as falhas dele
+        restarted = TradeGateway(gateway.ledger, Policy(), real_mode=False)
+        assert await restarted.submit(make_intent(), AsyncMock(return_value=RESULT))
 
 
 # --- integração com AsyncAccount -------------------------------------------------
@@ -178,7 +157,7 @@ def _account(gateway, usdc="1000", sol="1"):
         )
     )
     return AsyncAccount(
-        provider, USDC.pubkey, SOL.pubkey, gateway=gateway, account_id="dry:SOL-USDC"
+        provider, USDC.pubkey, SOL.pubkey, gateway=gateway, account_id="paper:SOL-USDC"
     )
 
 
@@ -195,9 +174,8 @@ class TestAccountWithGateway:
         assert buy.intent.notional_usd == Decimal("10.0")
         assert buy.order_json
         assert sell.intent.side == IntentSide.SELL
-        assert sell.intent.idempotency_key == "dry:SOL-USDC:sell:buy-sig:0.1"
+        assert sell.intent.idempotency_key == "paper:SOL-USDC:sell:buy-sig:0.1"
         assert sell.realized_pnl_usd == Decimal("1.0")
-        assert gateway.ledger.verify_chain() is None
 
     async def test_denied_buy_opens_no_position(self, tmp_path):
         gateway = _gateway(tmp_path, policy=Policy(max_trade_usd=Decimal("5")))
@@ -289,8 +267,8 @@ def test_order_timestamp_is_preserved_by_restore(tmp_path):
         mock_provider(),
         USDC.pubkey,
         SOL.pubkey,
-        gateway=TradeGateway(ledger, Policy(), KillSwitch(tmp_path / "H"), False),
-        account_id="dry:SOL-USDC",
+        gateway=TradeGateway(ledger, Policy(), False),
+        account_id="paper:SOL-USDC",
     )
     account.restore_from_ledger()
     assert account.book.position
@@ -306,7 +284,7 @@ async def test_non_stablecoin_input_has_unknown_notional(tmp_path):
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("1"))]
     )
     account = AsyncAccount(
-        provider, SOL.pubkey, USDC.pubkey, gateway=gateway, account_id="dry:USDC-SOL"
+        provider, SOL.pubkey, USDC.pubkey, gateway=gateway, account_id="paper:USDC-SOL"
     )
 
     with pytest.raises(PolicyDeniedError, match="desconhecido"):
@@ -316,7 +294,6 @@ async def test_non_stablecoin_input_has_unknown_notional(tmp_path):
     allowed = TradeGateway(
         gateway.ledger,
         Policy(allow_unknown_notional=True),
-        gateway.kill_switch,
         real_mode=False,
     )
     account.gateway = allowed

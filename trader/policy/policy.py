@@ -1,12 +1,13 @@
 """Política de risco: função pura que decide se uma intenção pode executar.
 
-`evaluate` não faz I/O: recebe a intenção, a política, o estado agregado do
-ledger e se o kill switch está ativo, e devolve uma `PolicyDecision`. Isso a
+`evaluate` não faz I/O: recebe a intenção, a política e o estado agregado do
+ledger, e devolve uma `PolicyDecision`. Isso a
 torna fácil de testar e impossível de burlar por quem só propõe trades.
 
 A política vem de um arquivo TOML do dono (padrão: `policy.toml` na raiz do
 projeto, ou `TRADER_POLICY_FILE`; veja `trader.paths`). Sem arquivo, valem
-os limites conservadores abaixo.
+os limites conservadores abaixo; em paper, limites folgados (`PAPER_DEFAULTS`),
+porque não há dinheiro de verdade em jogo.
 """
 
 import hashlib
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentSide, PolicyDecision, TradeIntent
+from trader.models.mode import RunningMode
 from trader.paths import policy_file
 
 logger = logging.getLogger(__name__)
@@ -120,8 +122,16 @@ def _parse(data: dict, version: str) -> Policy:
     return Policy(version=version, **kwargs)
 
 
-MODES = ("real", "dry", "paper")
+MODES = tuple(str(mode) for mode in RunningMode)
 _SECTIONS = ("trading", "limits")
+
+# paper não move dinheiro: os limites de valor e ritmo padrão (pensados para o
+# real) só atrapalhariam. `[paper.limits]` ainda pode apertar.
+PAPER_DEFAULTS = {
+    "max_trade_usd": Decimal("1000"),
+    "max_daily_notional_usd": Decimal("10000"),
+    "max_trades_per_hour": 60,
+}
 
 
 def _settings(table: dict, where: str) -> dict:
@@ -148,16 +158,17 @@ def load_policy(
 ) -> Policy:
     """Carrega a política do TOML; sem arquivo, usa os padrões.
 
-    `[trading]`/`[limits]` valem para todos os modos; `[<modo>.trading]` e
-    `[<modo>.limits]` (modo = real, dry ou paper) sobrescrevem só as chaves
-    que definirem, e só naquele modo.
+    Camadas, da mais fraca para a mais forte: os padrões de `Policy`, os de
+    paper (`PAPER_DEFAULTS`, só em paper), `[trading]`/`[limits]` e
+    `[<modo>.trading]`/`[<modo>.limits]` (modo = real ou paper).
     """
     if mode is not None and mode not in MODES:
         raise ValueError(f"modo desconhecido: {mode!r}")
+    defaults = PAPER_DEFAULTS if mode == RunningMode.PAPER else {}
     policy_path = Path(path) if path else policy_file()
     if not policy_path.exists():
         logger.info(f"Política {policy_path} não encontrada; usando padrões")
-        return Policy()
+        return Policy(**defaults)
     content = policy_path.read_bytes()
     data = tomllib.loads(content.decode("utf-8"))
 
@@ -172,7 +183,7 @@ def load_policy(
     if mode is not None and overrides[mode]:
         settings |= overrides[mode]
         version += f"/{mode}"
-    return _parse(settings, version)
+    return _parse(defaults | settings, version)
 
 
 @dataclass(frozen=True)
@@ -180,17 +191,11 @@ class _Check:
     intent: TradeIntent
     policy: Policy
     state: PolicyState
-    halted: bool
     real_mode: bool
 
 
 # cada regra devolve os motivos de recusa (vazio = ok)
 Rule = Callable[[_Check], Iterator[str]]
-
-
-def _kill_switch(c: _Check) -> Iterator[str]:
-    if c.halted:
-        yield "kill switch ativo (use `main.py resume`)"
 
 
 def _real_mode(c: _Check) -> Iterator[str]:
@@ -200,8 +205,12 @@ def _real_mode(c: _Check) -> Iterator[str]:
 
 def _unresolved(c: _Check) -> Iterator[str]:
     if c.state.unresolved_intent_ids:
-        yield "intenções sem confirmação precisam ser resolvidas: " + ", ".join(
-            c.state.unresolved_intent_ids
+        # sem comando de resolução: o dono confere na blockchain e move (ou
+        # apaga) o arquivo do ledger do modo
+        ids = ", ".join(c.state.unresolved_intent_ids)
+        yield (
+            f"intenções sem confirmação: {ids} (confira na blockchain; o ledger "
+            "do modo fica bloqueado até ser movido ou apagado)"
         )
 
 
@@ -209,7 +218,7 @@ def _circuit_breaker(c: _Check) -> Iterator[str]:
     if c.state.consecutive_failures >= c.policy.max_consecutive_failures:
         yield (
             f"circuit breaker: {c.state.consecutive_failures} falhas seguidas "
-            "(use `main.py resume` para rearmar)"
+            "(reinicie o bot para rearmar)"
         )
 
 
@@ -265,7 +274,6 @@ def _daily_loss(c: _Check) -> Iterator[str]:
 
 # valem para toda intenção, inclusive vendas
 _SAFETY_RULES: tuple[Rule, ...] = (
-    _kill_switch,
     _real_mode,
     _unresolved,
     _circuit_breaker,
@@ -288,10 +296,9 @@ def evaluate(
     policy: Policy,
     state: PolicyState,
     *,
-    halted: bool,
     real_mode: bool,
 ) -> PolicyDecision:
-    check = _Check(intent, policy, state, halted, real_mode)
+    check = _Check(intent, policy, state, real_mode)
     rules = _SAFETY_RULES
     if intent.side != IntentSide.SELL:
         rules += _BUDGET_RULES

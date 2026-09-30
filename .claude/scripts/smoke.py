@@ -1,17 +1,16 @@
-"""Isolated smoke run of the bot in paper or dry mode, then a ledger report.
+"""Isolated smoke run of the bot in paper mode, then a ledger report.
 
-State goes to a fresh temp dir (TRADER_DATA_DIR / TRADER_POLICY_FILE), with a
-permissive policy, so the real `.data/` ledger, wallet and HALT file are never
-touched. `real` mode is deliberately not accepted.
+State goes to a fresh temp dir (TRADER_DATA_DIR / TRADER_POLICY_FILE /
+TRADER_LOG_DIR), with a permissive policy, so the real `.data/` ledger and
+wallet are never touched. Only paper: `real` is deliberately not accepted.
 
 Usage (from the project root):
-    uv run --no-sync python .claude/scripts/smoke.py [--mode paper|dry]
+    uv run --no-sync python .claude/scripts/smoke.py
         [--seconds 40] [--spec docs/examples/spec-random.json] [--seed 1]
 
 Runs a strategy spec (default: the random one) on the spec's own pair;
-`expires_at` is moved to 3 days ahead so stale/example specs pass validation.
-`--seed` fixes the `random_chance` draws. `dry` loads `.env` and needs
-SOLANA_PRIVATE_KEY + HELIUS_RPC_URL; it simulates the send, never trades.
+`--seed` fixes the `random_chance` draws. The report comes from
+`ledger_dump.py` (the CLI has no ledger commands).
 """
 
 import argparse
@@ -22,17 +21,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from spec_check import refresh_expiry  # sibling script (its dir is on sys.path)
-
 ROOT = Path(__file__).resolve().parents[2]
-LIMITS = "max_trade_usd = 1000\nmax_daily_notional_usd = 100000\n"
-POLICY = f"[paper.limits]\n{LIMITS}max_trades_per_hour = 1000\n\n[dry.limits]\n{LIMITS}"
+# o random opera quase a cada tick: mais folga que o padrão do paper
+POLICY = "[paper.limits]\nmax_daily_notional_usd = 100000\nmax_trades_per_hour = 1000\n"
 ERROR_MARKERS = ("ERROR", "Traceback")
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--mode", choices=["paper", "dry"], default="paper")
     parser.add_argument("--seconds", type=int, default=40)
     parser.add_argument(
         "--spec",
@@ -42,16 +38,6 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", default="1", help="seed for random_chance")
     return parser.parse_args()
-
-
-def _prepare_spec(args: argparse.Namespace, workdir: Path) -> None:
-    path = refresh_expiry(args.spec, workdir)
-    args.spec_path = str(path)
-
-
-def _uv(mode: str, *cli: str) -> list[str]:
-    env_file = ["--env-file", ".env"] if mode == "dry" else []
-    return ["uv", "run", "--no-sync", *env_file, "main.py", *cli]
 
 
 def _decode(raw: bytes) -> str:
@@ -73,7 +59,8 @@ def _stop(proc: subprocess.Popen) -> None:
 
 
 def _run_bot(args: argparse.Namespace, workdir: Path, env: dict) -> str:
-    cmd = _uv(args.mode, "run", args.mode, args.spec_path, "--seed", args.seed)
+    cmd = ["uv", "run", "--no-sync", "main.py", "run", "paper", str(args.spec)]
+    cmd += ["--seed", args.seed]
     print("$", " ".join(cmd), flush=True)
     err_path = workdir / "err.txt"
     with open(workdir / "out.txt", "wb") as out, open(err_path, "wb") as err:
@@ -93,17 +80,12 @@ def _report_log(log: str) -> None:
     print("\n".join(errors[:10] or lines[-15:]))
 
 
-def _report_ledger(mode: str, env: dict) -> None:
-    reports = [("ledger list", "ledger", "list", mode, "--limit", "8")]
-    reports += [("pnl", "pnl", mode), ("ledger verify", "ledger", "verify", mode)]
-    if mode == "paper":
-        reports.append(("paper balance", "paper", "balance"))
-    for title, *cli in reports:
-        proc = subprocess.run(
-            _uv(mode, *cli), cwd=ROOT, env=env, capture_output=True, check=False
-        )
-        output = _decode(proc.stdout + proc.stderr)
-        print(f"--- {title}\n{output.strip()}")
+def _report_ledger(env: dict) -> None:
+    dump = [sys.executable, str(Path(__file__).with_name("ledger_dump.py"))]
+    proc = subprocess.run(
+        [*dump, "paper", "--limit", "8"], cwd=ROOT, env=env, capture_output=True
+    )
+    print(f"--- ledger\n{_decode(proc.stdout + proc.stderr).strip()}")
 
 
 def main() -> int:
@@ -119,9 +101,8 @@ def main() -> int:
         "PYTHONIOENCODING": "utf-8",
         "COLUMNS": "200",  # rich wraps the log at 80 columns otherwise
     }
-    _prepare_spec(args, workdir)
     _report_log(_run_bot(args, workdir, env))
-    _report_ledger(args.mode, env)
+    _report_ledger(env)
     print(f"--- state kept in {workdir}")
     return 0
 

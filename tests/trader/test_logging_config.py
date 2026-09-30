@@ -1,6 +1,10 @@
 import logging
+import os
+import subprocess
+import sys
 
 from trader import logging_config
+from trader.paths import PROJECT_ROOT
 
 
 def test_http_loggers_do_not_log_urls_with_secrets():
@@ -55,8 +59,8 @@ def test_console_filter_allows_bot_logs_and_warnings_only():
 
     assert f.filter(record("bot", logging.DEBUG))
     assert f.filter(record("trader.strategy_spec.strategy", logging.DEBUG))
-    assert not f.filter(record("trader.async_account", logging.INFO))
-    assert f.filter(record("trader.async_account", logging.WARNING))
+    assert not f.filter(record("trader.execution.account", logging.INFO))
+    assert f.filter(record("trader.execution.account", logging.WARNING))
 
 
 def test_file_lines_carry_the_bot_name(tmp_path):
@@ -117,3 +121,34 @@ def test_old_log_files_are_pruned(tmp_path):
         "paper-run-x.log",
         "trader-2-2.log",
     ]
+
+
+def test_an_error_escaping_the_real_cli_process_is_redacted(tmp_path):
+    # T3: o Typer reinstala o excepthook dele; só um processo de verdade mostra
+    # o que chega ao terminal
+    script = tmp_path / "boom.py"
+    script.write_text(
+        "import sys\n"
+        "import main\n"
+        "from trader.cli import app\n"
+        "@app.command('boom')\n"
+        "def boom():\n"
+        "    raise RuntimeError('https://mainnet.helius-rpc.com/?api-key=SEGREDO')\n"
+        "sys.argv = ['main.py', 'boom']\n"
+        "main.main()\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=PROJECT_ROOT,
+        env=os.environ | {"PYTHONPATH": str(PROJECT_ROOT)},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert proc.returncode == 1
+    assert "RuntimeError" in proc.stderr
+    assert "SEGREDO" not in proc.stderr + proc.stdout
+    assert "api-key=***" in proc.stderr

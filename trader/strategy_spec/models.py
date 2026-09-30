@@ -27,8 +27,6 @@ from pydantic import (
 from trader.indicators import to_utc
 from trader.models.public_data import Interval
 
-SPEC_VERSION = 1
-
 Window = Annotated[int, Field(ge=2, le=500)]
 # o schema publica número com limites e unidade (a validação ainda aceita
 # string, para decimais exatos): sem isso o ramo "string" não tinha limites

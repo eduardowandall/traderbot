@@ -28,7 +28,7 @@ class MarketData(Protocol):
     async def aclose(self) -> None: ...
 
 
-__all__ = ["JupiterMarketData", "MarketData", "candles_to_tickers"]
+__all__ = ["JupiterMarketData", "MarketData"]
 
 logger = logging.getLogger(__name__)
 

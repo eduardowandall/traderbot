@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 from factories import example_spec, make_spec
 
-from trader.models import SOLANA_MINTS, Order, OrderSide, Position, PositionType
+from trader.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
 from trader.strategy_spec.validate import SpecLimits, parse_spec, validate
@@ -27,12 +27,12 @@ def _strategy(**overrides) -> SpecStrategy:
 
 def _position(price="100") -> Position:
     order = Order("buy-1", USDC, SOL, Decimal(1), Decimal(price), OrderSide.BUY, T0)
-    return Position(PositionType.LONG, order, None)
+    return Position(order, None)
 
 
 def _signals(strategy, prices, position=None):
     return [
-        strategy.on_market_refresh(Decimal(str(p)), None, Decimal(100), position)
+        strategy.on_market_refresh(Decimal(str(p)), Decimal(100), position)
         for p in prices
     ]
 

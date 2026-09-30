@@ -7,30 +7,27 @@ from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentSide
 from trader.paths import PROJECT_ROOT
 from trader.policy import Policy, PolicyState, evaluate, load_policy
+from trader.policy.policy import PAPER_DEFAULTS
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 
 
-def _eval(intent=None, policy=None, state=None, halted=False, real_mode=False):
+def _eval(intent=None, policy=None, state=None, real_mode=False):
     return evaluate(
         intent or make_intent(),
         policy or Policy(),
         state or PolicyState(),
-        halted=halted,
         real_mode=real_mode,
     )
 
 
 class TestEvaluate:
-    def test_allows_a_small_dry_trade(self):
+    def test_allows_a_small_trade(self):
         decision = _eval()
         assert decision.allowed
         assert decision.reasons == ()
         assert decision.policy_version == "defaults"
-
-    def test_kill_switch(self):
-        assert "kill switch" in _eval(halted=True).reasons[0]
 
     def test_unlimited_has_no_budget_limits_but_keeps_safety(self):
         policy = Policy.unlimited()
@@ -43,7 +40,6 @@ class TestEvaluate:
         huge = make_intent(notional="1e9", spend_amount="1e9")
         assert _eval(huge, policy, busy).allowed
         assert _eval(make_intent(notional=None), policy).allowed
-        assert not _eval(policy=policy, halted=True).allowed
         assert not _eval(policy=policy, real_mode=True).allowed
 
     def test_real_mode_requires_opt_in(self):
@@ -110,12 +106,9 @@ class TestEvaluate:
         sell = make_intent(side=IntentSide.SELL, notional="1000")
         assert _eval(sell, state=state).allowed
 
-    def test_swaps_are_budgeted(self):
-        assert not _eval(make_intent(side=IntentSide.SWAP, notional="100")).allowed
-
     def test_collects_every_reason(self):
-        decision = _eval(make_intent(notional="1000"), halted=True, real_mode=True)
-        assert len(decision.reasons) == 4
+        decision = _eval(make_intent(notional="1000"), real_mode=True)
+        assert len(decision.reasons) == 3
 
 
 class TestLoadPolicy:
@@ -161,12 +154,19 @@ class TestLoadPolicy:
             load_policy(path)
 
 
-@pytest.mark.parametrize("mode", [None, "real", "dry", "paper"])
+@pytest.mark.parametrize("mode", [None, "real", "paper"])
 def test_example_policy_file_is_valid_and_documents_the_defaults(mode):
     # o exemplo é o que o dono copia para `policy.toml`: precisa ser TOML
-    # válido e, sem seções por modo ativas, bater com os padrões do código
+    # válido e, sem chaves ativas, bater com os padrões do código
     example = PROJECT_ROOT / "policy.example.toml"
-    assert load_policy(example, mode=mode) == Policy()
+    expected = Policy(**PAPER_DEFAULTS) if mode == "paper" else Policy()
+    assert load_policy(example, mode=mode) == expected
+    assert load_policy(PROJECT_ROOT / "missing.toml", mode=mode) == expected
+
+
+def test_dry_mode_is_gone():
+    with pytest.raises(ValueError, match="modo desconhecido"):
+        load_policy(mode="dry")
 
 
 def test_every_policy_field_has_a_parser():
@@ -206,11 +206,6 @@ class TestPerModePolicy:
         assert paper.version.endswith("/paper")
 
     def test_other_modes_keep_base_limits(self, tmp_path):
-        dry = self._load(tmp_path, "dry")
-        assert dry.max_daily_notional_usd == Decimal("100")
-        assert dry.max_trades_per_hour == 10
-        assert "/" not in dry.version
-
         real = self._load(tmp_path, "real")
         assert real.real_trading_enabled is True
         assert real.max_daily_notional_usd == Decimal("100")

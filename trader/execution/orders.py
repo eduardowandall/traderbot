@@ -7,8 +7,7 @@ da quote -> ordem com quantidade 0 e um ERROR no log.
 
 Convenção do `Order`: `input_mint` é o token de cotação e `output_mint` o
 token negociado, nos dois lados; `quantity` é do token, `quote_amount` da
-cotação. Um bucket passa o par dele; um swap manual passa (gasto, recebido,
-BUY).
+cotação.
 """
 
 import logging

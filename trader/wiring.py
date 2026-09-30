@@ -1,9 +1,9 @@
 """Montagem dos componentes por modo (camada app): chave, provider, gateway.
 
 É o único lugar que decide, a partir do modo, *onde* os swaps executam
-(on-chain com chave, dry run ou carteira simulada) e qual ledger/política
-valem. Estratégias e o bot não conhecem o modo: recebem os componentes já
-montados. `main.py` só chama estas funções.
+(on-chain com a chave, ou a carteira simulada do paper) e qual
+ledger/política valem. Estratégias e o bot não conhecem o modo: recebem os
+componentes já montados.
 """
 
 import os
@@ -45,8 +45,8 @@ def open_paper_wallet(
     if wallet.is_empty:
         wallet.reset(DEFAULT_PAPER_BALANCES)
         on_created(
-            f"Carteira paper criada com {DEFAULT_PAPER_BALANCES} "
-            "(mude com `main.py paper reset`)"
+            f"Carteira paper criada com {DEFAULT_PAPER_BALANCES} em "
+            f"{wallet.path} (apague o arquivo para recomeçar)"
         )
     return wallet
 
@@ -56,17 +56,10 @@ def build_provider(
     on_wallet_created: Callable[[str], None] = lambda message: None,
     **limits,
 ) -> AsyncJupiterProvider:
-    """Provider real/dry (com chave) ou paper (carteira simulada, sem chave)."""
+    """Provider real (com chave) ou paper (carteira simulada, sem chave)."""
     if mode == RunningMode.PAPER:
         return paper_provider(open_paper_wallet(on_wallet_created), **limits)
-    return AsyncJupiterProvider.on_chain(
-        keypair=keypair_from_env(), is_dryrun=mode == RunningMode.DRY, **limits
-    )
-
-
-def build_gateway(mode: RunningMode) -> TradeGateway:
-    """Política + ledger (um arquivo por modo) + kill switch."""
-    return TradeGateway.for_mode(mode)
+    return AsyncJupiterProvider.on_chain(keypair=keypair_from_env(), **limits)
 
 
 def build_trade_service(
@@ -81,4 +74,5 @@ def build_trade_service(
     provider = build_provider(mode, on_wallet_created, **limits)
     # preços USD pela Price API, no mesmo cliente Jupiter das quotes
     prices = JupiterPriceOracle(provider.jupiter_client)
-    return TradeService(provider, build_gateway(mode), mode=str(mode), prices=prices)
+    gateway = TradeGateway.for_mode(mode)  # política + ledger do modo
+    return TradeService(provider, gateway, mode=str(mode), prices=prices)

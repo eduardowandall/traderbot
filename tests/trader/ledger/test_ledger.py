@@ -1,12 +1,12 @@
-import threading
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from factories import make_intent
 
-import trader.ledger.store as ledger_module
 from trader.ledger import Ledger
+from trader.ledger.store import LedgerFormatError
 from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.models.intent import (
     IntentSide,
@@ -96,69 +96,6 @@ class TestIdempotency:
         assert ledger.find_by_idempotency_key("k2") is None
 
 
-class TestHashChain:
-    def test_intact_chain(self, ledger):
-        _executed(ledger, make_intent(), _order())
-        assert ledger.verify_chain() is None
-
-    def test_detects_tampering(self, ledger):
-        _executed(ledger, make_intent(), _order())
-        ledger.conn.execute("UPDATE events SET payload = '{}' WHERE id = 2")
-        assert ledger.verify_chain() == 2
-
-    def test_detects_deleted_event(self, ledger):
-        _executed(ledger, make_intent(), _order())
-        ledger.conn.execute("DELETE FROM events WHERE id = 1")
-        assert ledger.verify_chain() == 2
-
-    def test_concurrent_writers_do_not_fork_the_chain(self, tmp_path, monkeypatch):
-        # a CLI (`halt`) e os runners gravam no mesmo arquivo: um segundo
-        # processo que grava entre a leitura do último hash e o INSERT do
-        # primeiro não pode fazer os dois eventos apontarem para o mesmo
-        # prev_hash
-        path = tmp_path / "ledger.sqlite3"
-        real_hash = ledger_module._event_hash
-        other_writer: list[threading.Thread] = []
-
-        def other_process_writes():
-            with Ledger(path) as other:
-                other.add_event("halt", {"reason": "cli"})
-
-        def hash_then_let_other_write(*args):
-            if not other_writer:
-                other_writer.append(threading.Thread(target=other_process_writes))
-                other_writer[0].start()
-                # sem o lock, o outro escritor termina neste intervalo
-                other_writer[0].join(timeout=0.5)
-            return real_hash(*args)
-
-        monkeypatch.setattr(ledger_module, "_event_hash", hash_then_let_other_write)
-        with Ledger(path) as first:
-            first.add_event("resume", {"note": "bot"})
-            other_writer[0].join()
-            types = [r["type"] for r in first.conn.execute("SELECT type FROM events")]
-            assert sorted(types) == ["halt", "resume"]
-            assert first.verify_chain() is None
-
-
-class TestPositions:
-    def test_last_executed_trade_and_pnl(self, ledger):
-        _executed(ledger, make_intent(), _order())
-        sell = make_intent(side=IntentSide.SELL)
-        _executed(ledger, sell, _order(OrderSide.SELL, price="110"), Decimal("1"))
-        other = make_intent(account="dry:JUP-USDC")
-        _executed(ledger, other, _order())
-
-        last = ledger.last_executed_trade("dry:SOL-USDC")
-        assert last and last.intent.intent_id == sell.intent_id
-        assert ledger.total_realized_pnl("dry:SOL-USDC") == Decimal("1")
-        assert ledger.total_realized_pnl("dry:JUP-USDC") == Decimal("0")
-
-    def test_swaps_are_not_positions(self, ledger):
-        _executed(ledger, make_intent(side=IntentSide.SWAP), _order())
-        assert ledger.last_executed_trade("dry:SOL-USDC") is None
-
-
 class TestPolicyState:
     def test_aggregates(self, ledger):
         _executed(ledger, make_intent(notional="10"), _order())
@@ -184,7 +121,7 @@ class TestPolicyState:
         next_day = datetime.now(UTC) + timedelta(hours=25)
         assert ledger.policy_state(next_day).daily_notional_usd == Decimal("0")
 
-    def test_consecutive_failures_reset_by_success_and_resume(self, ledger):
+    def test_consecutive_failures_reset_by_success_and_restart(self, ledger):
         def fail():
             intent = make_intent()
             ledger.record_intent(intent, ALLOW)
@@ -196,8 +133,9 @@ class TestPolicyState:
         fail()
         assert ledger.policy_state().consecutive_failures == 2
 
-        ledger.add_event("resume", {})
-        assert ledger.policy_state().consecutive_failures == 0
+        # um processo novo só conta as falhas desde que começou
+        started = datetime.now(UTC)
+        assert ledger.policy_state(failures_since=started).consecutive_failures == 0
 
     def test_unresolved(self, ledger):
         executing, pending = make_intent(), make_intent()
@@ -205,59 +143,20 @@ class TestPolicyState:
             ledger.record_intent(intent, ALLOW)
         ledger.mark_unconfirmed(pending.intent_id, "timeout")
 
-        # executando agora (outro processo) não bloqueia; sem confirmação, sim
+        # executando agora em outra conta não bloqueia; sem confirmação, sim
         assert ledger.policy_state().unresolved_intent_ids == (pending.intent_id,)
+        # na própria conta, executando bloqueia sempre (T1)
+        own = ledger.policy_state(account=executing.account)
+        assert set(own.unresolved_intent_ids) == {
+            executing.intent_id,
+            pending.intent_id,
+        }
         later = datetime.now(UTC) + timedelta(minutes=6)
         state = ledger.policy_state(now=later)
         assert set(state.unresolved_intent_ids) == {
             executing.intent_id,
             pending.intent_id,
         }
-
-    def test_a_late_mark_never_overwrites_a_resolution(self, ledger, caplog):
-        intent = make_intent()
-        ledger.record_intent(intent, ALLOW)
-        ledger.mark_unconfirmed(intent.intent_id, "timeout")
-        ledger.resolve(intent.intent_id, IntentStatus.FAILED, "não saiu")
-
-        ledger.mark_executed(intent.intent_id, SwapResult("sig", USDC, SOL, 1, 2))
-
-        record = ledger.get(intent.intent_id)
-        assert record and record.status == IntentStatus.FAILED
-        assert "já está failed" in caplog.text
-
-    def test_resolve_can_record_a_missing_signature(self, ledger):
-        intent = make_intent()
-        ledger.record_intent(intent, ALLOW)  # fica executando, sem assinatura
-
-        ledger.resolve(intent.intent_id, IntentStatus.EXECUTED, "log", signature="abc")
-
-        record = ledger.get(intent.intent_id)
-        assert record and record.signature == "abc"
-
-
-class TestResolve:
-    def test_resolves_unconfirmed(self, ledger):
-        intent = make_intent()
-        ledger.record_intent(intent, ALLOW)
-        ledger.mark_unconfirmed(intent.intent_id, "timeout")
-
-        ledger.resolve(intent.intent_id, IntentStatus.FAILED, "não está no explorer")
-
-        record = ledger.get(intent.intent_id)
-        assert record.status == IntentStatus.FAILED
-        assert record.error == "não está no explorer"
-        assert ledger.policy_state().unresolved_intent_ids == ()
-
-    def test_rejects_invalid_resolutions(self, ledger):
-        intent = make_intent()
-        _executed(ledger, intent)
-        with pytest.raises(ValueError):
-            ledger.resolve(intent.intent_id, IntentStatus.FAILED, "x")
-        with pytest.raises(ValueError):
-            ledger.resolve(intent.intent_id, IntentStatus.DENIED, "x")
-        with pytest.raises(KeyError):
-            ledger.resolve("missing", IntentStatus.FAILED, "x")
 
 
 def test_persists_across_connections(tmp_path):
@@ -270,8 +169,62 @@ def test_persists_across_connections(tmp_path):
     second = Ledger(path)
     record = second.get(intent.intent_id)
     assert record and record.status == IntentStatus.EXECUTED
-    assert second.verify_chain() is None
     second.close()
+
+
+class TestPositions:
+    def test_realized_pnl_is_per_account(self, ledger):
+        _executed(ledger, make_intent(), _order())
+        sell = make_intent(side=IntentSide.SELL)
+        _executed(ledger, sell, _order(OrderSide.SELL, price="110"), Decimal("1"))
+        _executed(ledger, make_intent(account="paper:JUP-USDC"), _order())
+
+        assert ledger.pnl_totals("paper:SOL-USDC").net_usd == Decimal("1")
+        assert ledger.pnl_totals("paper:JUP-USDC").net_usd == Decimal("0")
+
+    def test_a_late_mark_never_overwrites_a_final_status(self, ledger, caplog):
+        intent = make_intent()
+        ledger.record_intent(intent, ALLOW)
+        ledger.mark_failed(intent.intent_id, "não saiu")
+
+        assert not ledger.mark_executed(
+            intent.intent_id, SwapResult("sig", USDC, SOL, 1, 2)
+        )
+
+        record = ledger.get(intent.intent_id)
+        assert record and record.status == IntentStatus.FAILED
+        assert "já está failed" in caplog.text
+        # e a ordem (com PnL) de um swap que não conta não é gravada nela (T4)
+        with pytest.raises(ValueError, match="não executed"):
+            ledger.attach_order(intent.intent_id, _order(), Decimal("5"))
+        assert ledger.pnl_totals(intent.account).net_usd == Decimal("0")
+
+
+class TestEvents:
+    def test_every_step_is_logged(self, ledger):
+        _executed(ledger, make_intent(), _order())
+        rows = ledger.conn.execute("SELECT type FROM events ORDER BY id")
+        types = [r["type"] for r in rows]
+        assert types == ["intent_executing", "intent_executed", "order_recorded"]
+
+    def test_two_connections_write_to_the_same_log(self, tmp_path):
+        path = tmp_path / "ledger.sqlite3"
+        with Ledger(path) as first, Ledger(path) as second:
+            first.add_event("a", {})
+            second.add_event("b", {})
+            types = [r["type"] for r in first.conn.execute("SELECT type FROM events")]
+        assert types == ["a", "b"]
+
+
+def test_an_old_format_file_is_refused(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE intents (intent_id TEXT PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(LedgerFormatError, match="mova ou apague"):
+        Ledger(path)
 
 
 class TestRepeatedDenials:
@@ -291,14 +244,13 @@ class TestRepeatedDenials:
         assert record.status == IntentStatus.DENIED
         assert record.repeat_count == 2
         assert self._events(ledger) == events  # repetições não viram eventos
-        assert ledger.verify_chain() is None
 
     def test_other_reasons_sides_and_accounts_are_new_rows(self, ledger):
         other = PolicyDecision(False, ("limite de 10 trades por hora atingido",))
         ledger.record_intent(make_intent(), self.TOO_BIG)
         ledger.record_intent(make_intent(), other)
-        ledger.record_intent(make_intent(side=IntentSide.SWAP), other)
-        ledger.record_intent(make_intent(account="dry:JUP-USDC"), other)
+        ledger.record_intent(make_intent(side=IntentSide.SELL), other)
+        ledger.record_intent(make_intent(account="paper:JUP-USDC"), other)
 
         records = ledger.list_intents()
         assert len(records) == 4

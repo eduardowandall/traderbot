@@ -6,7 +6,6 @@ from decimal import Decimal
 
 from trader.ledger.store import LedgerStore, _int
 from trader.models import SOLANA_MINTS
-from trader.models.costs import LAMPORTS_PER_SOL
 from trader.models.intent import IntentStatus
 
 
@@ -28,24 +27,7 @@ class AccountPnL:
     priority_fee_lamports: int = 0
     rent_lamports: int = 0
     other_lamports: int = 0
-    failed_fee_lamports: int = 0  # taxas de transações que falharam
     unknown_costs: int = 0  # pernas cujos custos reais não foram obtidos
-
-    def __post_init__(self) -> None:
-        # linhas antigas não têm quote_mint: o par está no nome da conta
-        # (ex: "paper:SOL-USDC" -> USDC)
-        if self.quote_symbol == "?" and "-" in self.account:
-            self.quote_symbol = self.account.rsplit("-", 1)[1]
-
-    @property
-    def paid_sol(self) -> Decimal:
-        paid = (
-            self.fee_lamports
-            + self.rent_lamports
-            + self.other_lamports
-            + self.failed_fee_lamports
-        )
-        return Decimal(paid) / LAMPORTS_PER_SOL
 
     def add(self, row: sqlite3.Row) -> None:
         self.trades += 1
@@ -63,7 +45,7 @@ class AccountPnL:
         self.closed += 1
         self.net_usd += Decimal(row["realized_pnl_usd"])
         if row["gross_pnl_quote"] is None:
-            self.incomplete += 1  # ordem antiga, sem valores nativos
+            self.incomplete += 1  # venda sem valores nativos
             return
         gross = Decimal(row["gross_pnl_quote"])
         self.gross_quote += gross
@@ -75,36 +57,12 @@ class AccountPnL:
 
 class Reports(LedgerStore):
     def pnl_totals(self, account: str) -> AccountPnL:
-        return self.pnl_report(account).get(account) or AccountPnL(account)
-
-    def pnl_report(self, account: str | None = None) -> dict[str, AccountPnL]:
-        """PnL e custos por conta, a partir das intenções executadas."""
-        query = "SELECT * FROM intents WHERE status = ?"
-        params: tuple = (str(IntentStatus.EXECUTED),)
-        if account is not None:
-            query += " AND account = ?"
-            params += (account,)
-        report: dict[str, AccountPnL] = {}
-        for row in self.conn.execute(query + " ORDER BY created_at", params):
-            report.setdefault(row["account"], AccountPnL(row["account"])).add(row)
-        self._add_failed_fees(report, account)
-        return report
-
-    def _add_failed_fees(self, report: dict, account: str | None) -> None:
-        rows = self.conn.execute(
-            "SELECT account, fee_lamports FROM intents WHERE status != ? "
-            "AND fee_lamports IS NOT NULL",
-            (str(IntentStatus.EXECUTED),),
-        ).fetchall()
-        for row in rows:
-            if account is None or row["account"] == account:
-                entry = report.setdefault(row["account"], AccountPnL(row["account"]))
-                entry.failed_fee_lamports += row["fee_lamports"]
-
-    def total_realized_pnl(self, account: str) -> Decimal:
-        rows = self.conn.execute(
-            "SELECT realized_pnl_usd FROM intents WHERE account = ? "
-            "AND realized_pnl_usd IS NOT NULL",
-            (account,),
-        ).fetchall()
-        return sum((Decimal(r["realized_pnl_usd"]) for r in rows), Decimal("0"))
+        """PnL e custos da conta, a partir das intenções executadas."""
+        totals = AccountPnL(account)
+        for row in self.conn.execute(
+            "SELECT * FROM intents WHERE status = ? AND account = ? "
+            "ORDER BY created_at",
+            (str(IntentStatus.EXECUTED), account),
+        ):
+            totals.add(row)
+        return totals

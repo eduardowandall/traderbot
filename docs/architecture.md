@@ -1,424 +1,174 @@
-# Architecture: a guided tour
+# Architecture: follow one trade
 
-This is a step-by-step walk through the project for a human reader. Read it
-top to bottom:
+This document explains the code by following **one paper buy** from the command
+line to the wallet and back, hop by hop. Read §3 first; the rest fills in what
+changes for sells, real mode and backtests, and where the state lives.
 
-- Steps 1–3 give you the vocabulary and the map.
-- Steps 4–7 follow one trade from the command line to the blockchain and back.
-- Steps 8–10 cover the other paths (modes, backtest), where the state lives, and
-  the safety nets.
-- Step 11 is the architecture this project is moving toward.
-
-The code is the source of truth; this document names functions rather than line
-numbers so it doesn't go stale. The roadmap, progress and open issues live in
-[`plan.md`](plan.md).
+Line numbers are as of 2026-09-30 and will drift; the function names are the
+stable handle. The roadmap and open issues are in [`plan.md`](plan.md); the
+finished stages are in [`history.md`](history.md).
 
 ---
 
-## Step 1 — What the bot is
+## 1. The bot in one paragraph
 
-A long-only trading bot for Solana tokens. It swaps through the **Jupiter** DEX
-aggregator. A **strategy** looks at every price tick and says "buy", "sell" or
-nothing. Every order then passes through a **policy** (risk limits the owner
-sets) and is written to a **ledger** (a SQLite audit log) before and after it
-executes.
-
-It holds at most one position per pair: it buys the token with a stablecoin,
-then later sells all of it back.
-
-## Step 2 — Vocabulary
+A long-only bot for Solana tokens that swaps through the **Jupiter** DEX
+aggregator. A **strategy** (always a JSON spec, `trader/strategy_spec/`) looks at
+each price tick and says buy, sell or nothing. Each order becomes a
+**TradeIntent**, is checked by the owner's **policy** (`policy.toml`) and is
+written to a **ledger** (SQLite, one file per mode) before and after it
+executes. One position per bucket at a time; each spec trades in its own
+**bucket** (`strategy:<spec_id>`) with its own budget.
 
 | Term | Meaning |
 |---|---|
-| **Mint** | A token's on-chain address. Known tokens are listed in `SOLANA_MINTS` (`trader/models/mints.py`) with their symbol and decimals. |
-| **Symbol / pair** | `OUTPUT-INPUT`. `SOL-USDC` means "buy SOL, paying with USDC". The input is what you hold, the output is what you buy. |
-| **UI vs raw amount** | `1.5` USDC (UI) is `1500000` raw (6 decimals). `Mint.ui_to_raw` / `raw_to_ui` convert between them. On-chain and Jupiter use raw amounts. |
-| **Mode** | `real` (signs and sends), `dry` (real wallet; simulates the transaction, never sends), `paper` (simulated wallet file, real Jupiter quotes, no key needed). |
-| **Signal** | `OrderSignal(side, quantity)`: what a strategy returns. |
-| **Intent** | `TradeIntent`: a request to spend X of one mint for another. Every swap starts as one. |
-| **Order / Position** | `Order` is an executed fill. `Position` is an entry order plus, eventually, an exit order. It computes PnL. |
-| **Ledger** | SQLite database per mode: an `intents` table plus an append-only, hash-chained `events` table. |
-| **Policy** | The owner's limits (`policy.toml`): per-trade and daily USD caps, trades per hour, loss stop, allowed symbols, real mode on/off. |
+| Pair `OUTPUT-INPUT` | `SOL-USDC` buys SOL paying USDC. The input is the quote token. |
+| UI vs raw | `1.5` USDC is `1500000` raw. `Mint.ui_to_raw` / `raw_to_ui` (`trader/models/mints.py`). |
+| Mode | `paper` (simulated wallet file, real quotes, no key) or `real` (signs and sends). |
+| Signal → request → intent → order | `OrderSignal` (strategy) → `OrderRequest` (bot to service) → `TradeIntent` (ledger row) → `Order` (the fill). |
 
-## Step 3 — The folder map
+## 2. The map, by layer
 
-```
-main.py                         entrypoint: `from trader.cli import app` + logging
-trader/cli/                     owner CLI (Typer): bot.py (run, backtest), swap.py, safety.py (halt, resume), ledger.py, pnl.py, paper.py, common.py
-policy.toml / policy.example.toml   owner's risk policy (TOML)
-trader/
-  __init__.py                   empty on purpose: every `import trader.x` loads it
-  paths.py                      data_dir() and policy_file(): where all state lives
-  wiring.py                     the only place that turns a mode into components: key, provider, gateway, trade service
-  indicators.py                 pure Decimal indicators (sma/ema/wma/rsi/volatility/...) + BarSeries
-  logging_config.py             console + file logging setup
-  models/                       plain data types, no I/O
-    mints.py                    SOLANA_MINTS registry, Mint (decimals, UI/raw conversion)
-    order.py                    OrderSide, OrderSignal, SwapResult, Order
-    position.py                 Position and its PnL math
-    book.py                     PositionBook: a bucket's open position and realized PnL totals
-    intent.py                   TradeIntent, PolicyDecision, IntentRecord, IntentStatus
-    costs.py                    TradeCosts (network fee, rent), PnLResult, trade_rates
-    public_data.py              TickerData (a candle), Interval (15s / 1m / 1h timeframes)
-    account_data.py             MintBalance
-    mode.py                     RunningMode (real / dry / paper)
-    errors.py                   SwapRejectedError, TransactionSubmittedError (shared by every layer)
-  trading_strategy.py           TradingStrategy base (clock, rng, setup, on_market_refresh); every strategy is a spec
-  strategy_spec/                declarative strategies written by agents (JSON specs)
-    models.py                   StrategySpec + the condition catalogue (pydantic), spec_id()
-    conditions.py               IndicatorBank, TickContext, PREDICATES (one pure function per condition type)
-    strategy.py                 SpecStrategy: runs a spec as a TradingStrategy
-    validate.py                 parse_spec, validate(spec, SpecLimits)
-  market/data.py                MarketData protocol + JupiterMarketData (read-only: no key, no RPC)
-  market/prices.py              PriceOracle + JupiterPriceOracle (Price API V3) + usd_snapshot (never raises)
-  agent_api/                    what agents call: market.py, strategies.py, cli.py (JSON output), output.py
-  bot/                          strategy side: knows no mode, key, ledger or provider
-    config.py                   BotConfig(name, symbol, strategy, market, trader, notifier, on_tick)
-    async_websocket_bot.py      the loop: price (MarketData) -> strategy -> order (TradeClient)
-  trading_service/              the seam between strategies and execution
-    protocol.py                 BucketSnapshot, OrderRequest, OrderReply (plain data)
-    client.py                   TradeClient protocol (one bucket): open / bucket / submit / aclose
-    service.py                  TradeService: buckets (budget caps), serialized orders, reply classification
-    local.py                    LocalTradeClient: TradeClient for a TradeService in the same process
-  async_account.py              AsyncAccount: one bucket's balances, sizing and intents; fill -> Order; its book is models/book.py
-  execution/gateway.py          TradeGateway (the only path to a swap and to the ledger) + KillSwitch
-  execution/fills.py            execute_trade: gateway, then costs -> Fill (every trade)
-  policy/policy.py              Policy, pure evaluate(), TOML loader
-  ledger/                       Ledger (SQLite) facade over store.py (schema, event chain), intents.py, reports.py, policy_state.py
-  providers/jupiter/
-    async_jupiter_client.py     Jupiter HTTP (quote, swap tx, candles) + price websocket
-    candles.py                  raw datapi candles -> TickerData (shared by market data and the provider)
-    async_rpc_client.py         Solana RPC (Helius): balances, sign, simulate, send, confirm
-    async_jupiter_svc.py        AsyncJupiterProvider: quotes, price-impact cap, retries, unit conversion, costs
-    executor.py                 Executor protocol + OnChainExecutor (swap tx, sign, simulate, send, confirm)
-    swap_costs.py               reads the real amounts and fees from a confirmed transaction
-    jupiter_data.py             Jupiter response dataclasses
-  paper/                        SimulatedWallet (.data/paper-wallet.json) + SimulatedExecutor + paper_provider()
-  backtest/                     tick recording/loading + Backtester (replays ticks with synthetic quotes)
-  notification/                 Null / Telegram notifications
-tests/                          mirrors trader/ (tests/trader/...), plus tests/test_main.py
-docs/                           plan.md (roadmap), this file, examples/ (spec-random, spec-target-value, spec-wma-composer, spec-sol-dip)
-```
+Each module belongs to one layer and may only import the layers below it;
+`tests/test_architecture.py` enforces it. **Strategy code never imports
+execution, venue or risk**, so a strategy can't reach the key, the ledger or the
+policy.
 
-## Step 4 — Starting the bot (`main.py run`)
+| Layer | What | Modules |
+|---|---|---|
+| app | commands and wiring | `main.py`, `trader/cli/` (`run`, `backtest`), `trader/wiring.py` (mode -> components), `trader/backtest/`, `trader/notification/` |
+| strategy-side | the loop that knows no mode, key or ledger | `trader/bot/` (`async_websocket_bot.py`, `decision.py`, `config.py`), `trading_service/client.py` |
+| strategy | specs: pure signals | `trader/strategy_spec/` |
+| execution | buckets, the account, the one path to a swap | `trading_service/service.py` + `local.py`, `trader/execution/` (`account.py`, `gateway.py`, `fills.py`, `orders.py`) |
+| risk | limits and the audit log | `trader/policy/`, `trader/ledger/` |
+| venue | moves funds | `providers/jupiter/async_jupiter_svc.py` (provider), `executor.py` + `async_rpc_client.py` (real), `trader/paper/` (paper) |
+| market | read-only prices and candles | `trader/market/`, `providers/jupiter/async_jupiter_client.py`, `candles.py` |
+| core | plain data | `trader/models/`, `trading_service/protocol.py`, `trader/indicators.py`, `trader/paths.py`, `trader/logging_config.py` |
 
-Example: `uv run main.py run paper docs/examples/spec-random.json --seed 1`
+## 3. One paper buy, hop by hop
 
-`run` (`trader/cli/bot.py`) builds two separate sides and connects them:
+`uv run main.py run paper docs/examples/spec-sol-dip.json`
 
-1. **The strategy.** `load_spec_strategy(file, seed)` (`trader/cli/common.py`)
-   reads the spec into a `SpecStrategy`, the only kind of strategy; the pair
-   is the spec's `symbol`. `_check_limits` validates it against the mode's
-   policy, and it runs in the bucket `strategy:<spec_id>`.
-2. **The execution side.** `build_trade_service(mode)` (`trader/wiring.py`)
-   is the only place that looks at the mode. It builds:
-   - a **provider** (`build_provider`):
-     - `paper`: `paper_provider(wallet)`, a `SimulatedExecutor` over the
-       `SimulatedWallet`, with no key;
-     - otherwise: `AsyncJupiterProvider.on_chain(keypair, is_dryrun=...)`,
-       where the key comes from `SOLANA_PRIVATE_KEY`;
-   - a **gateway** (`TradeGateway.for_mode(mode)`), made of the mode's
-     ledger (`data_dir()/ledger-<mode>.sqlite3`), the mode's policy and the
-     `KillSwitch` (`data_dir()/HALT`);
-   - a **`TradeService`** over the two.
-3. **The connection.** A `LocalTradeClient` binds the service to one
-   **bucket** named after the pair. Its ledger account stays
-   `"<mode>:<pair>"`, as it always was.
-4. **The bot.** `BotConfig(name, symbol, strategy, market=JupiterMarketData(),
-   trader=<the client>, notifier, on_tick)` goes into
-   `AsyncWebsocketTradingBot(config).run()`. The bot gets a price source and
-   a trade client, and **never** a mode, key, provider or ledger.
+### Startup (once)
 
-## Step 5 — Startup and the tick loop (`trader/bot/async_websocket_bot.py`)
+| # | Where | What happens | Why it exists |
+|---|---|---|---|
+| S1 | `main.py:11` `main` | Sets up logging, runs the Typer app; an escaping error is printed through `redacted_excepthook`. | Typer's own hook would print the Helius key. |
+| S2 | `trader/cli/bot.py:35` `run` | Loads the spec, validates it against the paper policy (`_check_limits`), builds everything. | Refuse a spec that could never trade. |
+| S3 | `trader/wiring.py:65` `build_trade_service` | paper → `paper_provider(SimulatedWallet)`; real → `AsyncJupiterProvider.on_chain(key)`. Adds `TradeGateway.for_mode` (ledger + policy) and the USD price oracle. | The **only** place a mode turns into components. |
+| S4 | `trader/cli/bot.py:60` | `LocalTradeClient(service, "strategy:<spec_id>", ...)`, then `AsyncWebsocketTradingBot(BotConfig(...))`. | The bot only ever sees its bucket (`TradeClient`); B3 will swap in a socket client. |
+| S5 | `trader/bot/async_websocket_bot.py:156` `_startup` | `trader.open()` → `TradeService.open_bucket` (`service.py:83`): marks `bucket_opened` once, rebuilds the position and PnL from the ledger (`AsyncAccount.restore_from_ledger` → `TradeGateway.restore`, `gateway.py:177`), reconciles against the wallet. | A restart continues where it stopped. |
+| S6 | `async_websocket_bot.py:173` `_resume_strategy` | `strategy.resume(last_exit_at, opened_at, last_exit_price)`. | Cooldown, re-arm and `ttl_days` survive restarts. |
+| S7 | `async_websocket_bot.py:156` | Fetches `strategy.warmup()` candles and seeds the indicators (`strategy.setup`). | Entries wait for converged indicators. |
 
-**Startup (`_startup`):**
-1. `trader.open()` opens the bucket on the execution side
-   (`TradeService.open_bucket`).
-   - It restores the open position and the PnL totals through
-     `gateway.restore(account)`, so a restart does not forget a position.
-   - When the venue's balances reflect our own fills (real and paper; not
-     dry), it reconciles the position against the wallet. A mismatch is
-     logged as an event.
-2. `strategy.setup(candles)` warms the strategy up. The candles come from
-   `market.get_candles(...)`, sized by `strategy.warmup()` when the strategy
-   has one (specs do); otherwise 100 15-second candles.
+### Each tick
 
-**Each tick (`_tick` → `process_market_data`):**
-1. `market.get_price(output_mint)` reads the next price from the Jupiter
-   websocket (in USD). If the websocket fails or is quiet for 30s, the price
-   comes from the documented Price API V3 instead, so the loop (and its
-   stops) keeps running.
-2. `trader.bucket()` returns a `BucketSnapshot`: what the bucket may spend
-   (`available_usd`), the position, the realized PnL and the status. A
-   `retiring` status stops the bot.
-3. `strategy.on_market_refresh(price, spread, available_usd, position)`
-   returns an `OrderSignal` or `None`.
-4. If there is a signal and orders are not paused, the bot calls
-   `trader.submit(OrderRequest(...))`, which returns an `OrderReply`, and
-   sleeps 2s after a fill so the wallet can settle.
+| # | Where | What happens | Why it exists |
+|---|---|---|---|
+| 1 | `async_websocket_bot.py:181` `_tick` | Price from `MarketData.get_price` (websocket, Price API fallback), then `trader.bucket()` → `TradeService.get_bucket` (`service.py:143`): available USD = `min(spendable, budget cap)`, position, PnL. | The strategy sizes against what the bucket may spend. |
+| 2 | `async_websocket_bot.py:65` `process_market_data` → `trader/bot/decision.py:23` `order_for` | `SpecStrategy.on_market_refresh` (`strategy_spec/strategy.py:95`) returns `OrderSignal(BUY, usd / price)` (`_entry`, `:173`), wrapped as an `OrderRequest`. | The same decision code runs in the backtest. |
+| 3 | `trading_service/local.py:45` → `service.py:163` `submit_order` | Refuses buys on a retiring bucket, takes the order lock. | Buckets share one wallet; orders go one at a time. |
+| 4 | `service.py:192` `_place` → `:206` `_execute` | Dispatches on side: `account.buy(..., limit_usd=self._cap(bucket))`. Any exception becomes an `OrderReply` (denied / rejected / error), logged once. | Nothing from execution crosses into the strategy side as an exception. |
+| 5 | `trader/execution/account.py:342` `buy` → `:311` `_buy_limit` | One balance read; checks no open position, the minimum, the SOL fee reserve and the bucket cap; computes `spend = quantity * price` once (capped). | Budget and wallet limits in one place. |
+| 6 | `account.py:259` `_usd_snapshot`, `:262` `_intent` | Price API snapshot for what the trade can't price itself, **before** the trade; builds the `TradeIntent` (spend amount, USD notional, idempotency key). | After EXECUTED nothing may fail, so no fetch happens later. |
+| 7 | `trader/execution/fills.py:39` `execute_trade` | The one pipeline for every trade: `gateway.submit`, then costs. | Enforces the order "EXECUTED first, costs second". |
+| 8 | `trader/execution/gateway.py:214` `submit` → `:238` `_authorize` → `trader/ledger/ledger.py:34` `authorize` | In one `BEGIN IMMEDIATE` transaction: idempotency lookup, `policy_state()` (daily notional, trades/hour, loss, breaker since this process started, unresolved intents), `policy.evaluate` (`policy/policy.py:294`, pure), insert the intent as EXECUTING or DENIED. | Two processes can never pass the same limit or reuse a key. |
+| 9 | `gateway.py:254` `_execute` → `providers/jupiter/async_jupiter_svc.py:98` `buy` → `:151` `_do_swap_with_retry` → `:210` `_do_swap` | Raw amount from the intent's spend; quote (`:179`), price-impact cap (`:196`), up to 3 attempts with rising slippage and a 60s deadline. | Retries are safe only before broadcast. |
+| 10 | `trader/paper/executor.py:57` `SimulatedExecutor.execute` → `paper/wallet.py:94` `apply_swap` | Under a file lock: re-read, debit input + fee + first-time rent, credit output, write atomically. Returns a `SwapResult` with the simulated costs. | Paper behaves like the chain (fees, rent) across processes. |
+| 11 | `trader/ledger/intents.py:142` `mark_executed` | EXECUTING → EXECUTED with the signature and amounts. A failure here leaves the row EXECUTING, which blocks the account. | Fail closed: never buy twice after an unrecorded swap. |
+| 12 | `async_jupiter_svc.py:222` `fetch_swap_costs` (from `fills.py`) | Real mode reads the confirmed transaction; paper already has the costs. Never raises. | Costs are recorded, never assumed. |
+| 13 | `account.py:174` `_to_order` → `trader/execution/orders.py:33` `order_from_fill` | Real amounts, else the quote's; USD rates; never raises. | A trade that happened is never lost. |
+| 14 | `account.py:194` `_record_fill` → `gateway.py:197` `record_fill` → `intents.py:179` `attach_order` | Stores the order JSON, cost and PnL columns on the (EXECUTED) row; a failure is logged, not raised. `book.open(order)` (`models/book.py:99`) opens the position in memory. | The ledger is the truth; the book is its in-memory copy. |
+| 15 | `service.py:163` (after `_place`) | `_check_max_loss`: realized loss past `max_loss_usd` retires the bucket; `_close_if_retiring` (`:173`) sells a leftover once per order. | Exits don't depend on the strategy. |
+| 16 | `async_websocket_bot.py:77` `_handle_reply`, `:194` `_report_order` | Filled → log and Telegram. Denied/rejected → pause orders 30s. Error → loop backoff. | The strategy keeps getting prices while orders pause. |
 
-**Replies and errors:**
-- A `denied` reply (policy, duplicate) or a `rejected` one (balance, budget,
-  price impact) pauses new orders for 30s (`denial_cooldown`). The strategy
-  keeps getting prices.
-- An `error` reply raises `TradeServiceError`. That error, and any other
-  error in the loop, retries with exponential backoff from 1s up to 60s.
+A **sell** takes the same path with `account.sell` (`account.py:386`): the
+quantity is capped at the position and at the wallet, the idempotency key is
+fixed per position (`<account>:sell:<entry order>:<qty>`), the intent records
+whether it closes the position, budget rules don't apply, and
+`book.close`/`book.reduce` compute the realized PnL.
 
-## Step 5b — Buckets (`trader/trading_service/service.py`)
+## 4. Where state lives
 
-A bucket is one strategy's slice of the wallet: its own `AsyncAccount`,
-ledger account (`"<mode>:<name>"`), position and PnL, plus an optional USD
-budget.
+| State | Where | Notes |
+|---|---|---|
+| Intents, orders, PnL, events | `data_dir()/ledger-<mode>.sqlite3` (`trader/ledger/`) | **The source of truth.** One schema, versioned by `PRAGMA user_version`; an older file is refused (move or delete it). |
+| Position and PnL totals of a bucket | `AsyncAccount.book` (`models/book.py`) | Rebuilt from the ledger at startup (`gateway.restore`), then kept in step by each fill. |
+| Signal state (entry price, peak, cooldown, re-arm, expiry) | `SpecStrategy` | Restored through `resume()` from the bucket snapshot. |
+| Paper balances | `data_dir()/paper-wallet.json` (`paper/wallet.py`) | Created with 100 USDC + 0.5 SOL; delete it to start over. |
+| Policy | `policy_file()` (`policy.toml`, untracked) | Model: `policy.example.toml`. Paper has roomy limits by default. |
+| Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. |
 
-- **What it may spend:** `available = min(spendable balance, max(0, budget +
-  min(0, realized PnL)))`. A realized loss shrinks the budget; a profit does
-  not grow it.
-- **Shared wallet:** every capped buy re-reads the wallet balance, and orders
-  run one at a time (`asyncio.Lock`). So buckets that share a wallet can
-  never spend the same USDC twice.
-- **Replies:** `submit_order` turns the outcome into an `OrderReply`, so no
-  execution exception reaches the strategy side:
+`trader/paths.py` resolves all of them from `TRADER_DATA_DIR` /
+`TRADER_POLICY_FILE` / `TRADER_LOG_DIR` (relative to the project root), never
+from the current directory. To look at a ledger:
+`uv run --no-sync python .claude/scripts/ledger_dump.py paper`.
 
-  | Outcome | Status |
-  |---|---|
-  | policy denial / duplicate intent | `denied` |
-  | nothing executed (`ValueError`, `SwapRejectedError`) | `rejected` |
-  | anything else | `error` |
+## 5. Real mode: what changes
 
-- **Closing:** `close_bucket` sells the open position, and does nothing if
-  there is none.
+Only hop 10 and hop 12. `OnChainExecutor.execute`
+(`providers/jupiter/executor.py:103`) gets the swap transaction from Jupiter,
+signs, simulates, sends and waits for confirmation (`async_rpc_client.py`,
+Helius). After `send_transaction`, any failure is a
+`TransactionSubmittedError`: the intent becomes UNCONFIRMED, it is never
+retried, and it blocks the mode's trading until the owner checks the chain
+and moves or deletes the ledger. `fetch_costs` (`executor.py:182`) parses the
+confirmed transaction (`swap_costs.py`) for the real amounts, fee and rent.
+Real mode is denied unless `real_trading_enabled = true`.
 
-## Step 6 — From signal to swap
+## 6. Backtest: what changes
 
-**`AsyncAccount` (`trader/async_account.py`)**, the bucket's account, turns
-the order into an intent. Its position and PnL live in `account.book`, a
-`PositionBook` (`trader/models/book.py`, plain data):
-- **`buy`:**
-  - refuses if a position is already open or the balance is below the minimum;
-  - caps the amount at the spendable balance and at the bucket cap
-    (`spend_cap`). The spendable balance keeps the venue's SOL fee reserve
-    when SOL is spent (`provider.native_fee_reserve`: 0.02 SOL on-chain and
-    in paper, 0 in backtests);
-  - builds a `TradeIntent` that carries the order's `rationale` and, when
-    given, its idempotency key.
-- **`sell`:**
-  - caps the quantity at what the wallet actually holds;
-  - uses a fixed idempotency key per position, so one entry can never be sold
-    twice.
-- **Notional:** the intent's USD value (`notional_usd`). A sell is its
-  quantity times the signal's USD price. A buy is the amount spent, times the
-  USD price of the token spent (1 for USDC/USDT; otherwise from a Price API
-  snapshot, `trader/market/prices.py`). The snapshot is taken **before** the
-  trade and never raises; if it has no price, the value is `None` and the
-  policy denies the buy by default. The same snapshot gives the SOL price for
-  pairs without SOL, so their costs get a USD value.
+`uv run main.py backtest spec.json` → `trader/backtest/spec.py:39`
+`backtest_spec`: candles (or a `--record-ticks` file) become ticks, each closed
+bar an interpolated path (rising bar open → low → high → close, falling bar
+open → high → low → close; `backtest/ticks.py`), and too few bars for the
+warm-up is an error. `Backtester` (`backtest/replay.py`) then runs hops 1–16
+with three substitutions:
 
-**`TradeGateway.submit(intent, execute)` (`trader/execution/gateway.py`)** is
-the **only** path to a swap:
-1. **Idempotency:** if this key already moved funds, it raises
-   `DuplicateIntentError`.
-2. **Policy:** it calls `evaluate(intent, policy, ledger.policy_state(),
-   halted=..., real_mode=...)`, a pure function with no I/O (see the checks
-   below).
-3. **Ledger:** it records the intent, as denied or as executing. A denial
-   raises `PolicyDeniedError`.
-4. **Execute:** it runs the swap.
-   - **Success:** the intent is marked `EXECUTED`.
-   - **Failure before broadcast:** it is marked `FAILED`, which is safe to
-     retry.
-   - **Failure after broadcast, or Ctrl+C mid-swap:** it is marked
-     `UNCONFIRMED`. That blocks **all** trading until the owner runs
-     `ledger resolve`.
+- quotes come from `ReplayQuoteClient` (tick price minus `fee_bps +
+  slippage_bps`);
+- the wallet is an in-memory `SimulatedWallet` with the spec's `budget_usd`;
+- the gateway is `TradeGateway.in_memory()` (in-memory ledger, no policy
+  limits, since ledger timestamps are wall-clock).
 
-`evaluate` applies two kinds of checks:
-- **Safety checks, for every intent:** kill switch, real mode enabled,
-  unresolved intents, circuit breaker, known and allowed mints, positive
-  amount.
-- **Budget checks, for buys and swaps only:** unknown USD value, max per
-  trade, daily notional, trades per hour, daily loss. Sells skip these, so an
-  exit is never blocked.
+It uses the same `decision.order_for` as the bot, the replay clock and a fixed
+seed, so the same input always gives the same JSON result.
 
-**The provider swap (`AsyncJupiterProvider._do_swap`):**
-1. Get a quote from Jupiter. Reject it if the price impact is above
-   `max_price_impact_pct` (`SwapRejectedError`, never retried).
-2. Hand the quote to the **executor** (`executor.execute(...)`).
-   - **`OnChainExecutor`** gets the swap transaction from Jupiter, signs it
-     with the keypair, simulates it, sends it and waits for confirmation. A
-     failed transaction raises right away.
-   - **`SimulatedExecutor`** (paper and backtest) applies the quote to the
-     `SimulatedWallet`. It charges the base network fee and the rent of a
-     new token account, as on-chain would.
+## 7. Strategy specs
 
-`_do_swap_with_retry` retries only failures **before** the send, with slippage
-escalating up to a ceiling. Anything that fails after the send raises
-`TransactionSubmittedError` and is never retried, to avoid double execution.
-In **dry** mode the RPC client simulates the transaction and never sends it.
+A spec is JSON: a pair and a timeframe; **entry** conditions (`all`/`any`);
+an **exit** with a required **stop** (`stop_loss` / `trailing_stop`) plus
+optional conditions; `fixed_usd` sizing; a budget, a max loss, a cooldown, and
+`ttl_days` or `expires_at`. `SpecStrategy` (`strategy_spec/strategy.py`):
 
-## Step 7 — After the swap
+1. updates the bars once per tick (`IndicatorBank`; a gap of more than
+   `MAX_GAP_BARS` restarts the series and the spec warms up again);
+2. with a position: the stop (always), then the exit conditions; exits never
+   wait for the warm-up;
+3. without one: enters only when warm (`spec.history()` bars), not expired,
+   out of the cooldown, re-armed after the last exit, and the conditions hold;
+4. every signal carries a rationale (`"spec 1c21... buy: rsi14<30"`).
 
-1. The gateway marks the intent `EXECUTED`.
-2. **Only then** does `execute_trade` (`trader/execution/fills.py`, the one
-   pipeline every trade uses) call `provider.fetch_swap_costs(result)`.
-   It returns the real network fee, rent, and the real in/out amounts, read
-   from the confirmed transaction. It never raises: if it fails, the costs are
-   just unknown.
-3. The result becomes an `Order`. Real amounts are used when known, otherwise
-   the quote's.
-4. A buy opens a `Position` in the bucket's `PositionBook`. A sell closes it
-   (`book.close`), which computes the realized PnL (gross, costs, and net in
-   the quote token, plus a USD estimate) and adds it to the book's totals.
-5. `gateway.record_fill(...)` stores the order JSON and the PnL on the
-   intent row. That is what `gateway.restore`, `main.py pnl` and `ledger list`
-   read later.
+Each condition type is a model in `models.py` plus a pure predicate in
+`conditions.PREDICATES`; a test keeps the two in step.
 
-   The account never touches the ledger directly. `mark_executed` and
-   `record_fill` are deliberately two commits: the costs are fetched between
-   them, and the intent must already be `EXECUTED` by then.
+## 8. Safety nets
 
-## Step 8 — Modes and the other entry points
+- **Policy** per trade, per day, per hour, daily loss, allowed symbols; real
+  mode off by default. Sells skip the budget rules so a position is never stuck.
+- **Idempotency keys** in the ledger: no double execution across restarts.
+- **UNCONFIRMED and own-account EXECUTING intents** block trading.
+- **Circuit breaker:** N consecutive failures since the process started stop
+  trading; a restart re-arms it.
+- **Bucket budget and `max_loss_usd`** per spec; the SOL fee reserve.
+- **Price-impact cap and slippage ceiling** in the provider; no retry after
+  broadcast.
+- **Stopping the process stops trading** (there is no separate kill switch).
 
-| | real | dry | paper | backtest |
-|---|---|---|---|---|
-| Needs key + RPC | yes | yes | no | no |
-| Prices | live websocket | live websocket | live websocket | recorded ticks or candles |
-| Quotes | Jupiter | Jupiter | Jupiter | synthetic (`ReplayQuoteClient`: tick price minus `fee_bps`) |
-| Swap | signed and sent | simulated, never sent | applied to `SimulatedWallet` | applied to an in-memory `SimulatedWallet` |
-| Ledger | `ledger-real` | `ledger-dry` | `ledger-paper` | none |
+## 9. Where it's going
 
-- **`main.py swap`** is a one-off manual swap on any pair. It calls
-  `TradeService.swap`, which runs it in the `manual` bucket (ledger account
-  `"<mode>:manual"`, no position) under the same lock and through the same
-  `execute_trade` pipeline as the strategy buckets
-  (`trader/trading_service/manual.py`). The fill, with real amounts and
-  costs, is recorded, so manual swaps show up in `pnl` and `ledger list`.
-- **`main.py backtest`** runs a strategy over ticks with `Backtester`
-  (`trader/backtest/replay.py`).
-  - It uses the same `TradeService` → `LocalTradeClient` path as `run`, over
-    a paper provider with a synthetic quote client.
-  - Its gateway is `TradeGateway.in_memory()`: an in-memory ledger, a policy
-    with no limits (ledger timestamps are wall-clock, so real limits would
-    trip in seconds), and a kill switch that ignores the live `HALT`.
-    Idempotency and the intent lifecycle still run, as live.
-  - An optional `budget_usd` applies the same bucket cap as live.
-  - The strategy gets the replay clock and a fixed seed, so results are
-    reproducible. That is why strategies must use `self.clock()` /
-    `self.rng`.
-- **`run --record-ticks FILE`** saves live prices so they can be replayed.
-- **Agent commands** (`main.py market ...`, `main.py strategy ...`,
-  `trader/agent_api/cli.py`) are read-only.
-  - They always print one JSON object and never need the key.
-  - `market symbols | price | candles | summary` return registry and market
-    data. `summary` uses the same `trader/indicators.py` code as the
-    strategies.
-  - `strategy schema | validate FILE | backtest FILE` check a spec without
-    storing it. The backtest uses the spec's timeframe and starts with
-    `budget_usd`.
-  - Run a spec yourself with `run paper spec.json`
-    (`docs/examples/spec-sol-dip.json` is an example).
-
-## Step 8b — How a strategy spec works
-
-A spec (`trader/strategy_spec/`) is JSON with the following parts:
-
-- a pair and a timeframe;
-- **entry** conditions, combined with `all` or `any`;
-- an **exit** with a required **stop** (`stop_loss` or `trailing_stop`) plus
-  optional exit conditions;
-- **sizing** (`fixed_usd`);
-- a **budget**, a max loss, a cooldown and an expiry.
-
-`SpecStrategy` runs it as follows:
-
-1. **Every tick updates the bars.** It updates the bars of the spec's
-   timeframe once (`IndicatorBank`). The bar still forming uses the latest
-   price, and indicators are cached per tick.
-2. **It tracks the position.**
-   - The entry price and entry time come from the entry order, which uses the
-     account's clock, so this works after a restart and in backtests.
-   - The peak for the trailing stop starts at the entry price.
-   - The exit time starts the cooldown.
-3. **With a position, it checks the exit.** The stop is checked first and is
-   **always** OR'd, so `mode: all` can never disable it. Then the exit
-   conditions are checked. Exits **never wait for the warm-up**.
-4. **Without a position, it checks the entry.** It may enter only when all
-   of these hold:
-   - the indicators are warm (the largest `lookback()`);
-   - the spec has not expired;
-   - the cooldown is over;
-   - the entry conditions hold.
-
-   The buy spends `min(sizing.usd, balance)`.
-5. **Every signal carries a rationale**, for example
-   `"spec 1c21270544fc buy: rsi14<30, price<wma50-0%"`.
-
-Each condition type is one small pure function in
-`conditions.PREDICATES`. A test checks that every type in the schema has
-one.
-
-## Step 9 — Where the state lives
-
-Everything is resolved by `trader/paths.py` and **never depends on the current
-directory**:
-
-| File | What |
-|---|---|
-| `data_dir()/ledger-<mode>.sqlite3` | intents, events, orders, PnL (one file per mode) |
-| `data_dir()/HALT` | kill switch; if it exists, nothing trades |
-| `data_dir()/paper-wallet.json` | paper balances |
-| `policy_file()` (`policy.toml`) | the owner's risk policy |
-| `logs_dir()` (`TRADER_LOG_DIR`, else `<project root>/.logs`) | file logs: `trader-<ts>-<pid>.log`, rotating, pruned after 14 days, secrets redacted |
-
-`data_dir()` is `TRADER_DATA_DIR` if set, otherwise `<project root>/.data`.
-
-## Step 10 — Safety nets (summary)
-
-- **Kill switch:** `main.py halt` / `resume`. It fails closed: if the flag
-  can't be read, the bot assumes it is halted.
-- **Circuit breaker:** after N consecutive failures, trading stops until
-  `resume`.
-- **UNCONFIRMED intents** block trading until someone resolves them by hand.
-- **Idempotency keys**, backed by the ledger, prevent double execution across
-  restarts.
-- **Price-impact cap and slippage ceiling** in the provider.
-- **SOL fee reserve** in the account.
-- **Real mode is off** until `policy.toml` sets `real_trading_enabled = true`.
-- **Hash-chained events:** `ledger verify` detects tampering.
-
-## Step 11 — Where the architecture is going
-
-Details and progress are in [`plan.md`](plan.md). In short:
-
-- **AI agents author strategies, they never trade.** An agent writes a
-  declarative JSON **strategy spec**. It gets validated and backtested, and
-  then it runs automatically in paper mode. Real mode needs the owner's
-  approval.
-- **Strategy and execution are already separated in one process**:
-
-  ```
-  strategy side (bot: MarketData + strategy)  --TradeClient-->  TradeService (buckets)
-    knows nothing about the mode or the key                     owns provider, gateway, ledger
-  ```
-
-  Today `LocalTradeClient` connects the two in the same process (`run`,
-  backtests, tests). Plan item B3 adds a socket `TradeClient`. Then each strategy
-  runs as its own **strategy-runner** process, and one **trade-runner** per
-  mode holds the key and the `TradeService`. The bot code does not change.
-
-- **Layers with enforced import rules.** Each module belongs to one layer and
-  may import only from the layers listed for it. `tests/test_architecture.py`
-  checks this.
-
-  | Layer | Modules (today, plus planned) | May import |
-  |---|---|---|
-  | **core** | `trader` (the empty package init), `trader.models.*`, `trader.paths`, `trader.logging_config`, `trader.indicators`, `trader.trading_service.protocol` | core |
-  | **strategy** | `trader.trading_strategy`, `trader.strategy_spec.*` | core |
-  | **market** (read-only data) | `trader.market.*`, the Jupiter HTTP/websocket client, `candles.py` and its dataclasses | core, market |
-  | **venue** (moves funds) | `async_jupiter_svc`, `executor`, `async_rpc_client`, `swap_costs`, `trader.paper.*` | core, market, venue |
-  | **risk** | `trader.policy.*`, `trader.ledger.*` | core, risk |
-  | **execution** | `trader.execution.*`, `trader.async_account`, `trader.trading_service.service` / `.local` | core, market, venue, risk, execution |
-  | **strategy-side** | `trader.bot.*`, `trader.trading_service.client` (`TradeClient`); planned: `RemoteTradeClient`, the strategy-runner | core, strategy, market, strategy-side |
-  | **app** (wiring) | `main.py`, `trader.wiring`, `trader.backtest.*`, `trader.notification.*`, `trader.agent_api.*`; planned: the trade-runner | anything |
-
-- **The rule that matters most:** strategy code and the strategy-runner can
-  **never** import execution, venue or risk modules. A strategy therefore
-  cannot reach the key, the ledger or the policy, even by accident.
+Details in [`plan.md`](plan.md) (§3 and stage B). In short: agents author
+specs and never trade; specs get stored and gated (B1); each spec runs as its
+own strategy-runner process talking to one trade-runner per mode over a
+`TradeClient` socket (B3), so the key lives in one process. The bot code and
+the `TradeClient` seam are already shaped for that.

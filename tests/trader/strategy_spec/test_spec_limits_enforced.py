@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 import main as main_module
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution import KillSwitch, TradeGateway
+from trader.execution import TradeGateway
 from trader.models import SOLANA_MINTS, OrderSide
 from trader.paper import SimulatedWallet, paper_provider
 from trader.paths import PROJECT_ROOT
@@ -58,12 +58,9 @@ class TestRelativeExpiry:
         strategy.set_clock(lambda: now[0])
         strategy._warm = True  # sem aquecimento: só a validade importa
 
-        assert strategy.on_market_refresh(Decimal("50"), None, Decimal("100"), None)
+        assert strategy.on_market_refresh(Decimal("50"), Decimal("100"), None)
         now[0] = T0 + timedelta(days=1, seconds=1)
-        assert (
-            strategy.on_market_refresh(Decimal("50"), None, Decimal("100"), None)
-            is None
-        )
+        assert strategy.on_market_refresh(Decimal("50"), Decimal("100"), None) is None
 
     def test_the_shipped_example_validates(self):
         example = PROJECT_ROOT / "docs" / "examples" / "spec-sol-dip.json"
@@ -78,7 +75,6 @@ def _service(tmp_path, price="100"):
     gateway = TradeGateway(
         open_ledger(),
         Policy(max_trade_usd=Decimal(1000)),
-        KillSwitch(tmp_path / "H"),
         False,
     )
     provider = paper_provider(wallet, jupiter_client=client)

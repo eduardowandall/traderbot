@@ -24,7 +24,7 @@ def _strategy(**overrides):
 
 
 def _tick(strategy, price):
-    return strategy.on_market_refresh(Decimal(price), None, Decimal(100), None)
+    return strategy.on_market_refresh(Decimal(price), Decimal(100), None)
 
 
 def test_the_ledger_reports_when_an_account_opened_and_last_exited():

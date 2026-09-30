@@ -8,15 +8,14 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import make_intent, memory_gateway, mock_provider
 
-from trader.async_account import AsyncAccount
+from trader.execution import PolicyDeniedError
+from trader.execution.account import AsyncAccount
 from trader.execution.fills import Fill
-from trader.execution.gateway import open_entry_of
 from trader.execution.orders import order_from_fill
-from trader.execution.resolve import resolved_fill
 from trader.models import SOLANA_MINTS, OrderSide, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.costs import TradeCosts
-from trader.models.intent import IntentSide, IntentStatus, PolicyDecision
+from trader.models.intent import IntentStatus
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
@@ -119,60 +118,27 @@ class TestGatewayKeepsTheResult:
         record = gateway.ledger.get(intent.intent_id)
         assert record and record.status == IntentStatus.EXECUTING  # fail closed
 
-
-def _unconfirmed(ledger, side, **fields):
-    intent = make_intent(side=side, **fields)
-    ledger.record_intent(intent, PolicyDecision(True))
-    ledger.mark_unconfirmed(intent.intent_id, "timeout", signature="tx-sig")
-    record = ledger.get(intent.intent_id)
-    assert record is not None
-    return record
-
-
-class TestResolvedExecuted:
-    async def test_a_resolved_buy_reopens_the_position(self):
-        ledger = memory_gateway().ledger
-        record = _unconfirmed(
-            ledger,
-            IntentSide.BUY,
-            spend_amount="150",
-            quantity=Decimal("1"),
-            price=Decimal("150"),
+    async def test_a_failed_mark_executed_blocks_the_next_buy_at_once(
+        self, monkeypatch
+    ):
+        # T1: antes, uma EXECUTING recente não bloqueava (só depois de 300s), e
+        # o próximo tick comprava de novo
+        gateway = memory_gateway()
+        real_mark = gateway.ledger.mark_executed
+        monkeypatch.setattr(
+            gateway.ledger,
+            "mark_executed",
+            lambda *a: (_ for _ in ()).throw(OSError("database is locked")),
         )
 
-        order, realized, pnl = await resolved_fill(record, None, T0)
-        ledger.resolve(record.intent.intent_id, IntentStatus.EXECUTED, "explorer")
-        ledger.attach_order(record.intent.intent_id, order, realized, pnl)
+        async def swap():
+            return BUY
 
-        entry = open_entry_of(ledger, record.intent.account)
-        assert entry is not None and entry.quantity == Decimal("1")
-        assert entry.costs is None  # estimada: sem a transação real
+        with pytest.raises(OSError):
+            await gateway.submit(make_intent(), swap)
+        monkeypatch.setattr(gateway.ledger, "mark_executed", real_mark)
 
-    async def test_a_resolved_sell_uses_the_chain_and_books_pnl(self):
-        ledger = memory_gateway().ledger
-        entry = order_from_fill(Fill(BUY), USDC, SOL, OrderSide.BUY, T0)
-        record = _unconfirmed(
-            ledger,
-            IntentSide.SELL,
-            spend_mint=SOL.mint,
-            receive_mint=USDC.mint,
-            spend_amount="1",
-            quantity=Decimal("1"),
-            price=Decimal("160"),
-        )
-        chain = TradeCosts(
-            "onchain",
-            fee_lamports=5000,
-            actual_in_amount=SOL.ui_to_raw("1"),
-            actual_out_amount=USDC.ui_to_raw("158"),
-        )
-        fetch = AsyncMock(return_value=chain)
-
-        order, realized, pnl = await resolved_fill(record, entry, T0, fetch)
-
-        fetch.assert_awaited_once()
-        assert fetch.await_args and fetch.await_args.args[0].signature == "tx-sig"
-        assert order.side == OrderSide.SELL
-        assert order.quote_amount == Decimal("158")  # o valor real, não o pedido
-        assert pnl is not None and pnl.gross_quote == Decimal("8")
-        assert realized is not None
+        with pytest.raises(PolicyDeniedError, match="sem confirmação"):
+            await gateway.submit(make_intent(), swap)
+        # outra conta (outro bot) segue operando
+        assert await gateway.submit(make_intent(account="paper:JUP-USDC"), swap)

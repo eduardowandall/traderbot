@@ -1,14 +1,13 @@
-"""Dados de mercado reais: preço, candles e resumo (comandos de agente)."""
+"""Dados de mercado reais e o `backtest` sobre candles reais."""
 
 import asyncio
-import re
 from decimal import Decimal
 
-from live_helpers import invoke, invoke_json
+from live_helpers import invoke_json
 
 from trader.backtest.ticks import PATH_STEPS
 from trader.market import JupiterMarketData, JupiterPriceOracle
-from trader.models import SOLANA_MINTS
+from trader.models import SOLANA_MINTS, Interval
 from trader.paths import PROJECT_ROOT
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 
@@ -17,22 +16,25 @@ EXAMPLE_SPEC = str(PROJECT_ROOT / "docs" / "examples" / "spec-sol-dip.json")
 RANDOM_SPEC = str(PROJECT_ROOT / "docs" / "examples" / "spec-random.json")
 
 
-def test_price_candles_and_summary():
-    price = Decimal(invoke_json("market", "price", "SOL")["price_usd"])
+def test_price_and_candles():
+    async def read():
+        data = JupiterMarketData()
+        try:
+            price = await data.get_price(SOL)
+            candles = await data.get_candles(SOL, Interval.MINUTE_1, 20)
+        finally:
+            await data.aclose()
+        return price, candles
+
+    price, candles = asyncio.run(read())
+
     assert Decimal("1") < price < Decimal("100000")
-
-    candles = invoke_json("market", "candles", "SOL", "--n", "20")["candles"]
     assert len(candles) == 20
-
-    summary = invoke_json("market", "summary", "SOL", "--interval", "1_MINUTE")
-    assert summary["bars"] > 50
-    assert 0 <= Decimal(summary["rsi14"]) <= 100
+    assert all(c.low <= c.last <= c.high for c in candles)
 
 
-def test_example_spec_validates_and_backtests_on_real_candles():
-    # o exemplo usa `ttl_days`: valida sem precisar de uma data nova
-    invoke_json("strategy", "validate", EXAMPLE_SPEC)
-    result = invoke_json("strategy", "backtest", EXAMPLE_SPEC, "--candles", "300")
+def test_example_spec_backtests_on_real_candles():
+    result = invoke_json("backtest", EXAMPLE_SPEC, "--candles", "300")
 
     # cada barra fechada vira um caminho interpolado abertura->mín->máx->fech
     # (até 1 + 3 * PATH_STEPS ticks); a barra em formação fica de fora
@@ -42,18 +44,10 @@ def test_example_spec_validates_and_backtests_on_real_candles():
 
 
 def test_random_backtest_trades_on_real_candles():
-    result = invoke(
-        "backtest",
-        RANDOM_SPEC,
-        "--candles",
-        "100",
-    )
+    result = invoke_json("backtest", RANDOM_SPEC, "--candles", "300")
 
-    assert result.exit_code == 0, result.output
-    ticks = re.search(r"(\d+) ticks", result.stdout)
-    assert ticks and 99 <= int(ticks.group(1)) <= (1 + 3 * PATH_STEPS) * 100
-    trades = re.search(r"trades: (\d+)", result.stdout)
-    assert trades and int(trades.group(1)) > 10
+    assert 299 <= result["ticks"] <= (1 + 3 * PATH_STEPS) * 300
+    assert len(result["trades"]) > 10
 
 
 def test_price_api_prices_every_registry_mint_close_to_the_websocket():

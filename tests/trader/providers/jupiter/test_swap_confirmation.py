@@ -18,12 +18,12 @@ from trader.providers.jupiter.async_rpc_client import (
 )
 
 
-def _rpc_with_status(status, is_dryrun=False):
+def _rpc_with_status(status):
     client = AsyncMock()
     client.get_signature_statuses = AsyncMock(
         return_value=SimpleNamespace(value=[status])
     )
-    return AsyncRPCClient(client=client, is_dryrun=is_dryrun)
+    return AsyncRPCClient(client=client)
 
 
 def _status(confirmation_status, err=None):
@@ -57,10 +57,6 @@ class TestCheckSignatureIsConfirmed:
         )
         with pytest.raises(TransactionFailedError):
             await rpc.check_signature_is_confirmed("sig")
-
-    async def test_dryrun_is_always_confirmed(self):
-        rpc = _rpc_with_status(None, is_dryrun=True)
-        assert await rpc.check_signature_is_confirmed("sig") is True
 
 
 @pytest.fixture

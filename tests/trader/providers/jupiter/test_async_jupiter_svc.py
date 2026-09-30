@@ -26,7 +26,7 @@ from solders.solders import (
 )
 from solders.transaction import VersionedTransaction
 
-from trader.models import SOLANA_MINTS, SwapResult
+from trader.models import SOLANA_MINTS
 from trader.models.account_data import MintBalance
 from trader.providers import JupiterQuoteResponse, JupiterRoutePlan, JupiterSwapInfo
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
@@ -128,27 +128,13 @@ class TestPlaceOrder:
             jupiter_client=self.jupiter_client,
         )
 
-    async def test_swap_forwards_slippage(self):
-        do_swap_with_retry = AsyncMock(
-            return_value=SwapResult("sig", "mint_in", "mint_out", 1000, 10)
-        )
-        self.api._do_swap_with_retry = do_swap_with_retry
-
-        result = await self.api.swap("mint_in", "mint_out", 1000, slippage_bps=100)
-        assert result == "sig"
-        do_swap_with_retry.assert_awaited_once_with(
-            "mint_in", "mint_out", 1000, slippage_bps=100
-        )
-
     async def test_buy_forwards_slippage(self):
         sol = SOLANA_MINTS.get_by_symbol("SOL").pubkey
         usdc = SOLANA_MINTS.get_by_symbol("USDC").pubkey
         swap = AsyncMock(return_value="sig")
         self.api.swap_with_details = swap
 
-        result = await self.api.buy(
-            usdc, sol, "market", Decimal("10"), slippage_bps=100
-        )
+        result = await self.api.buy(usdc, sol, Decimal("10"), slippage_bps=100)
         assert result == "sig"
         swap.assert_awaited_once_with(str(usdc), str(sol), 10_000_000, slippage_bps=100)
 
@@ -159,9 +145,7 @@ class TestPlaceOrder:
         self.api.swap_with_details = swap
 
         # SOL-USDC: vender 1 SOL (9 decimais) em troca de USDC (6 decimais)
-        result = await self.api.sell(
-            usdc, sol, "market", Decimal("1"), slippage_bps=100
-        )
+        result = await self.api.sell(usdc, sol, Decimal("1"), slippage_bps=100)
         assert result == "sig"
         swap.assert_awaited_once_with(
             str(sol), str(usdc), 1_000_000_000, slippage_bps=100

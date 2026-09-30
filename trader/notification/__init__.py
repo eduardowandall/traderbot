@@ -1,11 +1,11 @@
 from .notification_service import (
     NotificationService,
-    NullNotificationService,
     TelegramNotificationService,
+    notifier_from_env,
 )
 
 __all__ = [
-    "NullNotificationService",
     "NotificationService",
     "TelegramNotificationService",
+    "notifier_from_env",
 ]

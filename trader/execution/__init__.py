@@ -1,7 +1,6 @@
 from .gateway import (
     AccountState,
     DuplicateIntentError,
-    KillSwitch,
     PolicyDeniedError,
     TradeGateway,
 )
@@ -9,7 +8,6 @@ from .gateway import (
 __all__ = [
     "AccountState",
     "DuplicateIntentError",
-    "KillSwitch",
     "PolicyDeniedError",
     "TradeGateway",
 ]

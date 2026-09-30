@@ -25,21 +25,6 @@ class InsufficientFundsError(SwapRejectedError):
     """Saldo simulado insuficiente: recusado sem re-tentativa."""
 
 
-def parse_balances(spec: str) -> dict[str, Decimal]:
-    """'USDC=100 SOL=0.5' -> {'USDC': Decimal('100'), 'SOL': Decimal('0.5')}"""
-    balances: dict[str, Decimal] = {}
-    for item in spec.split():
-        symbol, sep, amount = item.partition("=")
-        if not sep:
-            raise ValueError(f"saldo inválido {item!r}; use SIMBOLO=quantidade")
-        SOLANA_MINTS.get_by_symbol(symbol)  # valida
-        value = Decimal(amount)
-        if not value.is_finite() or value < 0:
-            raise ValueError(f"quantidade inválida para {symbol}: {amount!r}")
-        balances[symbol] = value
-    return balances
-
-
 class SimulatedWallet:
     def __init__(
         self,
@@ -57,7 +42,16 @@ class SimulatedWallet:
             self.reset(initial)
 
     def reload(self) -> None:
-        """Relê o arquivo: outro processo (CLI, outro bot) pode ter operado."""
+        """Relê o arquivo: outro processo (outro bot) pode ter operado.
+
+        Sob o lock: no Windows, um leitor com o arquivo aberto faz o
+        `os.replace` de quem grava falhar.
+        """
+        with _file_lock(self.path if self.path and self.path.exists() else None):
+            self._read()
+
+    def _read(self) -> None:
+        """Relê sem pegar o lock (quem chama já o tem)."""
         if self.path is None or not self.path.exists():
             return
         data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -113,7 +107,7 @@ class SimulatedWallet:
         não aplica o swap duas vezes), e dois processos não se sobrescrevem.
         """
         with _file_lock(self.path):
-            self.reload()
+            self._read()
             raw, opened = self._after_swap(
                 input_mint,
                 in_amount,
@@ -165,7 +159,26 @@ class SimulatedWallet:
             ),
             encoding="utf-8",
         )
-        os.replace(tmp, self.path)
+        _replace(tmp, self.path)
+
+
+REPLACE_ATTEMPTS = 20
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    """`os.replace`, tentando de novo enquanto um leitor segura o arquivo.
+
+    No Windows o destino aberto por outro processo (um leitor antigo, um
+    antivírus) dá `PermissionError` por alguns milissegundos.
+    """
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.05)
 
 
 LOCK_TIMEOUT_SECONDS = 5.0

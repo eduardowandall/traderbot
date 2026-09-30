@@ -18,5 +18,8 @@ wheels/
 .augment/
 
 *.log
-# Ledger, kill switch
+# Estado: ledger, carteira paper
 .data/
+
+# Política local do dono (o modelo é policy.example.toml)
+policy.toml

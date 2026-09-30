@@ -10,7 +10,7 @@ import pytest
 from factories import memory_gateway, mock_provider
 from solana.exceptions import SolanaRpcException
 
-from trader.async_account import AsyncAccount
+from trader.execution.account import AsyncAccount
 from trader.models import SOLANA_MINTS
 from trader.models.account_data import MintBalance
 from trader.providers.jupiter.async_rpc_client import AsyncRPCClient, is_transient

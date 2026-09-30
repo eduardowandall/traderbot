@@ -8,8 +8,8 @@ import pytest
 from factories import make_spec
 
 from trader import indicators as ind
-from trader.agent_api import strategies
 from trader.backtest import Backtester, Tick, ticks_from_candles
+from trader.backtest import spec as strategies
 from trader.backtest.ticks import PATH_STEPS
 from trader.models import Interval, OrderSide, TickerData
 from trader.strategy_spec.models import StrategySpec
@@ -21,15 +21,11 @@ MINUTE = Interval.MINUTE_1
 
 def _candle(i, o, h, low, c):
     return TickerData(
-        buy=Decimal(0),
         timestamp=T0 + timedelta(minutes=i),
         high=Decimal(h),
         last=Decimal(c),
         low=Decimal(low),
         open=Decimal(o),
-        pair="x",
-        sell=Decimal(0),
-        vol=Decimal(0),
     )
 
 
@@ -59,9 +55,15 @@ class TestCandlePaths:
         assert ticks[0].timestamp == T0
         assert T0 < ticks[-1].timestamp < T0 + timedelta(minutes=1)
 
-    def test_without_interval_it_is_one_tick_per_close(self):
-        candles = [_candle(0, 100, 105, 95, 102)]
-        assert [t.price for t in ticks_from_candles(candles)] == [102]
+    def test_a_falling_bar_visits_the_high_first(self):
+        # T5: sempre mín -> máx deixava uma compra na queda + take profit na
+        # mesma barra de baixa sair de graça
+        ticks = ticks_from_candles(
+            [_candle(0, 100, 105, 95, 97)], MINUTE, now=T0 + timedelta(minutes=2)
+        )
+        prices = [t.price for t in ticks]
+        keys = [prices.index(Decimal(p)) for p in (100, 105, 95, 97)]
+        assert keys == sorted(keys)
 
 
 class TestIntrabarStops:
@@ -146,13 +148,15 @@ class TestBacktestGuards:
         ticks = [Tick(T0 + timedelta(minutes=i), Decimal(100)) for i in range(20)]
 
         with pytest.raises(ValueError, match="aquecimento de 141 barras"):
-            await strategies.backtest(spec, ticks, Decimal(30), "0")
+            await strategies.backtest_spec(spec, ticks, Decimal(30), "0")
 
     async def test_the_result_reports_bars_and_costs(self):
         spec = StrategySpec.model_validate(make_spec())
         ticks = [Tick(T0 + timedelta(minutes=i), Decimal(100)) for i in range(60)]
 
-        result = await strategies.backtest(spec, ticks, Decimal(30), "0", Decimal(5))
+        result = await strategies.backtest_spec(
+            spec, ticks, Decimal(30), "0", Decimal(5)
+        )
 
         assert result["bars"] == 60
         assert result["warmup_bars"] == spec.history()
@@ -208,4 +212,25 @@ class TestStageS1:
         spec = StrategySpec.model_validate(make_spec())
         ticks = [Tick(T0 + timedelta(minutes=i), Decimal(100)) for i in range(80)]
         with pytest.raises(ValueError, match="negativos"):
-            await strategies.backtest(spec, ticks, Decimal(-5), "0")
+            await strategies.backtest_spec(spec, ticks, Decimal(-5), "0")
+
+
+class TestFeedGaps:
+    def test_a_long_gap_cools_the_strategy_down(self):
+        # T4: depois de um buraco no feed as entradas esperam aquecer de novo
+        spec = make_spec(
+            entry={"conditions": [{"type": "rsi_below", "period": 2, "value": 99}]}
+        )
+        strategy = SpecStrategy(StrategySpec.model_validate(spec))
+        now = [T0]
+        strategy.set_clock(lambda: now[0])
+        history = strategy.spec.history()
+
+        def tick(minute, price):
+            now[0] = T0 + timedelta(minutes=minute)
+            return strategy.on_market_refresh(Decimal(price), Decimal(100), None)
+
+        signals = [tick(i, 90 + i % 3) for i in range(history + 1)]
+        assert signals[-1] and signals[-1].side == OrderSide.BUY  # aquecida
+        gap = history + ind.MAX_GAP_BARS + 2
+        assert tick(gap, 91) is None  # esfriou: a série recomeçou

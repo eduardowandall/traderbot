@@ -22,7 +22,6 @@ BASE_FEE_LAMPORTS = 5000  # por assinatura
 
 # origem dos custos
 ONCHAIN = "onchain"  # lidos da transação confirmada
-ESTIMATED = "estimated"  # dry run: taxa calculada para a mensagem, sem envio
 SIMULATED = "simulated"  # paper trading
 REPLAY = "replay"  # backtest (custos modelados em fee_bps)
 QUOTE = "quote"  # não foi possível obter: valores da quote, custos desconhecidos

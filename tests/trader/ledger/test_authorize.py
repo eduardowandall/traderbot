@@ -1,6 +1,5 @@
 """R2: idempotência + política + registro são atômicos entre processos."""
 
-import logging
 import sqlite3
 import threading
 from decimal import Decimal
@@ -16,9 +15,7 @@ DAILY_20 = Policy(max_daily_notional_usd=Decimal("20"))
 
 
 def _decide(intent):
-    return lambda state: evaluate(
-        intent, DAILY_20, state, halted=False, real_mode=False
-    )
+    return lambda state: evaluate(intent, DAILY_20, state, real_mode=False)
 
 
 def test_two_processes_cannot_both_pass_one_limit(tmp_path):
@@ -39,7 +36,7 @@ def test_two_processes_cannot_both_pass_one_limit(tmp_path):
         thread.start()
         thread.join(timeout=0.3)
         outcome["waited"] = thread.is_alive()
-        return evaluate(mine, DAILY_20, state, halted=False, real_mode=False)
+        return evaluate(mine, DAILY_20, state, real_mode=False)
 
     mine = make_intent(notional="15", spend_amount="15")
     try:
@@ -83,16 +80,3 @@ def test_failed_and_denied_keys_do_not_count_for_the_index(ledger):
 
     statuses = sorted(r.status for r in ledger.list_intents())
     assert statuses == sorted([IntentStatus.FAILED, IntentStatus.EXECUTING])
-
-
-def test_an_old_ledger_with_duplicates_still_opens(tmp_path, caplog):
-    path = tmp_path / "old.sqlite3"
-    with Ledger(path) as ledger:
-        ledger.conn.execute("DROP INDEX ux_intents_moved_key")
-        ledger.conn.commit()
-        for _ in range(2):
-            ledger.record_intent(make_intent(key="dup"), PolicyDecision(True))
-
-    with caplog.at_level(logging.WARNING), Ledger(path) as reopened:
-        assert len(reopened.list_intents()) == 2
-    assert "índice único ignorado" in caplog.text

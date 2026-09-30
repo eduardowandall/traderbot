@@ -20,6 +20,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from trader.backtest.ticks import Tick
+from trader.bot.config import Strategy
+from trader.bot.decision import bucket_done, order_for
 from trader.execution import TradeGateway
 from trader.models import SOLANA_MINTS, Mint, OrderSide
 from trader.models.costs import REPLAY
@@ -27,9 +29,7 @@ from trader.paper.provider import paper_provider
 from trader.paper.wallet import SimulatedWallet
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.trading_service.local import LocalTradeClient
-from trader.trading_service.protocol import BucketStatus, OrderRequest
 from trader.trading_service.service import TradeService
-from trader.trading_strategy import TradingStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -131,21 +131,6 @@ class BacktestResult:
         wins = sum(1 for t in closed if t.realized_pnl and t.realized_pnl > 0)
         return Decimal(wins) / Decimal(len(closed)) * 100
 
-    def summary(self) -> str:
-        win_rate = self.win_rate_pct
-        lines = [
-            f"Backtest {self.symbol}: {self.ticks} ticks ({self.start} -> {self.end})",
-            f"  patrimônio: {self.initial_equity:.4f} -> {self.final_equity:.4f} USD "
-            f"({self.return_pct:+.2f}%)",
-            f"  PnL realizado: {self.realized_pnl:+.4f} USD",
-            f"  drawdown máximo: {self.max_drawdown_pct:.2f}%",
-            f"  trades: {len(self.trades)} ({len(self.closed_trades)} fechados, "
-            f"win rate {'-' if win_rate is None else f'{win_rate:.1f}%'})",
-            f"  sinais recusados: {self.rejected_signals}",
-            f"  posição aberta no fim: {'sim' if self.open_position else 'não'}",
-        ]
-        return "\n".join(lines)
-
 
 @dataclass
 class _Run:
@@ -166,7 +151,7 @@ class _Run:
 class Backtester:
     def __init__(
         self,
-        strategy: TradingStrategy,
+        strategy: Strategy,
         symbol: str,
         ticks: list[Tick],
         initial_balance: Decimal,
@@ -216,7 +201,8 @@ class Backtester:
         run = _Run()
         for tick in self.ticks:
             client.tick = tick
-            await self._step(trader, tick, run)
+            if not await self._step(trader, tick, run):
+                break  # bucket encerrado e sem posição: ao vivo, o bot pararia
             run.track(self._equity(wallet, tick.price))
 
         final = await trader.bucket()
@@ -264,23 +250,20 @@ class Backtester:
         )
         return client, wallet, trader
 
-    async def _step(self, trader: LocalTradeClient, tick: Tick, run: _Run) -> None:
+    async def _step(self, trader: LocalTradeClient, tick: Tick, run: _Run) -> bool:
+        """Um tick, com a mesma decisão do bot ao vivo; False: o replay acabou."""
         snapshot = await trader.bucket()
-        if snapshot.status != BucketStatus.ACTIVE:
-            return  # bucket encerrado (perda máxima): ao vivo, o bot pararia
-        signal = self.strategy.on_market_refresh(
-            tick.price, None, snapshot.available_usd, snapshot.position
-        )
-        if signal is None:
-            return
-        reply = await trader.submit(
-            OrderRequest(signal.side, signal.quantity, tick.price, signal.rationale)
-        )
+        if bucket_done(snapshot):
+            return False
+        request = order_for(self.strategy, tick.price, snapshot)
+        if request is None:
+            return True
+        reply = await trader.submit(request)
         order = reply.order
         if order is None:
             run.rejected += 1
             logger.debug(f"sinal recusado em {tick.timestamp}: {reply}")
-            return
+            return True
         realized = None
         if order.side == OrderSide.SELL:
             realized = (await trader.bucket()).realized_usd - snapshot.realized_usd
@@ -289,6 +272,7 @@ class Backtester:
                 tick.timestamp, order.side, order.quantity, order.price, realized
             )
         )
+        return True
 
     def _equity(self, wallet: SimulatedWallet, price: Decimal) -> Decimal:
         return wallet.balance(self.quote.mint) + wallet.balance(self.token.mint) * price

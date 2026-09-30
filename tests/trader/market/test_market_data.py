@@ -2,9 +2,10 @@ from datetime import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
-from trader.market import JupiterMarketData, candles_to_tickers
+from trader.market import JupiterMarketData
 from trader.models import Interval
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.providers.jupiter.candles import candles_to_tickers
 
 RAW = [
     {

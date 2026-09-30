@@ -1,6 +1,6 @@
 """Intenções de trade: tudo que quer executar um swap passa por aqui.
 
-Estratégias, o comando `swap` e (no futuro) agentes criam um `TradeIntent`.
+As estratégias (pelo `AsyncAccount` do bucket) criam um `TradeIntent`.
 A política decide (`PolicyDecision`) e o gateway executa e registra o resultado
 no ledger (`IntentRecord`).
 """
@@ -15,7 +15,6 @@ from enum import StrEnum, auto
 class IntentSide(StrEnum):
     BUY = auto()  # abre/aumenta posição
     SELL = auto()  # fecha posição (saída: não sofre limites de orçamento)
-    SWAP = auto()  # swap manual (CLI)
 
 
 class IntentStatus(StrEnum):
@@ -24,7 +23,7 @@ class IntentStatus(StrEnum):
     EXECUTED = auto()  # swap confirmado
     FAILED = auto()  # falhou antes do envio; nada foi executado
     # enviada à rede mas sem confirmação: pode ou não ter sido executada.
-    # bloqueia novos trades até ser resolvida manualmente.
+    # bloqueia novos trades do modo até o dono mover ou apagar o ledger.
     UNCONFIRMED = auto()
 
 
@@ -43,7 +42,7 @@ class TradeIntent:
     """Pedido para gastar `spend_amount` de `spend_mint` recebendo `receive_mint`."""
 
     source: str  # quem pediu: estratégia, "cli", id do agente
-    account: str  # conta lógica (modo + par), ex: "dry:USDC-SOL"
+    account: str  # conta lógica (modo + bucket), ex: "paper:strategy:ab12"
     side: IntentSide
     spend_mint: str
     receive_mint: str
@@ -54,6 +53,9 @@ class TradeIntent:
     price: Decimal | None = None
     quantity: Decimal | None = None
     rationale: str | None = None
+    # venda: já se sabe antes de executar que ela fecha a posição (limitada ao
+    # saldo, ou a posição toda)? O restore usa isso se a ordem não foi gravada
+    closes_position: bool | None = None
     idempotency_key: str = field(default_factory=lambda: uuid.uuid4().hex)
     intent_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: datetime = field(default_factory=_now)

@@ -1,9 +1,8 @@
-"""Onde o bot guarda o estado (ledger, kill switch, carteira paper) e a política.
+"""Onde o bot guarda o estado (ledger, carteira paper, logs) e a política.
 
-Os caminhos não dependem do diretório atual: o bot e os comandos de CLI
-(`halt`, `resume`, `ledger resolve`) precisam enxergar os mesmos arquivos de
-onde quer que sejam chamados. Um `HALT` gravado em outra pasta seria um kill
-switch que o bot rodando nunca vê.
+Os caminhos não dependem do diretório atual: vários bots (um por spec)
+precisam enxergar o mesmo ledger e a mesma carteira paper de onde quer que
+sejam iniciados.
 
 Valores relativos (inclusive nas variáveis de ambiente) são resolvidos a
 partir da raiz do projeto, nunca do cwd. Os caminhos são lidos a cada chamada,

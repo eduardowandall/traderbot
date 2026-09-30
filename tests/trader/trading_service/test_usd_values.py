@@ -9,17 +9,14 @@ from factories import open_ledger
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution import KillSwitch, TradeGateway
-from trader.execution.fills import Fill
+from trader.execution import TradeGateway
 from trader.market import JupiterPriceOracle
 from trader.models import SOLANA_MINTS, OrderSide
-from trader.models.costs import TradeCosts, TradeRates, with_sol_usd
-from trader.models.order import SwapResult
+from trader.models.costs import TradeRates, with_sol_usd
 from trader.paper import SimulatedWallet, paper_provider
 from trader.policy import Policy
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.trading_service.manual import swap_order
-from trader.trading_service.protocol import OrderRequest, ReplyStatus, SwapRequest
+from trader.trading_service.protocol import OrderRequest, ReplyStatus
 from trader.trading_service.service import TradeService
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -47,7 +44,7 @@ def _service(tmp_path, ledger, prices=None, policy=LOOSE, quote=USDC, price="100
     wallet = SimulatedWallet(
         initial={"USDC": Decimal("100"), "SOL": Decimal("2"), "JUP": Decimal("50")}
     )
-    gateway = TradeGateway(ledger, policy, KillSwitch(tmp_path / "HALT"), False)
+    gateway = TradeGateway(ledger, policy, False)
     provider = paper_provider(wallet, jupiter_client=client)
     return TradeService(
         provider, gateway, mode="paper", clock=lambda: T0, prices=prices
@@ -124,33 +121,3 @@ class TestBucketNotional:
 
         assert reply.status == ReplyStatus.DENIED
         assert "desconhecido" in reply.reasons[0]
-
-
-class TestManualSwap:
-    async def test_spending_sol_gets_a_usd_notional_and_rates(self, tmp_path):
-        ledger = open_ledger()
-        prices = _oracle({SOL.mint: Decimal(150), JUP.mint: Decimal("0.3")})
-        service = _service(tmp_path, ledger, prices)
-
-        reply = await service.swap(SwapRequest(SOL.mint, JUP.mint, Decimal("0.01")))
-
-        assert reply.order is not None
-        (record,) = ledger.list_intents()
-        assert record.intent.notional_usd == Decimal("1.50")
-        assert reply.order.quote_usd == Decimal(150)  # USD por SOL gasto
-        assert reply.order.sol_usd == Decimal(150)
-
-    def test_no_stable_and_no_sol_uses_the_api_for_every_rate(self):
-        result = SwapResult(
-            "sig", JUP.mint, BONK.mint, JUP.ui_to_raw("10"), BONK.ui_to_raw("1000")
-        )
-        fill = Fill(result, TradeCosts("onchain", fee_lamports=5000))
-        usd = {JUP.mint: Decimal("0.3"), SOL.mint: Decimal("150")}
-
-        order = swap_order(fill, JUP, BONK, T0, usd)
-
-        assert order.fill_price == Decimal("0.01")  # JUP por BONK
-        assert order.price == Decimal("0.003")  # USD por BONK, via o JUP gasto
-        assert order.quote_usd == Decimal("0.3")
-        assert order.sol_usd == Decimal("150")
-        assert order.sol_in_quote == Decimal("500")  # JUP por SOL

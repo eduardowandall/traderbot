@@ -16,7 +16,7 @@ from trader.models import Order, OrderSide, Position
 
 class BucketStatus(StrEnum):
     ACTIVE = "active"
-    # a estratégia deve parar; quem executa fecha a posição (fase 4)
+    # a estratégia deve parar; quem executa vende o que sobrou
     RETIRING = "retiring"
 
 
@@ -50,18 +50,6 @@ class OrderRequest:
     price: Decimal  # preço de mercado (USD) no momento do sinal
     rationale: str | None = None
     # quem pede pode fixar a chave (reenvio após reconexão não duplica)
-    idempotency_key: str | None = None
-
-
-@dataclass(frozen=True)
-class SwapRequest:
-    """Swap manual (qualquer par, sem posição), no bucket `manual`."""
-
-    spend_mint: str
-    receive_mint: str
-    amount: Decimal  # do token gasto, em unidades de UI
-    slippage_bps: int = 50
-    rationale: str | None = None
     idempotency_key: str | None = None
 
 

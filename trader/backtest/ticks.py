@@ -60,20 +60,19 @@ def load_ticks(path: str | Path) -> list[Tick]:
 
 def ticks_from_candles(
     candles: list[TickerData],
-    interval: Interval | None = None,
+    interval: Interval,
     now: datetime | None = None,
 ) -> list[Tick]:
     """Ticks de candles para o replay.
 
-    Com `interval`: cada candle fechado vira abertura -> mínima -> máxima ->
-    fechamento, dentro da barra (o `time` da Jupiter é a abertura; conferido
-    ao vivo), e o candle ainda em formação é descartado. A mínima antes da
-    máxima é a ordem conservadora para stops de posições compradas.
-    Sem `interval` (legado): um tick por candle, no fechamento.
+    Cada candle fechado vira um caminho dentro da barra (o `time` da Jupiter
+    é a abertura; conferido ao vivo), e o candle ainda em formação é
+    descartado. Barra de alta: abertura -> mínima -> máxima -> fechamento;
+    barra de baixa (fechamento < abertura): abertura -> máxima -> mínima ->
+    fechamento. É a heurística usual: uma compra na queda seguida de take
+    profit na mesma barra de baixa não sai de graça.
     """
     ordered = sorted(candles, key=lambda c: c.timestamp)
-    if interval is None:
-        return [Tick(c.timestamp, c.last) for c in ordered]
     bar = timedelta(seconds=interval.seconds)
     cutoff = to_utc(now or datetime.now(UTC))
     return [
@@ -84,7 +83,7 @@ def ticks_from_candles(
     ]
 
 
-# passos interpolados por trecho (abertura->mín, mín->máx, máx->fech): uma
+# passos interpolados por trecho (abertura->extremo->extremo->fech): uma
 # condição de nível dispara perto de onde o preço cruzou, não no extremo
 PATH_STEPS = 8
 
@@ -92,7 +91,8 @@ PATH_STEPS = 8
 def _bar_path(candle: TickerData, bar: timedelta) -> list[Tick]:
     start, close = candle.timestamp, candle.last
     # candles sem OHLC (só fechamento) viram um trecho plano no fechamento
-    points = [candle.open or close, candle.low or close, candle.high or close, close]
+    open_, low, high = candle.open or close, candle.low or close, candle.high or close
+    points = [open_, high, low, close] if close < open_ else [open_, low, high, close]
     times = [timedelta(0), bar / 4, bar / 2, bar - timedelta(milliseconds=1)]
     ticks = [Tick(start, points[0])]
     for i in range(3):

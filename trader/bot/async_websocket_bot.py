@@ -3,7 +3,7 @@
 Camada strategy-side: o bot lê preços de um `MarketData`, vê o próprio
 bucket e pede ordens por um `TradeClient`. Não importa execução, política,
 ledger nem provider, e não sabe em que modo roda — no mesmo processo
-(`LocalTradeClient`) ou, na fase 4, falando com um trade-runner por socket.
+(`LocalTradeClient`) ou, no futuro (B3), falando com um trade-runner.
 """
 
 import asyncio
@@ -11,48 +11,25 @@ import logging
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
 
 from trader import logging_config
 from trader.bot.config import BotConfig
-from trader.models import SOLANA_MINTS, Interval
+from trader.bot.decision import bucket_done, order_for
+from trader.models import SOLANA_MINTS
 from trader.models.costs import describe_costs
 from trader.models.order import Order
 from trader.models.position import Position
 from trader.trading_service.protocol import (
     BucketSnapshot,
-    BucketStatus,
     OrderReply,
-    OrderRequest,
     ReplyStatus,
     TradeServiceError,
 )
 
 bot_logger = logging.getLogger("bot")
 
-# aquecimento de estratégias que não declaram `warmup()`
-DEFAULT_WARMUP = (Interval.SECOND_15, 100)
 # falhas seguidas de inicialização antes de avisar o dono
 STARTUP_ALERT_AFTER = 5
-
-
-@runtime_checkable
-class WarmsUp(Protocol):
-    """Estratégia que diz de quantos candles (e de que timeframe) precisa."""
-
-    def warmup(self) -> tuple[Interval, int]: ...
-
-
-@runtime_checkable
-class Resumes(Protocol):
-    """Estratégia com estado que sobrevive a um reinício (cooldown, validade)."""
-
-    def resume(
-        self,
-        last_exit_at: datetime | None,
-        opened_at: datetime | None,
-        last_exit_price: Decimal | None = None,
-    ) -> None: ...
 
 
 class AsyncWebsocketTradingBot:
@@ -68,13 +45,13 @@ class AsyncWebsocketTradingBot:
         self.on_tick = config.on_tick
         self.is_running = False
         self._opened = False  # bucket aberto (uma vez só)
+        self._resumed = False  # estado da estratégia restaurado (uma vez só)
         self._started = False  # aquecido: o loop já processa ticks
         self._startup_failures = 0
         self.logger = logging.getLogger(self.__module__)
         self.logger.debug(f"start bot {self.name}-{self.symbol}: {self.strategy!r}")
         bot_logger.debug(f"start bot {self.name}-{self.symbol}")
 
-        self.stop_when_error = False
         # espera entre iterações após erro; cresce até error_backoff_max
         self.error_backoff_initial = 1.0
         self.error_backoff_max = 60.0
@@ -88,22 +65,14 @@ class AsyncWebsocketTradingBot:
     async def process_market_data(
         self, current_price: Decimal, snapshot: BucketSnapshot
     ) -> Order | None:
-        if snapshot.status == BucketStatus.RETIRING and snapshot.position is None:
-            self.logger.warning(f"Bucket {snapshot.bucket} encerrando: parando o bot")
+        if bucket_done(snapshot):
+            self.logger.warning(f"Bucket {snapshot.bucket} encerrado: parando o bot")
             self.is_running = False
             return None
-        signal = self.strategy.on_market_refresh(
-            current_price,
-            None,  # não vem no websocket
-            snapshot.available_usd,
-            snapshot.position,
-        )
-        if signal is None or self.monotonic() < self._orders_paused_until:
+        request = order_for(self.strategy, current_price, snapshot)
+        if request is None or self.monotonic() < self._orders_paused_until:
             return None
-        reply = await self.trader.submit(
-            OrderRequest(signal.side, signal.quantity, current_price, signal.rationale)
-        )
-        return await self._handle_reply(reply)
+        return await self._handle_reply(await self.trader.submit(request))
 
     async def _handle_reply(self, reply: OrderReply) -> Order | None:
         if reply.status == ReplyStatus.ERROR:
@@ -163,12 +132,6 @@ class AsyncWebsocketTradingBot:
             except Exception as ex:
                 backoff = await self._on_error(ex, backoff)
 
-    def _warmup(self) -> tuple[Interval, int]:
-        """Timeframe e candles de aquecimento (`strategy.warmup()`, se houver)."""
-        if isinstance(self.strategy, WarmsUp):
-            return self.strategy.warmup()
-        return DEFAULT_WARMUP
-
     async def _step(self):
         # a inicialização também passa pelo backoff: um 429 ao buscar os
         # candles de aquecimento não derruba o bot
@@ -195,19 +158,25 @@ class AsyncWebsocketTradingBot:
             # restaura a posição do ledger e reconcilia (lado da execução)
             await self.trader.open()
             self._opened = True
-            if isinstance(self.strategy, Resumes):
-                snapshot = await self.trader.bucket()
-                self.strategy.resume(
-                    snapshot.last_exit_at,
-                    snapshot.opened_at,
-                    last_exit_price=snapshot.last_exit_price,
-                )
-        interval, count = self._warmup()
+        if not self._resumed:
+            # separado de `_opened`: um erro aqui (ex: saldo) tenta de novo no
+            # próximo passo, em vez de perder o cooldown e a validade
+            await self._resume_strategy()
+            self._resumed = True
+        interval, count = self.strategy.warmup()
         self.strategy.setup(
             await self.market.get_candles(self.output_mint, interval, count)
         )
         self._started = True
         self.notification_service.send_message(f"Bot iniciado para {self.symbol}")
+
+    async def _resume_strategy(self):
+        snapshot = await self.trader.bucket()
+        self.strategy.resume(
+            snapshot.last_exit_at,
+            snapshot.opened_at,
+            last_exit_price=snapshot.last_exit_price,
+        )
 
     async def _tick(self):
         current_price = await self.market.get_price(self.output_mint)
@@ -233,9 +202,6 @@ class AsyncWebsocketTradingBot:
     async def _on_error(self, ex: Exception, backoff: float) -> float:
         """Trata um erro do loop e retorna o próximo backoff."""
         self.logger.error(f"ERROR: Erro no loop principal: {str(ex)}", exc_info=True)
-        if self.stop_when_error:
-            self.is_running = False
-            return backoff
         await asyncio.sleep(backoff)
         return min(backoff * 2, self.error_backoff_max)
 
@@ -268,6 +234,6 @@ def log_position(position: Position, current_price: Decimal):
     pnl_str = f"[{pnl_style}]{pnl:.2f}%[/{pnl_style}]"
 
     bot_logger.debug(
-        f"{position.type.name} {position.entry_order.quantity:.8f} @ ${position.entry_order.price:.8f}. PNL: {pnl_str}",
+        f"LONG {position.entry_order.quantity:.8f} @ ${position.entry_order.price:.8f}. PNL: {pnl_str}",
         extra={"markup": True},
     )

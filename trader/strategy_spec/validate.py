@@ -7,9 +7,8 @@ lista vazia = válida.
 
 `SpecLimits` é um dado simples, não a `Policy`: a camada de estratégia não
 importa a política (camada de risco). Quem monta os limites a partir da
-política é a camada de aplicação (`trader.agent_api`). Esta validação é
-consultiva: quem executa (gateway, e o trade-runner na fase 4) valida de
-novo com a política dele.
+política é a camada de aplicação (`trader/cli/bot.py`). Esta validação é
+consultiva: quem executa (o gateway) valida de novo com a política dele.
 """
 
 from collections.abc import Callable, Iterator
@@ -22,7 +21,7 @@ from pydantic import ValidationError
 from trader.models import SOLANA_MINTS, Mint
 from trader.strategy_spec.models import StrategySpec
 
-# prazo máximo de uma spec; vai para a seção [strategies] da política na fase 3
+# prazo máximo de uma spec; vai para a seção [strategies] da política (B1)
 DEFAULT_MAX_DAYS = 30
 
 

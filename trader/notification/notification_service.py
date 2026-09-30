@@ -7,6 +7,7 @@ vira uma task; fora de um loop, roda na hora (não há loop para travar).
 
 import asyncio
 import logging
+import os
 
 import httpx
 
@@ -15,6 +16,8 @@ CLOSE_TIMEOUT_SECONDS = 5
 
 
 class NotificationService:
+    """Não envia nada: o padrão sem Telegram configurado."""
+
     def __init__(self):
         self.logger = logging.getLogger(self.__module__)
 
@@ -25,8 +28,13 @@ class NotificationService:
         pass
 
 
-class NullNotificationService(NotificationService):
-    pass
+def notifier_from_env() -> NotificationService:
+    """Telegram se `TELEGRAM_CHAT_ID` e `TELEGRAM_BOT_TOKEN` existem; senão, nada."""
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if chat_id and token:
+        return TelegramNotificationService(chat_id, token)
+    return NotificationService()
 
 
 class TelegramNotificationService(NotificationService):

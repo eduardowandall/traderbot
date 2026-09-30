@@ -2,8 +2,8 @@
 
 Recusas idênticas seguidas na mesma conta (mesmo lado, mints e motivos)
 viram uma linha só, com `repeat_count`: vários runners batendo num limite
-não enchem o ledger. A repetição não grava evento; a primeira recusa está na
-cadeia, e recusas não movem fundos.
+não enchem o ledger. A repetição não grava evento; a primeira recusa está no
+log, e recusas não movem fundos.
 """
 
 import json
@@ -72,9 +72,9 @@ class IntentStore(LedgerStore):
         self.conn.execute(
             "INSERT INTO intents (intent_id, idempotency_key, created_at, "
             "updated_at, source, account, side, spend_mint, receive_mint, "
-            "spend_amount, notional_usd, price, quantity, rationale, status, "
-            "decision_reasons, policy_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "spend_amount, notional_usd, price, quantity, rationale, "
+            "closes_position, status, decision_reasons, policy_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 intent.intent_id,
                 intent.idempotency_key,
@@ -90,6 +90,7 @@ class IntentStore(LedgerStore):
                 _str(intent.price),
                 _str(intent.quantity),
                 intent.rationale,
+                None if intent.closes_position is None else int(intent.closes_position),
                 str(status),
                 json.dumps(list(decision.reasons)),
                 decision.policy_version,
@@ -113,11 +114,11 @@ class IntentStore(LedgerStore):
             raise KeyError(f"intenção não encontrada: {intent_id}")
         self._add_event(event, intent_id, payload)
 
-    def _transition(self, intent_id: str, event: str, payload: dict, **columns) -> None:
+    def _transition(self, intent_id: str, event: str, payload: dict, **columns) -> bool:
         """Muda o status só se a intenção ainda está ativa (executando/pendente).
 
-        Um processo que termina tarde não sobrescreve a resolução do dono: a
-        mudança é ignorada e registrada em ERROR, com o que teria sido gravado.
+        Uma mudança tardia (a intenção já saiu do estado ativo) é ignorada e
+        registrada em ERROR, com o que teria sido gravado. Devolve se mudou.
         """
         with self._write():
             status = self._status_of(intent_id)
@@ -126,8 +127,9 @@ class IntentStore(LedgerStore):
                     f"Intenção {intent_id} já está {status}: {event} ignorado "
                     f"({payload})"
                 )
-                return
+                return False
             self._update_locked(intent_id, event, payload, **columns)
+            return True
 
     def _status_of(self, intent_id: str) -> IntentStatus:
         row = self.conn.execute(
@@ -137,8 +139,8 @@ class IntentStore(LedgerStore):
             raise KeyError(f"intenção não encontrada: {intent_id}")
         return IntentStatus(row["status"])
 
-    def mark_executed(self, intent_id: str, result: SwapResult) -> None:
-        self._transition(
+    def mark_executed(self, intent_id: str, result: SwapResult) -> bool:
+        return self._transition(
             intent_id,
             "intent_executed",
             asdict(result),
@@ -174,16 +176,6 @@ class IntentStore(LedgerStore):
             **extra,
         )
 
-    def record_failed_fee(self, intent_id: str, fee_lamports: int) -> None:
-        """Taxa paga por uma transação que falhou (sem posição associada)."""
-        self._update(
-            intent_id,
-            "failed_fee_recorded",
-            {"fee_lamports": fee_lamports},
-            fee_lamports=fee_lamports,
-            costs_source="onchain",
-        )
-
     def attach_order(
         self,
         intent_id: str,
@@ -191,7 +183,14 @@ class IntentStore(LedgerStore):
         realized_pnl_usd: Decimal | None = None,
         pnl: PnLResult | None = None,
     ) -> None:
-        """Grava a ordem, seus custos e (vendas) o PnL, numa só atualização."""
+        """Grava a ordem, seus custos e (vendas) o PnL, numa só atualização.
+
+        Só numa intenção EXECUTED: a ordem e o PnL de uma que falhou contariam
+        como trade no PnL e no custo.
+        """
+        status = self._status_of(intent_id)
+        if status != IntentStatus.EXECUTED:
+            raise ValueError(f"intenção {intent_id} está {status}, não executed")
         self._update(
             intent_id,
             "order_recorded",
@@ -205,37 +204,6 @@ class IntentStore(LedgerStore):
             **_order_columns(order),
             **_pnl_columns(pnl),
         )
-
-    def resolve(
-        self,
-        intent_id: str,
-        status: IntentStatus,
-        note: str,
-        signature: str | None = None,
-    ) -> None:
-        """Resolução manual de uma intenção sem confirmação.
-
-        Confere e grava na mesma transação: o bot não muda o status no meio.
-        `signature` grava uma assinatura que só chegou ao log (ex: quando o
-        `mark_executed` falhou).
-        """
-        if status not in (IntentStatus.EXECUTED, IntentStatus.FAILED):
-            raise ValueError("resolva como executed ou failed")
-        with self._write():
-            record = self.get(intent_id)
-            if record is None:
-                raise KeyError(f"intenção não encontrada: {intent_id}")
-            if record.status not in ACTIVE_STATUSES:
-                raise ValueError(f"intenção {intent_id} já está {record.status}")
-            extra = {"signature": signature} if signature else {}
-            self._update_locked(
-                intent_id,
-                "intent_resolved",
-                {"status": str(status), "note": note, **extra},
-                status=str(status),
-                error=note if status == IntentStatus.FAILED else record.error,
-                **extra,
-            )
 
     # --- consultas -------------------------------------------------------------
 
@@ -266,36 +234,65 @@ class IntentStore(LedgerStore):
         return [_record(r) for r in rows]
 
     def legs_since_last_buy(self, account: str) -> list[IntentRecord]:
-        """A última compra executada da conta e as vendas depois dela."""
+        """A última compra executada da conta e as vendas depois dela.
+
+        Pela ordem de criação: `updated_at` muda depois (a ordem gravada), e
+        não pode reordenar as pernas.
+        """
         buy = self.conn.execute(
-            "SELECT updated_at FROM intents WHERE account = ? AND status = ? "
-            "AND side = ? ORDER BY updated_at DESC LIMIT 1",
+            "SELECT created_at FROM intents WHERE account = ? AND status = ? "
+            "AND side = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (account, str(IntentStatus.EXECUTED), str(IntentSide.BUY)),
         ).fetchone()
         if buy is None:
             return []
         rows = self.conn.execute(
             "SELECT * FROM intents WHERE account = ? AND status = ? "
-            "AND side IN (?, ?) AND updated_at >= ? ORDER BY updated_at, rowid",
+            "AND side IN (?, ?) AND created_at >= ? ORDER BY created_at, rowid",
             (
                 account,
                 str(IntentStatus.EXECUTED),
                 str(IntentSide.BUY),
                 str(IntentSide.SELL),
-                buy["updated_at"],
+                buy["created_at"],
             ),
         ).fetchall()
         return [_record(r) for r in rows]
 
     def account_times(self, account: str) -> tuple[datetime | None, datetime | None]:
-        """(primeira intenção da conta, última venda executada): UTC."""
+        """(abertura da conta, última venda executada): UTC.
+
+        A abertura é o evento `bucket_opened` (ou, em ledgers de antes dele, a
+        primeira intenção): uma spec que nunca operou não recomeça a contar o
+        `ttl_days` a cada reinício.
+        """
         row = self.conn.execute(
-            "SELECT MIN(created_at) AS opened, "
+            "SELECT MIN(created_at) AS first_intent, "
+            "(SELECT MIN(ts) FROM events WHERE type = 'bucket_opened' "
+            "AND json_extract(payload, '$.account') = ?) AS opened, "
             "(SELECT MAX(updated_at) FROM intents WHERE account = ? AND status = ? "
             "AND side = ?) AS exited FROM intents WHERE account = ?",
-            (account, str(IntentStatus.EXECUTED), str(IntentSide.SELL), account),
+            (
+                account,
+                account,
+                str(IntentStatus.EXECUTED),
+                str(IntentSide.SELL),
+                account,
+            ),
         ).fetchone()
-        return _dt(row["opened"]), _dt(row["exited"])
+        opened = min(filter(None, (row["opened"], row["first_intent"])), default=None)
+        return _dt(opened), _dt(row["exited"])
+
+    def mark_account_opened(self, account: str) -> None:
+        """Grava a abertura da conta (`bucket_opened`), só na primeira vez."""
+        with self._write():
+            seen = self.conn.execute(
+                "SELECT 1 FROM events WHERE type = 'bucket_opened' "
+                "AND json_extract(payload, '$.account') = ? LIMIT 1",
+                (account,),
+            ).fetchone()
+            if not seen:
+                self._add_event("bucket_opened", None, {"account": account})
 
     def last_exit_price(self, account: str) -> Decimal | None:
         """Preço (`Order.price`) da última venda executada; None sem ordem."""
@@ -307,20 +304,6 @@ class IntentStore(LedgerStore):
         if row is None or not row["order_json"]:
             return None
         return order_from_json(row["order_json"]).price
-
-    def last_executed_trade(self, account: str) -> IntentRecord | None:
-        row = self.conn.execute(
-            "SELECT * FROM intents WHERE account = ? AND status = ? "
-            "AND side IN (?, ?) "
-            "ORDER BY updated_at DESC LIMIT 1",
-            (
-                account,
-                str(IntentStatus.EXECUTED),
-                str(IntentSide.BUY),
-                str(IntentSide.SELL),
-            ),
-        ).fetchone()
-        return _record(row) if row else None
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -354,6 +337,9 @@ def _record(row: sqlite3.Row) -> IntentRecord:
         price=_dec(row["price"]),
         quantity=_dec(row["quantity"]),
         rationale=row["rationale"],
+        closes_position=(
+            None if row["closes_position"] is None else bool(row["closes_position"])
+        ),
     )
     return IntentRecord(
         intent=intent,

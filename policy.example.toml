@@ -1,49 +1,46 @@
 # Política de risco do bot. Copie para `policy.toml` (ou aponte
 # TRADER_POLICY_FILE para outro arquivo, relativo à raiz do projeto) e
-# ajuste os limites.
-# Sem arquivo, valem os padrões abaixo. Chaves desconhecidas são erro.
+# ajuste os limites. Sem arquivo, valem os padrões abaixo. Chaves
+# desconhecidas são erro.
 #
-# Toda ordem (estratégias e `main.py swap`) passa por esta política antes de
-# executar e fica registrada em `.data/ledger-<modo>.sqlite3`.
+# Toda ordem passa por esta política antes de executar e fica registrada em
+# `.data/ledger-<modo>.sqlite3`.
+#
+# Camadas, da mais fraca para a mais forte: os padrões do código; em paper,
+# limites folgados (max_trade_usd 1000, max_daily_notional_usd 10000,
+# max_trades_per_hour 60), porque não há dinheiro de verdade; [trading] e
+# [limits] (todos os modos); [paper.*] e [real.*] (só naquele modo).
 
 [trading]
-# Modo real bloqueado até você habilitar explicitamente.
-real_trading_enabled = false
+# Modo real bloqueado até você habilitar explicitamente (padrão: false).
+# real_trading_enabled = false
 # Símbolos permitidos (de trader/models/mints.py). Vazio = todos.
-allowed_symbols = []
-# Permite swaps sem estimativa em USD (quando nenhum lado é USDC/USDT e não há
-# preço de mercado, ex: `swap SOL JUP`). Esses swaps não entram no orçamento.
-allow_unknown_notional = false
+# allowed_symbols = []
+# Permite compras sem estimativa em USD (quando nenhum lado é USDC/USDT e não
+# há preço de mercado). Essas compras não entram no orçamento.
+# allow_unknown_notional = false
 
 [limits]
+# Os valores comentados são os padrões. Definir um aqui vale também para o
+# paper (por cima dos limites folgados dele).
 # Valor máximo por trade, em USD.
-max_trade_usd = 25
-# Soma máxima de compras/swaps nas últimas 24h, em USD.
-max_daily_notional_usd = 100
-# Máximo de compras/swaps na última hora.
-max_trades_per_hour = 10
+# max_trade_usd = 25
+# Soma máxima de compras nas últimas 24h, em USD.
+# max_daily_notional_usd = 100
+# Máximo de compras na última hora.
+# max_trades_per_hour = 10
 # Perda realizada nas últimas 24h que bloqueia novas compras, em USD.
-max_daily_loss_usd = 20
-# Falhas seguidas que disparam o circuit breaker (rearme: `main.py resume`).
-max_consecutive_failures = 3
+# max_daily_loss_usd = 20
+# Falhas seguidas que disparam o circuit breaker (reiniciar o bot rearma).
+# max_consecutive_failures = 3
 
-# Seções por modo (opcional): `[real.*]`, `[dry.*]` e `[paper.*]` sobrescrevem
-# só as chaves que definirem, e só naquele modo. Ex: limites folgados para
-# testar em paper sem afrouxar o modo real.
-#
-# [paper.limits]
-# a carteira paper padrão é 100 USDC/0.5 SOL (`DEFAULT_PAPER_BALANCES`) e as
-# estratégias padrão dimensionam 50-100% do saldo: sem isso, a primeira
-# compra já esbarra no max_trade_usd=25 herdado e fica sempre recusada
-# ("trade de N USD acima do limite 25 USD" em `ledger list`)
-# max_trade_usd = 1000
-# max_daily_notional_usd = 10000
-# max_trades_per_hour = 60
-#
 # [real.trading]
 # real_trading_enabled = true
 # allowed_symbols = ["SOL", "USDC"]
+#
+# [paper.limits]
+# max_trade_usd = 100
 
 # Vendas que fecham uma posição ignoram os limites de orçamento acima (para a
-# posição nunca ficar presa), mas respeitam o kill switch, o circuit breaker e
-# intenções sem confirmação.
+# posição nunca ficar presa), mas respeitam o circuit breaker e as intenções
+# sem confirmação.

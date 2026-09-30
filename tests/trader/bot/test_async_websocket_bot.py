@@ -1,20 +1,21 @@
 import asyncio
+from datetime import datetime
 from decimal import Decimal
 from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import bonk_quote, memory_gateway
-from solders.keypair import Keypair
+from factories import StubStrategy, memory_gateway
 
+from trader.backtest import Tick
+from trader.backtest.replay import ReplayQuoteClient
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.bot.config import BotConfig
 from trader.market import JupiterMarketData
 from trader.models import SOLANA_MINTS, Interval, OrderSide, OrderSignal, Position
-from trader.notification import NullNotificationService
-from trader.providers import (
-    AsyncJupiterProvider,
-)
+from trader.models.intent import IntentSide, IntentStatus
+from trader.notification import NotificationService
+from trader.paper import SimulatedWallet, paper_provider
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.trading_service.local import LocalTradeClient
 from trader.trading_service.protocol import (
@@ -24,13 +25,12 @@ from trader.trading_service.protocol import (
     TradeServiceError,
 )
 from trader.trading_service.service import TradeService
-from trader.trading_strategy import TradingStrategy
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 BONK = SOLANA_MINTS.get_by_symbol("BONK")
 
 
-class FakeStrategy(TradingStrategy):
+class FakeStrategy(StubStrategy):
     def __init__(self):
         super().__init__()
         self.count = 0
@@ -38,7 +38,6 @@ class FakeStrategy(TradingStrategy):
     def on_market_refresh(
         self,
         price: Decimal,
-        spread: Decimal | None,
         balance: Decimal,
         current_position: Position | None,
     ) -> OrderSignal | None:
@@ -61,102 +60,43 @@ def _market_client():
     return client
 
 
-async def test_async_websocket_bot_complete(
-    mock_sleep, mock_jupiter_client, mock_rpc_client
-):
-    keypair = Keypair()
+async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
+    # bot -> TradeService -> gateway -> carteira paper, com quotes sintéticas
     strategy = FakeStrategy()
-    market_client = _market_client()
-    provider = AsyncJupiterProvider.on_chain(
-        keypair, rpc_client=mock_rpc_client, jupiter_client=mock_jupiter_client
-    )
+    quotes = ReplayQuoteClient(USDC, Decimal(0))
+    quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
+    wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
+    gateway = memory_gateway()
     trader = LocalTradeClient(
-        TradeService(provider, memory_gateway()),
+        TradeService(paper_provider(wallet, jupiter_client=quotes), gateway),
         "BONK-USDC",
         USDC.mint,
         BONK.mint,
         owns_service=True,
     )
+    market_client = _market_client()
     bot = AsyncWebsocketTradingBot(
         BotConfig(
-            name="name-bot-config-teste-complete",
+            name="e2e",
             symbol="BONK-USDC",
             strategy=strategy,
             market=JupiterMarketData(market_client),
             trader=trader,
-            notifier=NullNotificationService(),
+            notifier=NotificationService(),
         )
     )
-    bot.stop_when_error = True
+
     await bot.arun()
+
     assert strategy.count == 2
-
-    assert_market_mock_calls(market_client)
-    assert_jupiter_mock_calls(mock_jupiter_client, keypair)
-    assert_rpc_client_mock_calls(mock_rpc_client, keypair)
-
-
-def _assert_calls(mock_client, expected_calls):
-    actual_calls = [
-        c for c in mock_client.mock_calls if c[0].isidentifier() and c[0] != "__str__"
+    records = gateway.ledger.list_intents()
+    assert [(r.intent.side, r.status) for r in reversed(records)] == [
+        (IntentSide.BUY, IntentStatus.EXECUTED),
+        (IntentSide.SELL, IntentStatus.EXECUTED),
     ]
-    assert len(actual_calls) == len(expected_calls), actual_calls
-    for idx, _call in enumerate(actual_calls):
-        assert _call == expected_calls[idx], f"call[{idx}] diferente do esperado"
-
-
-def assert_market_mock_calls(market_client):
-    _assert_calls(
-        market_client,
-        [
-            mock.call.get_candles(BONK.mint, interval=mock.ANY, candle_qty=100),
-            mock.call.get_price(BONK.mint),
-            mock.call.get_price(BONK.mint),
-            mock.call.get_price(BONK.mint),
-            mock.call.aclose(),
-        ],
-    )
-
-
-def assert_jupiter_mock_calls(mock_jupiter_client, keypair):
-    _assert_calls(
-        mock_jupiter_client,
-        [
-            mock.call.get_quote(USDC.mint, BONK.mint, 50000000, 50),
-            mock.call.get_swap_transaction(bonk_quote(), keypair.pubkey()),
-            # venda de 50 BONK (5 decimais) = 5_000_000 raw
-            mock.call.get_quote(BONK.mint, USDC.mint, 5000000, 50),
-            mock.call.get_swap_transaction(bonk_quote(), keypair.pubkey()),
-            mock.call.aclose(),
-        ],
-    )
-
-
-def assert_rpc_client_mock_calls(mock_rpc_client, keypair):
-    _assert_calls(
-        mock_rpc_client,
-        [
-            mock.call.get_lamports(keypair.pubkey()),
-            mock.call.get_account_balance(keypair.pubkey()),
-            mock.call.sign_transaction(mock.ANY, keypair),
-            mock.call.simulate_transaction(mock.ANY),
-            mock.call.send_transaction(mock.ANY),
-            mock.call.check_signature_is_confirmed(mock.ANY),
-            # custos lidos da transação confirmada, depois da execução
-            mock.call.get_confirmed_transaction(mock.ANY),
-            mock.call.get_lamports(keypair.pubkey()),
-            mock.call.get_account_balance(keypair.pubkey()),
-            mock.call.sign_transaction(mock.ANY, keypair),
-            mock.call.simulate_transaction(mock.ANY),
-            mock.call.send_transaction(mock.ANY),
-            mock.call.check_signature_is_confirmed(mock.ANY),
-            # custos lidos da transação confirmada, depois da execução
-            mock.call.get_confirmed_transaction(mock.ANY),
-            mock.call.get_lamports(keypair.pubkey()),
-            mock.call.get_account_balance(keypair.pubkey()),
-            mock.call.aclose(),
-        ],
-    )
+    assert all(r.order_json for r in records)
+    assert wallet.balance(BONK.mint) == 0  # vendeu tudo o que comprou
+    market_client.aclose.assert_awaited_once()
 
 
 class FakeTrader:
@@ -198,7 +138,7 @@ def _bot(market, strategy, trader=None, **config):
             strategy=strategy,
             market=market,
             trader=trader or FakeTrader(),
-            notifier=NullNotificationService(),
+            notifier=NotificationService(),
             **config,
         )
     )
@@ -215,7 +155,7 @@ async def test_errors_back_off_exponentially_and_reset():
             KeyboardInterrupt(),
         ]
     )
-    strategy = mock.Mock(spec=TradingStrategy)
+    strategy = mock.Mock(wraps=StubStrategy())
     strategy.on_market_refresh.return_value = None
     bot = _bot(market, strategy)
 
@@ -228,7 +168,7 @@ async def test_errors_back_off_exponentially_and_reset():
 async def test_stop_ends_the_loop():
     market = _market()
     market.get_price = AsyncMock(return_value=Decimal("1"))
-    strategy = mock.Mock(spec=TradingStrategy)
+    strategy = mock.Mock(wraps=StubStrategy())
     bot = _bot(market, strategy)
     strategy.on_market_refresh.side_effect = lambda *a: bot.stop()
 
@@ -240,7 +180,7 @@ async def test_stop_ends_the_loop():
 async def test_startup_opens_the_bucket_and_shutdown_closes_everything():
     market = _market([KeyboardInterrupt()])
     trader = FakeTrader()
-    bot = _bot(market, mock.Mock(spec=TradingStrategy), trader)
+    bot = _bot(market, mock.Mock(wraps=StubStrategy()), trader)
 
     await bot.arun()
 
@@ -253,8 +193,8 @@ async def test_startup_opens_the_bucket_and_shutdown_closes_everything():
 async def test_cancellation_closes_and_propagates():
     market = _market([asyncio.CancelledError()])
     trader = FakeTrader()
-    notifier = mock.Mock(spec=NullNotificationService)
-    bot = _bot(market, mock.Mock(spec=TradingStrategy), trader)
+    notifier = mock.Mock(spec=NotificationService)
+    bot = _bot(market, mock.Mock(wraps=StubStrategy()), trader)
     bot.notification_service = notifier
 
     with pytest.raises(asyncio.CancelledError):
@@ -271,14 +211,14 @@ async def test_shutdown_survives_close_errors():
     market = _market([KeyboardInterrupt()])
     market.aclose = AsyncMock(side_effect=RuntimeError("already closed"))
     trader = FakeTrader()
-    bot = _bot(market, mock.Mock(spec=TradingStrategy), trader)
+    bot = _bot(market, mock.Mock(wraps=StubStrategy()), trader)
 
     await bot.arun()  # não propaga o erro de fechamento
     assert trader.closed == 1  # o trader fecha mesmo com erro no market
 
 
 def _buy_strategy():
-    strategy = mock.Mock(spec=TradingStrategy)
+    strategy = mock.Mock(wraps=StubStrategy())
     strategy.on_market_refresh.return_value = OrderSignal(
         OrderSide.BUY, Decimal("1"), rationale="porque sim"
     )
@@ -328,11 +268,11 @@ async def test_retiring_bucket_stops_the_bot():
 
 
 async def test_warmup_and_tick_callback():
-    class Warm(TradingStrategy):
+    class Warm(StubStrategy):
         def warmup(self):
             return Interval.HOUR_1, 24
 
-        def on_market_refresh(self, price, spread, balance, current_position):
+        def on_market_refresh(self, price, balance, current_position):
             raise KeyboardInterrupt()
 
     market = _market([Decimal("2")])
@@ -351,7 +291,7 @@ async def test_a_failed_startup_backs_off_and_opens_the_bucket_once():
     trader = FakeTrader()
     opens = []
     trader.open = AsyncMock(side_effect=lambda: opens.append(1))
-    strategy = mock.Mock(spec=TradingStrategy)
+    strategy = mock.Mock(wraps=StubStrategy())
     strategy.on_market_refresh.return_value = None
     bot = _bot(market, strategy, trader)
 
@@ -377,14 +317,40 @@ async def test_startup_resumes_a_strategy_that_keeps_state():
     assert strategy.resumed == (None, None, None)  # o FakeTrader não tem histórico
 
 
+async def test_a_failed_first_bucket_read_still_resumes_later(mock_sleep):
+    # T4: com `_opened` já marcado, um erro no primeiro `bucket()` pulava o
+    # `resume()` para sempre (cooldown, rearme e `ttl_days` perdidos)
+    class Resuming(FakeStrategy):
+        resumed = False
+
+        def resume(self, last_exit_at, opened_at, last_exit_price=None):
+            self.resumed = True
+
+    class FlakyTrader(FakeTrader):
+        reads = 0
+
+        async def bucket(self):
+            self.reads += 1
+            if self.reads == 1:
+                raise OSError("saldo indisponível")
+            return await super().bucket()
+
+    strategy = Resuming()
+    bot = _bot(_market([KeyboardInterrupt()]), strategy, FlakyTrader())
+
+    await bot.arun()
+
+    assert strategy.resumed
+
+
 async def test_repeated_startup_failures_alert_the_owner_once():
     from trader.bot import async_websocket_bot as bot_module
 
     market = _market([KeyboardInterrupt()])
     failures = [OSError("datapi fora")] * (bot_module.STARTUP_ALERT_AFTER + 1)
     market.get_candles = AsyncMock(side_effect=[*failures, []])
-    notifier = mock.Mock(spec=NullNotificationService)
-    bot = _bot(market, mock.Mock(spec=TradingStrategy))
+    notifier = mock.Mock(spec=NotificationService)
+    bot = _bot(market, mock.Mock(wraps=StubStrategy()))
     bot.notification_service = notifier
 
     with mock.patch("asyncio.sleep"):

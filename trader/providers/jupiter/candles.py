@@ -22,7 +22,6 @@ def candles_to_tickers(candles: list[dict[str, Any]]) -> list[TickerData]:
     """Um `TickerData` por candle (preços em USD)."""
     return [
         TickerData(
-            pair="ignored",
             # hora local sem fuso, como sempre foi; `indicators.to_utc`
             # normaliza quando precisa comparar com ticks UTC
             timestamp=datetime.fromtimestamp(candle["time"]),
@@ -30,9 +29,6 @@ def candles_to_tickers(candles: list[dict[str, Any]]) -> list[TickerData]:
             low=_dec(candle["low"]),
             open=_dec(candle["open"]),
             last=_dec(candle["close"]),
-            buy=_dec(candle["open"]),
-            sell=_dec(candle["open"]),
-            vol=_dec(candle["volume"]),
         )
         for candle in candles
     ]

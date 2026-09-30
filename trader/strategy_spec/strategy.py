@@ -1,4 +1,4 @@
-"""`SpecStrategy`: executa uma `StrategySpec` como `TradingStrategy`.
+"""`SpecStrategy`: executa uma `StrategySpec` (a única estratégia do bot).
 
 Camada strategy: só recebe preço, saldo e posição, e devolve sinais. Não
 conhece modo, chave, ledger nem política (quem limita é o gateway/bucket).
@@ -11,7 +11,8 @@ A cada tick:
 """
 
 import logging
-from collections.abc import Sequence
+import random
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -22,7 +23,6 @@ from trader.models.public_data import Interval
 from trader.strategy_spec.conditions import IndicatorBank, TickContext, fired, holds
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.validate import parse_spec
-from trader.trading_strategy import TradingStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +30,15 @@ logger = logging.getLogger(__name__)
 MIN_HISTORY = 50
 
 
-class SpecStrategy(TradingStrategy):
+class SpecStrategy:
     def __init__(self, spec: StrategySpec):
-        super().__init__()
         self.logger = logger
+        # relógio e sorteios injetáveis: no backtest, o tempo do tick e uma
+        # semente fixa (o resultado é determinístico)
+        self.clock: Callable[[], datetime] = datetime.now
+        self.rng = random.Random()
         self.spec = spec
         self.spec_id = spec.spec_id()
-        # a CLI confere que o par do `run` é o da spec
         self.symbol = spec.symbol
         # aquecida só com histórico suficiente para EMA/RSI convergirem
         self._history = spec.history()
@@ -63,6 +65,12 @@ class SpecStrategy(TradingStrategy):
     def __repr__(self) -> str:
         return f"SpecStrategy({self.spec.name} {self.spec_id} {self.symbol})"
 
+    def set_clock(self, clock: Callable[[], datetime]) -> None:
+        self.clock = clock
+
+    def seed(self, seed: int | str | None) -> None:
+        self.rng = random.Random(seed)
+
     def resume(
         self,
         last_exit_at: datetime | None,
@@ -87,7 +95,6 @@ class SpecStrategy(TradingStrategy):
     def on_market_refresh(
         self,
         price: Decimal,
-        spread: Decimal | None,
         balance: Decimal,
         current_position: Position | None,
     ) -> OrderSignal | None:
@@ -132,10 +139,12 @@ class SpecStrategy(TradingStrategy):
         self._peak = None
 
     def _is_warm(self) -> bool:
-        if not self._warm and len(self.bank) >= self._history:
-            self._warm = True
-            logger.debug("%s aquecida com %d barras", self.spec_id, self._history)
-        return self._warm
+        warm = len(self.bank) >= self._history
+        if warm != self._warm:
+            # esfria depois de um buraco no feed (a série recomeçou)
+            logger.debug("%s %s", self.spec_id, "aquecida" if warm else "esfriou")
+            self._warm = warm
+        return warm
 
     def _context(self, price: Decimal, now: datetime) -> TickContext:
         return TickContext(

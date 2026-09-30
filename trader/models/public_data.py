@@ -30,13 +30,10 @@ _INTERVAL_SECONDS = {
 
 @dataclass
 class TickerData:
-    buy: Decimal
+    """Um candle (preços em USD); `last` é o fechamento."""
+
     timestamp: datetime
     high: Decimal
     last: Decimal
     low: Decimal
     open: Decimal
-    pair: str
-    sell: Decimal
-    vol: Decimal
-    spread: Decimal | None = None

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from decimal import Decimal
-from enum import StrEnum, auto
 
 from trader.models.costs import PnLResult
 from trader.models.mints import SOLANA_MINTS
@@ -32,17 +31,12 @@ def _leg_costs(order: Order, fraction: Decimal):
     return sol, _times(sol, order.sol_in_quote), _times(sol, order.sol_usd), known
 
 
-class PositionType(StrEnum):
-    LONG = auto()
-
-
 @dataclass
 class Position:
     """Representa uma posição de trading"""
 
-    type: PositionType
     entry_order: Order
-    exit_order: Order | None
+    exit_order: Order | None = None
 
     def unrealized_pnl(self, current_price: Decimal) -> Decimal:
         """Calcula o PnL não realizado"""
@@ -51,11 +45,14 @@ class Position:
     @property
     def realized_pnl(self) -> Decimal:
         """PnL realizado em USD (estimativa líquida quando há dados nativos)."""
-        detail = self.realized_pnl_detail()
+        return self.realized_usd(self.realized_pnl_detail())
+
+    def realized_usd(self, detail: PnLResult | None) -> Decimal:
+        """O PnL em USD a partir de um `realized_pnl_detail()` já calculado."""
         if detail is not None and detail.net_usd is not None:
             return detail.net_usd
         if self.exit_order:
-            # ordens antigas: preço USD x quantidade vendida
+            # sem valores nativos: preço USD x quantidade vendida
             return (
                 self.exit_order.price - self.entry_order.price
             ) * self.exit_order.quantity

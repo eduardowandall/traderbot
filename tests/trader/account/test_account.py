@@ -5,13 +5,12 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import memory_gateway, mock_provider
 
-from trader.async_account import AsyncAccount
+from trader.execution.account import AsyncAccount
 from trader.models import (
     SOLANA_MINTS,
     Order,
     OrderSide,
     Position,
-    PositionType,
     SwapResult,
 )
 from trader.models.account_data import MintBalance
@@ -31,7 +30,6 @@ def _make_account(balances=None):
 
 def _long_position(mi, mo):
     return Position(
-        PositionType.LONG,
         Order(
             "",
             mi.mint,
@@ -45,15 +43,15 @@ def _long_position(mi, mo):
     )
 
 
-async def test_can_buy_raises_when_long_position_exists():
+async def test_buy_raises_when_long_position_exists():
     acc, mi, mo = _make_account()
     acc.book.position = _long_position(mi, mo)
 
     with pytest.raises(ValueError, match="Já existe posicão"):
-        await acc.can_buy()
+        await acc.buy(Decimal("100"), Decimal("0.1"))
 
 
-async def test_can_buy_raises_when_balance_below_minimum():
+async def test_buy_raises_when_balance_below_minimum():
     mi, mo = SOLANA_MINTS.get_by_symbol("SOL"), SOLANA_MINTS.get_by_symbol("USDC")
     acc, _, _ = _make_account(
         [
@@ -63,13 +61,8 @@ async def test_can_buy_raises_when_balance_below_minimum():
     )
 
     with pytest.raises(ValueError, match="Sem valor minimo"):
-        await acc.can_buy()
-
-
-async def test_can_buy_allows_without_position_and_sufficient_balance():
-    acc, _, _ = _make_account()
-
-    await acc.can_buy()
+        await acc.buy(Decimal("100"), Decimal("0.1"))
+    acc.provider.buy.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 async def test_can_sell_raises_when_no_position():
@@ -118,17 +111,17 @@ def _usdc_sol_account(usdc="1000", sol="1", fill_ratio=Decimal("1")):
     )
     prices = {}
 
-    async def buy(input_mint, output_mint, type_order, quantity, price):
-        prices["last"] = price
+    async def buy(input_mint, output_mint, spend_amount):
+        # as compras destes testes são a 100 USDC/SOL
         return SwapResult(
             "buy-sig",
             str(input_mint),
             str(output_mint),
-            USDC.ui_to_raw(quantity * price),
-            SOL.ui_to_raw(quantity * fill_ratio),
+            USDC.ui_to_raw(spend_amount),
+            SOL.ui_to_raw(spend_amount / 100 * fill_ratio),
         )
 
-    async def sell(input_mint, output_mint, type_order, quantity):
+    async def sell(input_mint, output_mint, quantity):
         return SwapResult(
             "sell-sig",
             str(output_mint),
@@ -167,8 +160,8 @@ async def test_buy_is_capped_at_spendable_balance():
 
     order = await acc.buy(Decimal("100"), Decimal("0.5"))
 
-    acc.provider.buy.assert_awaited_once()  # type: ignore[attr-defined]
-    assert acc.provider.buy.await_args.kwargs["quantity"] == Decimal("0.3")  # type: ignore[attr-defined]
+    # o valor gasto vai ao provider uma vez, já limitado ao saldo
+    acc.provider.buy.assert_awaited_once_with(USDC.pubkey, SOL.pubkey, Decimal("30"))  # type: ignore[attr-defined]
     assert order.quantity == Decimal("0.3")
 
 
@@ -197,7 +190,7 @@ async def test_sell_is_capped_at_wallet_balance():
 
     assert order.quantity == Decimal("0.078")  # 0.098 - reserva de 0.02 SOL
     acc.provider.sell.assert_awaited_once_with(  # type: ignore[attr-defined]
-        USDC.pubkey, SOL.pubkey, type_order="market", quantity=Decimal("0.078")
+        USDC.pubkey, SOL.pubkey, quantity=Decimal("0.078")
     )
 
 
@@ -226,7 +219,7 @@ async def test_buy_with_sol_keeps_fee_reserve():
     # pede 100 USDC a 0.01 SOL/USDC = 1 SOL, mas só 0.98 pode ser gasto
     await acc.buy(Decimal("0.01"), Decimal("100"))
 
-    assert provider.buy.await_args.kwargs["quantity"] == Decimal("98")
+    assert provider.buy.await_args.args[2] == Decimal("0.98")
 
 
 async def test_pnl_uses_usd_price_when_input_is_not_a_stablecoin():

@@ -31,12 +31,11 @@ class SwapResult:
     output_mint: str
     in_amount: int
     out_amount: int
-    # custos já conhecidos na execução (paper/backtest); em real/dry são
+    # custos já conhecidos na execução (paper/backtest); em real são
     # buscados depois, por `fetch_swap_costs`
     costs: TradeCosts | None = field(default=None, compare=False)
-    # quote usada (LP fees, impacto) e a mensagem assinada (taxa em dry run)
+    # quote usada (LP fees, impacto)
     quote: Any = field(default=None, compare=False, repr=False)
-    message: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass

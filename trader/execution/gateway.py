@@ -2,18 +2,20 @@
 
 Fluxo de `submit`:
 1. idempotência: se a chave já executou (ou pode ter executado), não repete;
-2. política: avalia a intenção com o estado do ledger e o kill switch;
+2. política: avalia a intenção com o estado do ledger;
 3. registra a intenção (recusada ou em execução) no ledger;
 4. executa e registra o resultado. Falha após o envio vira UNCONFIRMED, que
-   bloqueia novos trades até resolução manual (`main.py ledger resolve`).
+   bloqueia novos trades do modo até o dono mover (ou apagar) o ledger.
+
+O circuit breaker conta só as falhas desde que este gateway foi criado:
+reiniciar o processo rearma.
 """
 
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 
 from trader.ledger import AccountPnL, Ledger, ledger_path
 from trader.models.book import remainder_entry
@@ -23,7 +25,6 @@ from trader.models.intent import IntentRecord, IntentSide, TradeIntent
 from trader.models.mints import SOLANA_MINTS
 from trader.models.mode import RunningMode
 from trader.models.order import Order, OrderSide, SwapResult, order_from_json
-from trader.paths import data_dir
 from trader.policy import Policy, evaluate, load_policy
 
 logger = logging.getLogger(__name__)
@@ -47,39 +48,6 @@ class DuplicateIntentError(Exception):
         )
 
 
-class KillSwitch:
-    """Arquivo-flag: se existe, nenhum trade é executado (fail-closed)."""
-
-    def __init__(self, path: str | Path | None = None):
-        self.path = Path(path) if path else data_dir() / "HALT"
-
-    def is_active(self) -> bool:
-        try:
-            return self.path.exists()
-        except OSError:
-            return True  # não conseguiu ler: assume parado
-
-    def activate(self, reason: str) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(reason, encoding="utf-8")
-
-    def deactivate(self) -> None:
-        self.path.unlink(missing_ok=True)
-
-
-class _NeverHalted(KillSwitch):
-    """Kill switch de replays: nunca lê (nem escreve) o `HALT` da operação."""
-
-    def is_active(self) -> bool:
-        return False
-
-    def activate(self, reason: str) -> None:
-        return None
-
-    def deactivate(self) -> None:
-        return None
-
-
 def _open_entry(legs: list[IntentRecord]) -> Order | None:
     """A entrada da posição aberta: a última compra menos as vendas depois dela.
 
@@ -101,9 +69,10 @@ def _after_sell(entry: Order, sell: IntentRecord) -> Order | None:
     """O que sobra depois da venda, como a memória faz (uma venda por vez)."""
     if sell.order_json:
         order = order_from_json(sell.order_json)
-        # ordens antigas (sem o campo) sempre fecharam a posição
         return None if order.closes_position else remainder_entry(entry, order.quantity)
-    # `record_fill` falhou: a quantidade vendida é a da intenção
+    # `record_fill` falhou: vale o que a intenção sabia antes de executar
+    if sell.intent.closes_position:
+        return None
     sold = sell.intent.quantity or sell.intent.spend_amount
     return remainder_entry(entry, sold)
 
@@ -112,11 +81,6 @@ def _order_of(record: IntentRecord) -> Order:
     if record.order_json:
         return order_from_json(record.order_json)
     return _entry_from_record(record)
-
-
-def open_entry_of(ledger: Ledger, account: str) -> Order | None:
-    """A entrada da posição aberta da conta, segundo o ledger."""
-    return _open_entry(ledger.legs_since_last_buy(account))
 
 
 def _entry_from_record(record: IntentRecord) -> Order:
@@ -156,7 +120,7 @@ class AccountState:
     open_entry: Order | None = None  # ordem de compra da posição aberta
     entry_intent_id: str | None = None
     # para a estratégia retomar cooldown/rearme e a validade (`ttl_days`)
-    opened_at: datetime | None = None  # primeira intenção da conta
+    opened_at: datetime | None = None  # abertura da conta (`bucket_opened`)
     last_exit_at: datetime | None = None  # última venda executada
     last_exit_price: Decimal | None = None  # preço dela (`below_last_exit`)
 
@@ -168,31 +132,26 @@ class TradeGateway:
         self,
         ledger: Ledger,
         policy: Policy,
-        kill_switch: KillSwitch,
         real_mode: bool,
     ):
         self.ledger = ledger
         self.policy = policy
-        self.kill_switch = kill_switch
         self.real_mode = real_mode
+        # o circuit breaker só conta falhas deste processo
+        self.started_at = datetime.now(UTC)
 
     @classmethod
     def for_mode(cls, mode: str, policy: Policy | None = None) -> TradeGateway:
-        """Ledger do modo + política do modo + kill switch.
-
-        `policy=None` carrega `policy.toml`. `halt` e manutenção passam
-        `Policy()` para funcionar mesmo com um `policy.toml` quebrado.
-        """
+        """Ledger do modo + política do modo (`None` carrega `policy.toml`)."""
         return cls(
             ledger=Ledger(ledger_path(mode)),
             policy=load_policy(mode=str(mode)) if policy is None else policy,
-            kill_switch=KillSwitch(),
             real_mode=mode == RunningMode.REAL,
         )
 
     @classmethod
     def in_memory(cls, policy: Policy | None = None) -> TradeGateway:
-        """Gateway de replay: ledger em memória, sem kill switch, modo não real.
+        """Gateway de replay: ledger em memória, modo não real.
 
         O backtest passa pelo mesmo caminho do ao vivo (idempotência, ciclo
         da intenção, eventos), mas sem os limites da política
@@ -201,7 +160,6 @@ class TradeGateway:
         return cls(
             ledger=Ledger(),
             policy=Policy.unlimited() if policy is None else policy,
-            kill_switch=_NeverHalted(),
             real_mode=False,
         )
 
@@ -221,15 +179,20 @@ class TradeGateway:
         legs = self.ledger.legs_since_last_buy(account_id)
         entry = _open_entry(legs)
         opened_at, last_exit_at = self.ledger.account_times(account_id)
+        totals = self.ledger.pnl_totals(account_id)
         return AccountState(
-            realized_usd=self.ledger.total_realized_pnl(account_id),
-            totals=self.ledger.pnl_totals(account_id),
+            realized_usd=totals.net_usd,
+            totals=totals,
             open_entry=entry,
             entry_intent_id=legs[0].intent.intent_id if entry else None,
             opened_at=opened_at,
             last_exit_at=None if entry else last_exit_at,
             last_exit_price=None if entry else self.ledger.last_exit_price(account_id),
         )
+
+    def open_account(self, account_id: str) -> None:
+        """Marca a abertura da conta (a primeira vez que um bucket abre)."""
+        self.ledger.mark_account_opened(account_id)
 
     def record_fill(
         self,
@@ -256,7 +219,7 @@ class TradeGateway:
         self._authorize(intent)
         result = await self._execute(intent, execute)
         try:
-            self.ledger.mark_executed(intent.intent_id, result)
+            marked = self.ledger.mark_executed(intent.intent_id, result)
         except Exception:
             # o swap aconteceu: a assinatura e os valores precisam sobreviver
             # (a intenção fica EXECUTING e bloqueia novos trades)
@@ -264,16 +227,22 @@ class TradeGateway:
                 f"Swap executado mas não registrado ({intent.intent_id}): {result}"
             )
             raise
+        if not marked:
+            # a intenção já tinha um desfecho final: não vira trade aqui
+            raise RuntimeError(
+                f"Intenção {intent.intent_id} já finalizada; swap {result.signature} "
+                "não registrado como executado"
+            )
         return result
 
     def _authorize(self, intent: TradeIntent) -> None:
         """Idempotência + política; registra a intenção (ou a recusa)."""
-        halted = self.kill_switch.is_active()
         existing, decision = self.ledger.authorize(
             intent,
             lambda state: evaluate(
-                intent, self.policy, state, halted=halted, real_mode=self.real_mode
+                intent, self.policy, state, real_mode=self.real_mode
             ),
+            failures_since=self.started_at,
         )
         if existing is not None:
             raise DuplicateIntentError(existing)
@@ -299,17 +268,8 @@ class TradeGateway:
             raise
         except BaseException as ex:
             # cancelamento (Ctrl+C) no meio da execução: não dá para saber se a
-            # transação chegou a ser enviada, então exige resolução manual
+            # transação chegou a ser enviada, então bloqueia até o dono conferir
             self.ledger.mark_unconfirmed(
                 intent.intent_id, f"interrompida: {type(ex).__name__}"
             )
             raise
-
-    def halt(self, reason: str) -> None:
-        self.kill_switch.activate(reason)
-        self.ledger.add_event("halt", {"reason": reason})
-
-    def resume(self, note: str = "") -> None:
-        self.kill_switch.deactivate()
-        # rearma o circuit breaker: falhas anteriores não contam mais
-        self.ledger.add_event("resume", {"note": note})

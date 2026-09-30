@@ -1,17 +1,12 @@
-"""R9: operações (carteira paper entre processos, resolve seguro, logs)."""
+"""R9: operações (carteira paper entre processos, logs, prazo de swap)."""
 
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-from factories import make_intent
-from typer.testing import CliRunner
 
-import main as main_module
-from trader.ledger import Ledger, ledger_path
 from trader.models import SOLANA_MINTS
-from trader.models.intent import IntentStatus, PolicyDecision
 from trader.paper import SimulatedWallet
 from trader.paths import logs_dir
 
@@ -61,61 +56,10 @@ class TestPaperWallet:
         assert wallet.balance(USDC.mint) == Decimal("90")
 
 
-class TestResolveChecksFirst:
-    def test_real_resolve_without_rpc_writes_nothing(self, monkeypatch):
-        monkeypatch.delenv("HELIUS_RPC_URL", raising=False)
-        intent = make_intent(account="real:SOL-USDC")
-        with Ledger(ledger_path("real")) as ledger:
-            ledger.record_intent(intent, PolicyDecision(True))
-            ledger.mark_unconfirmed(intent.intent_id, "timeout", signature="sig")
-
-        result = CliRunner().invoke(
-            main_module.app,
-            ["ledger", "resolve", "real", intent.intent_id, "failed", "--note", "x"],
-        )
-
-        assert result.exit_code != 0
-        assert "HELIUS_RPC_URL" in result.output
-        with Ledger(ledger_path("real")) as ledger:
-            record = ledger.get(intent.intent_id)
-        assert record and record.status == IntentStatus.UNCONFIRMED
-
-
 def test_logs_follow_the_paths_rule(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADER_LOG_DIR", "custom-logs")
     assert logs_dir().name == "custom-logs"
     assert logs_dir().is_absolute()  # relativo à raiz do projeto, nunca ao cwd
-
-
-class TestResolveReadsFirst:
-    def test_a_failed_chain_read_leaves_the_intent_unresolved(self, monkeypatch):
-        monkeypatch.setenv("HELIUS_RPC_URL", "https://rpc.test")
-        intent = make_intent(account="real:SOL-USDC")
-        with Ledger(ledger_path("real")) as ledger:
-            ledger.record_intent(intent, PolicyDecision(True))
-            ledger.mark_unconfirmed(intent.intent_id, "timeout", signature="sig")
-        rpc = mock.AsyncMock()
-        rpc.get_confirmed_transaction.side_effect = OSError("429 do Helius")
-
-        with mock.patch("trader.cli.ledger.AsyncRPCClient", return_value=rpc):
-            result = CliRunner().invoke(
-                main_module.app,
-                [
-                    "ledger",
-                    "resolve",
-                    "real",
-                    intent.intent_id,
-                    "failed",
-                    "--note",
-                    "x",
-                ],
-            )
-
-        assert result.exit_code != 0
-        with Ledger(ledger_path("real")) as ledger:
-            record = ledger.get(intent.intent_id)
-        # nada foi gravado: o comando pode ser repetido quando o RPC voltar
-        assert record and record.status == IntentStatus.UNCONFIRMED
 
 
 async def test_no_new_swap_attempt_after_the_deadline(monkeypatch):
@@ -150,5 +94,30 @@ def test_a_reset_waits_for_the_wallet_lock(tmp_path, monkeypatch):
 
     with pytest.raises(TimeoutError):
         wallet.reset({"USDC": Decimal("5")})
+    # a leitura também espera o lock (no Windows um leitor quebra o replace)
+    with pytest.raises(TimeoutError):
+        wallet.reload()
 
+    lock.unlink()
     assert SimulatedWallet(path).balance(USDC.mint) == Decimal("100")
+
+
+def test_a_busy_destination_is_replaced_after_a_retry(tmp_path, monkeypatch):
+    import os
+
+    wallet = SimulatedWallet(tmp_path / "w.json", initial={"USDC": Decimal("100")})
+    real_replace = os.replace
+    calls = []
+
+    def busy_once(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise PermissionError("em uso por outro processo")
+        real_replace(src, dst)
+
+    monkeypatch.setattr("trader.paper.wallet.os.replace", busy_once)
+    monkeypatch.setattr("trader.paper.wallet.time.sleep", lambda s: None)
+    _swap(wallet)
+
+    assert len(calls) == 2
+    assert SimulatedWallet(tmp_path / "w.json").balance(USDC.mint) == Decimal("90")

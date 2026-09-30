@@ -4,8 +4,7 @@ Cada módulo pertence a uma camada e só pode importar das camadas listadas em
 `ALLOWED`. A regra que mais importa: estratégias e o lado da estratégia
 (strategy-runner) nunca importam execução, venue (quem move fundos) ou risco
 (política/ledger), então código de estratégia não alcança a chave, o ledger
-nem a política. Ver `docs/architecture.md` (passo 11) e
-`docs/plan.md` (§3.4).
+nem a política. Ver `docs/architecture.md`.
 
 Módulo novo sem camada faz o teste falhar: adicione-o em `PACKAGES`.
 """
@@ -31,14 +30,12 @@ ALLOWED: dict[str, set[str]] = {
     "app": set(),  # composição: pode importar tudo (tratado em `_allowed`)
 }
 
-# pacote/módulo -> camada; vale o prefixo mais longo. Inclui os pacotes
-# planejados em docs/plan.md, para que já nasçam na camada certa.
+# pacote/módulo -> camada; vale o prefixo mais longo
 PACKAGES: dict[str, str] = {
     "trader.models": "core",
     "trader.paths": "core",
     "trader.logging_config": "core",
     "trader.indicators": "core",
-    "trader.trading_strategy": "strategy",
     "trader.strategy_spec": "strategy",
     "trader.providers.jupiter.async_jupiter_client": "market",
     "trader.providers.jupiter.jupiter_data": "market",
@@ -50,32 +47,20 @@ PACKAGES: dict[str, str] = {
     "trader.policy": "risk",
     "trader.ledger": "risk",
     "trader.execution": "execution",
-    "trader.async_account": "execution",
     "trader.trading_service": "execution",
     "trader.trading_service.protocol": "core",
     "trader.trading_service.client": "strategy-side",
-    "trader.trading_service.remote": "strategy-side",
-    "trader.runners.strategy_runner": "strategy-side",
-    "trader.runners": "app",
-    # o loop do bot só conhece MarketData + TradeClient (fase 2)
+    # o loop do bot só conhece MarketData + TradeClient
     "trader.bot": "strategy-side",
     "trader.backtest": "app",
     "trader.notification": "app",
-    "trader.agent_api": "app",
     "trader.wiring": "app",
     "trader.cli": "app",
 }
 
-# módulos fora do lugar: a camada real difere da do pacote. Cada um tem um
-# item no backlog que o move; ao mover, apague a linha daqui.
-MISPLACED: dict[str, tuple[str, str]] = {}
-
 # módulos com camada própria, sem valer como prefixo: o `__init__` do pacote
 # raiz é carregado por todo `import trader.x`, então precisa ficar vazio (core)
 EXACT: dict[str, str] = {"trader": "core"}
-
-# importações proibidas toleradas por enquanto: (quem importa, o que) -> motivo
-EXCEPTIONS: dict[tuple[str, str], str] = {}
 
 
 def _module_name(path: Path) -> str:
@@ -93,8 +78,6 @@ MODULES = {
 
 
 def layer_of(module: str) -> str | None:
-    if module in MISPLACED:
-        return MISPLACED[module][0]
     if module in EXACT:
         return EXACT[module]
     matches = [key for key in PACKAGES if module == key or module.startswith(key + ".")]
@@ -162,18 +145,11 @@ def test_every_module_has_a_layer():
 
 
 def test_imports_respect_the_layers():
-    violations = _violations() - set(EXCEPTIONS)
+    violations = _violations()
     assert not violations, "\n".join(
         f"{m} ({layer_of(m)}) importa {t} ({layer_of(t)})"
         for m, t in sorted(violations)
     )
-
-
-def test_exceptions_and_misplaced_entries_are_not_stale():
-    stale = set(EXCEPTIONS) - _violations()
-    assert not stale, f"exceções que não são mais necessárias: {stale}"
-    gone = [m for m in MISPLACED if m not in MODULES]
-    assert not gone, f"módulos movidos; tire de MISPLACED: {gone}"
 
 
 @pytest.mark.parametrize("layer", ["strategy", "strategy-side"])
@@ -187,16 +163,16 @@ def test_layer_checker_catches_a_forbidden_import():
     # inclusive importação relativa e dentro de função
     source = "\n".join(
         [
-            "from .ledger import Ledger",
+            "from ..ledger import Ledger",
             "def f():",
             "    import trader.providers.jupiter.async_jupiter_svc",
             "from trader.models import Order",
         ]
     )
-    assert _forbidden("trader.trading_strategy", source) == {
+    assert _forbidden("trader.strategy_spec.strategy", source) == {
         "trader.ledger",
         "trader.providers.jupiter.async_jupiter_svc",
     }
-    assert _forbidden("trader.async_account", source) == set()
+    assert _forbidden("trader.execution.account", source) == set()
     assert layer_of("trader.trading_service.protocol") == "core"
     assert layer_of("trader.trading_service.service") == "execution"

@@ -3,8 +3,9 @@ description: Implement the next (or given) roadmap item from docs/plan.md, docs-
 argument-hint: "[phase number or name]"
 ---
 
-Implement roadmap item: $ARGUMENTS (e.g. `A7`, `R1`, `B1`; if empty, the first
-item not marked done in the progress table of `docs/plan.md` §6).
+Implement roadmap item: $ARGUMENTS (e.g. `U2`, `T1`, `B1`; if empty, the first
+item in the progress table of `docs/plan.md` §6 that is not done and not
+marked as waiting for the owner, following the stage order the plan gives).
 
 1. **Read the plan.** Read `docs/plan.md` (the item, the order rationale in
    §5 and the progress table in §6), then `docs/architecture.md` for the
@@ -23,7 +24,6 @@ item not marked done in the progress table of `docs/plan.md` §6).
 4. **Verify.** Run `uv run --no-sync python .claude/scripts/check.py` until it
    prints `ALL GREEN`. If the phase touches the run loop, execution or the
    ledger, also run `uv run --no-sync python .claude/scripts/smoke.py`.
-5. **Close out** as in `/sync-docs`: mark the item done in the progress table
-   (and update the score in §2 if a goal moved), update `docs/architecture.md`
-   and `AGENTS.md`. If you checked anything live, add it to `tests/live/`. Then
-   summarize what was built, what was deferred, and what the next item is.
+5. **Close out** with `/sync-docs`. If you checked anything live, add it to
+   `tests/live/`. Then summarize what was built, what was deferred, and what
+   the next item is.

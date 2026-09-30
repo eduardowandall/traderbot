@@ -78,17 +78,12 @@ class AsyncJupiterProvider[E: Executor]:
         keypair: Keypair,
         rpc_client: AsyncRPCClient | None = None,
         jupiter_client: AsyncJupiterClient | None = None,
-        is_dryrun: bool = False,
         **limits,
     ) -> AsyncJupiterProvider[OnChainExecutor]:
-        """Provider que assina e envia (ou só simula, em dry run) com a chave."""
+        """Provider que assina e envia com a chave."""
         client = jupiter_client or AsyncJupiterClient()
-        executor = OnChainExecutor(keypair, rpc_client, client, is_dryrun)
+        executor = OnChainExecutor(keypair, rpc_client, client)
         return AsyncJupiterProvider(executor, client, **limits)
-
-    @property
-    def balances_track_fills(self) -> bool:
-        return self.executor.balances_track_fills
 
     @property
     def native_fee_reserve(self) -> Decimal:
@@ -104,13 +99,11 @@ class AsyncJupiterProvider[E: Executor]:
         self,
         input_mint: Pubkey,
         output_mint: Pubkey,
-        type_order: str,
-        quantity: Decimal,
-        price: Decimal | None = None,
+        spend_amount: Decimal,
         slippage_bps: int = 50,
     ) -> SwapResult:
-        amount_in = quantity * price if price else quantity
-        raw_quantity = SOLANA_MINTS[input_mint].ui_to_raw(amount_in)
+        """Gasta `spend_amount` (unidades de UI do input_mint) comprando o output."""
+        raw_quantity = SOLANA_MINTS[input_mint].ui_to_raw(spend_amount)
         return await self.swap_with_details(
             str(input_mint),
             str(output_mint),
@@ -122,7 +115,6 @@ class AsyncJupiterProvider[E: Executor]:
         self,
         input_mint: Pubkey,
         output_mint: Pubkey,
-        type_order: str,
         quantity: Decimal,
         slippage_bps: int = 50,
     ) -> SwapResult:
@@ -135,18 +127,6 @@ class AsyncJupiterProvider[E: Executor]:
             raw_quantity,
             slippage_bps=slippage_bps,
         )
-
-    async def swap(
-        self,
-        input_mint: str,
-        output_mint: str,
-        raw_quantity: int,
-        slippage_bps: int = 50,
-    ) -> str:
-        result = await self.swap_with_details(
-            input_mint, output_mint, raw_quantity, slippage_bps=slippage_bps
-        )
-        return result.signature
 
     async def swap_with_details(
         self,

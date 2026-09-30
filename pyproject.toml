@@ -18,8 +18,6 @@ dependencies = [
 dev = [
     "pytest>=9.0.1",
     "pytest-asyncio>=1.3.0",
-    "pytest-cov>=4.1.0",
-    "pytest-mock>=3.12.0",
     "pyright>=1.1.403",
     "ruff>=0.14.6",
 ]
@@ -37,7 +35,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 # a suíte live (tests/live/) fala com a Jupiter de verdade: só roda com
 # `uv run pytest -m live` (o -m da linha de comando vence o daqui)
-addopts = "-v --tb=short -m 'not live' -W error::ResourceWarning"
+addopts = "-v --tb=short -m 'not live' -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning"
 markers = ["live: hits the real Jupiter endpoints (paper/read-only, no key)"]
 asyncio_mode = "auto"
 

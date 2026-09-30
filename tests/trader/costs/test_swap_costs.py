@@ -10,12 +10,11 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.solders import SendTransactionResp
 
-from trader.async_account import AsyncAccount
-from trader.execution import KillSwitch, TradeGateway
+from trader.execution import TradeGateway
+from trader.execution.account import AsyncAccount
 from trader.ledger import Ledger
-from trader.models import SOLANA_MINTS, Order, OrderSide, Position, PositionType
+from trader.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.models.costs import (
-    ESTIMATED,
     ONCHAIN,
     QUOTE,
     PnLResult,
@@ -222,12 +221,11 @@ class TestConfirmedTransactionFetch:
         assert client.get_transaction.await_count == 3
 
 
-def _provider(is_dryrun=False):
+def _provider():
     return AsyncJupiterProvider.on_chain(
         Keypair(),
         rpc_client=AsyncMock(spec=AsyncRPCClient),
         jupiter_client=AsyncMock(spec=AsyncJupiterClient),
-        is_dryrun=is_dryrun,
     )
 
 
@@ -253,19 +251,6 @@ class TestFetchSwapCosts:
             return_value=None
         )
         assert (await provider.fetch_swap_costs(_result())).source == QUOTE
-
-    async def test_dry_run_estimates_fee_for_the_message(self):
-        provider = _provider(is_dryrun=True)
-        provider.executor.rpc_client.get_fee_for_message = AsyncMock(
-            return_value=25_000
-        )
-        message = SimpleNamespace(header=SimpleNamespace(num_required_signatures=1))
-
-        costs = await provider.fetch_swap_costs(_result(message=message))
-
-        assert costs.source == ESTIMATED
-        assert (costs.fee_lamports, costs.priority_fee_lamports) == (25_000, 20_000)
-        provider.executor.rpc_client.get_confirmed_transaction.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_costs_already_known_are_kept(self):
         known = TradeCosts(source="simulated", fee_lamports=5000)
@@ -298,7 +283,7 @@ class TestFetchSwapCosts:
             ]
         )
         ledger = Ledger()
-        gateway = TradeGateway(ledger, Policy(), KillSwitch("unused-halt"), False)
+        gateway = TradeGateway(ledger, Policy(), False)
         account = AsyncAccount(
             provider, USDC.pubkey, SOL.pubkey, gateway=gateway, account_id="t"
         )
@@ -379,7 +364,7 @@ class TestNetPnL:
             Decimal("110"),
             _costs(10**6),
         )
-        pnl = Position(PositionType.LONG, entry, exit_).realized_pnl_detail()
+        pnl = Position(entry, exit_).realized_pnl_detail()
 
         assert pnl is not None
         assert pnl == PnLResult(
@@ -400,7 +385,7 @@ class TestNetPnL:
             OrderSide.BUY, "2", "200", one, None, Decimal("100"), _costs(10**6)
         )
         exit_ = _order(OrderSide.SELL, "1", "110", one, None, Decimal("110"), None)
-        pnl = Position(PositionType.LONG, entry, exit_).realized_pnl_detail()
+        pnl = Position(entry, exit_).realized_pnl_detail()
         assert pnl is not None
         assert pnl.gross_quote == Decimal("10")  # 110 - 200/2
         assert pnl.costs_sol == Decimal("0.0005")
@@ -410,7 +395,7 @@ class TestNetPnL:
         one = Decimal("1")
         entry = _order(OrderSide.BUY, "1", "10", one, None, None, _costs(5000))
         exit_ = _order(OrderSide.SELL, "1", "11", one, None, None, _costs(5000))
-        pnl = Position(PositionType.LONG, entry, exit_).realized_pnl_detail()
+        pnl = Position(entry, exit_).realized_pnl_detail()
         assert pnl is not None
         assert pnl.costs_quote is None and pnl.net_quote is None
         assert pnl.net_usd == Decimal("1")  # custos não convertidos
@@ -423,7 +408,7 @@ class TestNetPnL:
         one = Decimal("1")
         entry = _order(OrderSide.BUY, "10", "0.1", rate, rate, one, _costs(10_000))
         exit_ = _order(OrderSide.SELL, "10", "0.102", rate, rate, one, _costs(10_000))
-        pnl = Position(PositionType.LONG, entry, exit_).realized_pnl_detail()
+        pnl = Position(entry, exit_).realized_pnl_detail()
         assert pnl is not None
         assert pnl.net_quote == Decimal("0.00198")
         assert pnl.complete
@@ -447,7 +432,7 @@ class TestNetPnL:
             OrderSide.SELL,
             datetime(2026, 1, 1),
         )
-        position = Position(PositionType.LONG, entry, exit_)
+        position = Position(entry, exit_)
         assert position.realized_pnl_detail() is None
         assert position.realized_pnl == Decimal("5")
 

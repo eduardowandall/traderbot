@@ -13,12 +13,10 @@ from trader.models import (
     OrderSide,
     OrderSignal,
     Position,
-    PositionType,
     TickerData,
 )
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
-from trader.trading_strategy import TradingStrategy
 
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
@@ -47,7 +45,7 @@ def _position(price, at=T0, order_id="buy-1", quantity="0.2") -> Position:
     order = Order(
         order_id, USDC, SOL, Decimal(quantity), Decimal(price), OrderSide.BUY, at
     )
-    return Position(PositionType.LONG, order, None)
+    return Position(order, None)
 
 
 def _fire(strategy, clock, price, position=None, balance="100") -> OrderSignal:
@@ -58,9 +56,7 @@ def _fire(strategy, clock, price, position=None, balance="100") -> OrderSignal:
 
 
 def _tick(strategy, clock, price, position=None, balance="100", minutes=1):
-    signal = strategy.on_market_refresh(
-        Decimal(str(price)), None, Decimal(balance), position
-    )
+    signal = strategy.on_market_refresh(Decimal(str(price)), Decimal(balance), position)
     clock.advance(minutes=minutes)
     return signal
 
@@ -110,15 +106,11 @@ class TestEntry:
         strategy, clock = _strategy(entry=_entry(rsi))
         candles = [
             TickerData(
-                buy=Decimal(0),
                 timestamp=T0 - timedelta(minutes=32 - i),
                 high=Decimal(0),
                 last=Decimal(100 - i),
                 low=Decimal(0),
                 open=Decimal(0),
-                pair="x",
-                sell=Decimal(0),
-                vol=Decimal(0),
             )
             for i in range(31)
         ]
@@ -218,7 +210,6 @@ def test_from_file(tmp_path):
     path.write_text(json.dumps(make_spec()), encoding="utf-8")
     strategy = SpecStrategy.from_file(file=str(path))
     assert strategy.symbol == "SOL-USDC"
-    assert isinstance(strategy, TradingStrategy)
 
 
 def _dip_and_recover_ticks():

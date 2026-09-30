@@ -2,7 +2,7 @@
   "version": 1,
   "name": "scalp-test",
   "agent_id": "example",
-  "rationale": "Spec de teste: compra na hora enquanto nunca saiu (no_last_exit), vende com +0.12% (take_profit) ou -0.08% (stop_loss) e recompra quando o preco fica 0.05% abaixo do preco da ultima venda.",
+  "rationale": "Spec de teste: compra na hora enquanto nunca saiu (no_last_exit), vende com +0.15% (take_profit) ou -0.08% (stop_loss) e recompra quando o preco fica 0.10% abaixo do preco da ultima venda.",
   "symbol": "SOL-USDC",
   "timeframe": "15_SECOND",
   "entry": {

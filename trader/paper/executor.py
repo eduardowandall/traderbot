@@ -26,7 +26,6 @@ DEFAULT_ACCOUNT_RENT_LAMPORTS = 2_039_280
 
 class SimulatedExecutor:
     # a carteira simulada muda a cada ordem: dá para reconciliar
-    balances_track_fills = True
 
     def __init__(
         self,

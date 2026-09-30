@@ -26,12 +26,12 @@ def make_intent(
     key: str | None = None,
     **overrides,
 ) -> TradeIntent:
-    """Compra de 10 USDC -> SOL em `dry:SOL-USDC`; `overrides` troca campos."""
+    """Compra de 10 USDC -> SOL em `paper:SOL-USDC`; `overrides` troca campos."""
     if key is not None:
         overrides["idempotency_key"] = key
     return TradeIntent(
         source=overrides.pop("source", "test"),
-        account=overrides.pop("account", "dry:SOL-USDC"),
+        account=overrides.pop("account", "paper:SOL-USDC"),
         side=side,
         spend_mint=overrides.pop("spend_mint", USDC),
         receive_mint=overrides.pop("receive_mint", SOL),
@@ -122,7 +122,42 @@ def mock_provider(**attrs):
 
     provider = AsyncMock(spec=AsyncJupiterProvider)
     provider.native_fee_reserve = Decimal("0.02")
-    provider.balances_track_fills = True
     for name, value in attrs.items():
         setattr(provider, name, value)
     return provider
+
+
+class StubStrategy:
+    """Estratégia mínima para testes do bot e do backtest (o `Strategy` do bot).
+
+    Subclasses só implementam `on_market_refresh`; o resto não faz nada.
+    """
+
+    def __init__(self):
+        import random
+        from datetime import datetime
+
+        self.clock = datetime.now
+        self.rng = random.Random()
+
+    def on_market_refresh(self, price, balance, current_position):
+        return None
+
+    def warmup(self):
+        from trader.models import Interval
+
+        return Interval.SECOND_15, 100
+
+    def setup(self, ticker_history):
+        return None
+
+    def resume(self, last_exit_at, opened_at, last_exit_price=None):
+        return None
+
+    def set_clock(self, clock):
+        self.clock = clock
+
+    def seed(self, seed):
+        import random
+
+        self.rng = random.Random(seed)

@@ -1,45 +1,41 @@
-"""`run` (o bot ao vivo) e `backtest` (o mesmo caminho, sobre ticks)."""
+"""Os dois comandos: `run` (o bot ao vivo) e `backtest` (a spec sobre o passado).
+
+Os comandos só leem argumentos; a montagem por modo fica em `trader/wiring.py`.
+"""
 
 import asyncio
+from collections.abc import Callable
 from contextlib import nullcontext
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import typer
 
-from trader.agent_api.strategies import limits_from_policy
-from trader.backtest import Backtester, TickRecorder, load_ticks, ticks_from_candles
+from trader.backtest import TickRecorder, load_ticks
+from trader.backtest.spec import DEFAULT_BACKTEST_CANDLES, backtest_spec, fetch_ticks
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.bot.config import BotConfig
-from trader.cli.common import (
-    get_notification_svc,
-    load_spec_strategy,
-    parse_decimal,
-    warn,
-)
-from trader.market import JupiterMarketData
-from trader.models import SOLANA_MINTS, Interval
+from trader.cli.output import emit, json_errors
+from trader.market import JupiterMarketData, MarketData
+from trader.models import SOLANA_MINTS
 from trader.models.mode import RunningMode
-from trader.policy import load_policy
+from trader.notification import notifier_from_env
+from trader.policy import Policy, load_policy
 from trader.strategy_spec.strategy import SpecStrategy
-from trader.strategy_spec.validate import validate
+from trader.strategy_spec.validate import SpecLimits, parse_spec, validate
 from trader.trading_service.local import LocalTradeClient
 from trader.wiring import build_trade_service
 
 SPEC_HELP = "Arquivo JSON da spec (o par vem dela), ex: docs/examples/spec-random.json"
 
+# fonte de preços e candles (dados públicos, sem chave); os testes trocam
+MARKET_DATA: Callable[[], MarketData] = JupiterMarketData
+
 
 def run(
-    mode: RunningMode = typer.Argument(
-        RunningMode.DRY, help="Modo de execucão do bot."
-    ),
+    mode: RunningMode = typer.Argument(..., help="real ou paper"),
     spec_file: Path = typer.Argument(..., help=SPEC_HELP),
     seed: str | None = typer.Option(None, help="Semente do `random_chance`"),
-    notification_service: str = typer.Option(
-        "null", help="Serviço de notificação: 'telegram' ou 'null'"
-    ),
-    notification_args: str | None = typer.Option(
-        None, help="Argumentos do serviço de notificação"
-    ),
     record_ticks: Path | None = typer.Option(
         None, help="Grava cada preço recebido neste CSV (para `backtest --ticks`)"
     ),
@@ -47,20 +43,20 @@ def run(
     """
     Executa o bot com uma spec, no bucket dela (`strategy:<spec_id>`).
 
-    Exemplos:
-        uv run main.py run paper docs/examples/spec-random.json --seed 1
-        uv run main.py run dry docs/examples/spec-wma-composer.json
-    """
+    Notifica no Telegram se TELEGRAM_CHAT_ID e TELEGRAM_BOT_TOKEN existirem.
 
+    Exemplo:
+        uv run main.py run paper docs/examples/spec-random.json --seed 1
+    """
     # estratégia primeiro: um erro nela não pode deixar ledger/conexões abertos
-    strategy = load_spec_strategy(spec_file, seed)
+    strategy = _load_strategy(spec_file, seed)
     spec = strategy.spec
     token, quote = SOLANA_MINTS.get_pair(spec.symbol)
-    notification_svc = get_notification_svc(notification_service, notification_args)
+    notifier = notifier_from_env()
     _check_limits(strategy, mode)
 
     # execução (modo, chave, ledger) de um lado; o bot só vê o bucket dele
-    service = build_trade_service(mode, on_wallet_created=warn)
+    service = build_trade_service(mode, on_wallet_created=_warn)
     trader = LocalTradeClient(
         service,
         f"strategy:{strategy.spec_id}",
@@ -76,13 +72,84 @@ def run(
         name=f"{mode}-run-{spec.name}",
         symbol=spec.symbol,
         strategy=strategy,
-        market=JupiterMarketData(),
+        market=MARKET_DATA(),
         trader=trader,
-        notifier=notification_svc,
+        notifier=notifier,
         on_tick=recorder.record if recorder else None,
     )
+    bot = AsyncWebsocketTradingBot(config)
     with service.gateway, recorder or nullcontext():
-        _run_bot(AsyncWebsocketTradingBot(config))
+        try:
+            bot.run()
+        except KeyboardInterrupt:
+            bot.stop()
+
+
+@json_errors
+def backtest(
+    spec_file: Path = typer.Argument(..., help=SPEC_HELP),
+    candles: int = typer.Option(
+        DEFAULT_BACKTEST_CANDLES,
+        min=2,
+        max=1000,
+        help="Candles do timeframe da spec (sem --ticks)",
+    ),
+    ticks: Path | None = typer.Option(
+        None, help="CSV de ticks gravado com `run --record-ticks`"
+    ),
+    fee_bps: str = typer.Option("30", help="Custo por swap em bps"),
+    slippage_bps: str = typer.Option("10", help="Desvio de preço por perna, em bps"),
+    seed: str = typer.Option("0", help="Semente do `random_chance`"),
+):
+    """
+    Reproduz a spec em candles recentes (ou ticks gravados); saída em JSON.
+
+    Usa o orçamento e a perda máxima da spec, como o bucket ao vivo.
+
+    Exemplos:
+        uv run main.py backtest docs/examples/spec-sol-dip.json
+        uv run main.py backtest docs/examples/spec-random.json --ticks ticks.csv
+    """
+    spec = parse_spec(spec_file.read_text(encoding="utf-8"))
+    tick_list = (
+        load_ticks(ticks) if ticks is not None else asyncio.run(_candles(spec, candles))
+    )
+    emit(
+        asyncio.run(
+            backtest_spec(
+                spec,
+                tick_list,
+                fee_bps=_decimal(fee_bps, "fee-bps"),
+                seed=seed,
+                slippage_bps=_decimal(slippage_bps, "slippage-bps"),
+            )
+        )
+    )
+
+
+async def _candles(spec, n: int):
+    # só leitura de dados públicos: sem chave, sem RPC
+    data = MARKET_DATA()
+    try:
+        return await fetch_ticks(data, spec, n)
+    finally:
+        await data.aclose()
+
+
+def _load_strategy(spec_file: Path, seed: str | None) -> SpecStrategy:
+    try:
+        strategy = SpecStrategy.from_file(str(spec_file))
+    except (OSError, ValueError) as ex:
+        raise typer.BadParameter(f"spec {spec_file}: {ex}") from ex
+    if seed is not None:
+        strategy.seed(seed)
+    return strategy
+
+
+def limits_from_policy(policy: Policy) -> SpecLimits:
+    return SpecLimits(
+        max_trade_usd=policy.max_trade_usd, allowed_symbols=policy.allowed_symbols
+    )
 
 
 def _check_limits(strategy: SpecStrategy, mode: RunningMode) -> None:
@@ -93,67 +160,15 @@ def _check_limits(strategy: SpecStrategy, mode: RunningMode) -> None:
         raise typer.BadParameter(f"spec inválida para {mode}: {details}")
 
 
-def _run_bot(bot: AsyncWebsocketTradingBot) -> None:
+def _decimal(value: str, name: str) -> Decimal:
     try:
-        bot.run()
-    except KeyboardInterrupt:
-        bot.stop()
+        parsed = Decimal(value)
+    except InvalidOperation:
+        parsed = Decimal("NaN")
+    if not parsed.is_finite():
+        raise ValueError(f"{name} inválido: {value!r}")
+    return parsed
 
 
-def backtest(
-    spec_file: Path = typer.Argument(..., help=SPEC_HELP),
-    ticks: Path | None = typer.Option(
-        None, help="CSV de ticks gravado com `run --record-ticks`"
-    ),
-    candles: int = typer.Option(
-        0, min=0, help="Sem --ticks: baixa N candles da Jupiter e usa o fechamento"
-    ),
-    interval: Interval | None = typer.Option(
-        None, help="Intervalo dos candles (padrão: o `timeframe` da spec)"
-    ),
-    balance: str = typer.Option("100", help="Saldo inicial na stablecoin de entrada"),
-    fee_bps: str = typer.Option("30", help="Custo por swap em bps"),
-    slippage_bps: str = typer.Option("10", help="Desvio de preço por perna, em bps"),
-    seed: str = typer.Option("0", help="Semente do `random_chance`"),
-):
-    """
-    Reproduz ticks por uma spec, com carteira simulada.
-
-    Exemplos:
-        uv run main.py backtest docs/examples/spec-random.json --ticks ticks.csv
-        uv run main.py backtest docs/examples/spec-wma-composer.json --candles 1000
-    """
-    if ticks is None and not candles:
-        raise typer.BadParameter("informe --ticks ARQUIVO ou --candles N")
-    strategy = load_spec_strategy(spec_file)
-    symbol = strategy.spec.symbol
-    if ticks is not None:
-        tick_list = load_ticks(ticks)
-    else:
-        token, _ = SOLANA_MINTS.get_pair(symbol)
-        interval = interval or strategy.spec.timeframe
-        tick_list = ticks_from_candles(
-            asyncio.run(_fetch_candles(token.mint, interval, candles)), interval
-        )
-
-    result = asyncio.run(
-        Backtester(
-            strategy,
-            symbol,
-            tick_list,
-            initial_balance=parse_decimal(balance, "balance"),
-            fee_bps=parse_decimal(fee_bps, "fee-bps"),
-            slippage_bps=parse_decimal(slippage_bps, "slippage-bps"),
-            seed=seed,
-        ).run()
-    )
-    typer.echo(result.summary())
-
-
-async def _fetch_candles(mint: str, interval: Interval, qty: int):
-    # só leitura de dados públicos: sem chave, sem RPC
-    data = JupiterMarketData()
-    try:
-        return await data.get_candles(mint, interval, qty)
-    finally:
-        await data.aclose()
+def _warn(message: str) -> None:
+    typer.echo(message, err=True)

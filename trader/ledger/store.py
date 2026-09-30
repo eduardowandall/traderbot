@@ -1,13 +1,14 @@
-"""Base do ledger: conexão SQLite, esquema, migrações e a cadeia de eventos.
+"""Base do ledger: conexão SQLite, esquema e o log de eventos.
 
-Cada mudança de estado grava um evento encadeado por hash (sha256 do evento
-anterior + conteúdo), então edições manuais no banco são detectáveis com
-`verify_chain()`. Toda escrita passa por `_write()` (`BEGIN IMMEDIATE`).
+Cada mudança de estado grava um evento (tabela `events`), a trilha de
+auditoria. Toda escrita passa por `_write()` (`BEGIN IMMEDIATE`).
+
+O esquema tem uma versão (`PRAGMA user_version`). Um arquivo de outra versão
+não é migrado: abrir falha com `LedgerFormatError`, e o dono move ou apaga o
+arquivo.
 """
 
-import hashlib
 import json
-import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,11 +16,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+SCHEMA_VERSION = 2
 
-GENESIS_HASH = "0" * 64
-
-_SCHEMA = """
+# numa transação só: outro processo criando ao mesmo tempo espera e não
+# vê um banco pela metade
+_SCHEMA = f"""
+BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS intents (
     intent_id TEXT PRIMARY KEY,
     idempotency_key TEXT NOT NULL,
@@ -35,6 +37,7 @@ CREATE TABLE IF NOT EXISTS intents (
     price TEXT,
     quantity TEXT,
     rationale TEXT,
+    closes_position INTEGER,
     status TEXT NOT NULL,
     decision_reasons TEXT NOT NULL,
     policy_version TEXT NOT NULL,
@@ -43,80 +46,50 @@ CREATE TABLE IF NOT EXISTS intents (
     out_amount INTEGER,
     error TEXT,
     order_json TEXT,
-    realized_pnl_usd TEXT
+    realized_pnl_usd TEXT,
+    -- custos da perna (em SOL/lamports)
+    fee_lamports INTEGER,
+    priority_fee_lamports INTEGER,
+    rent_lamports INTEGER,
+    other_lamports INTEGER,
+    costs_source TEXT,
+    costs_usd TEXT,
+    -- taxas do trade usadas nas estimativas
+    quote_mint TEXT,
+    sol_usd_price TEXT,
+    quote_usd_price TEXT,
+    -- PnL da posição fechada (vendas): nativo no token de cotação + USD
+    gross_pnl_quote TEXT,
+    pnl_costs_sol TEXT,
+    costs_quote TEXT,
+    net_pnl_quote TEXT,
+    gross_pnl_usd TEXT,
+    pnl_complete INTEGER,
+    -- recusas idênticas seguidas somadas numa só linha (além da primeira)
+    repeat_count INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_intents_key ON intents (idempotency_key);
 CREATE INDEX IF NOT EXISTS ix_intents_account ON intents (account, updated_at);
 CREATE INDEX IF NOT EXISTS ix_intents_status ON intents (status, updated_at);
 CREATE INDEX IF NOT EXISTS ix_intents_created ON intents (created_at);
+-- uma chave de idempotência só pode estar em uma intenção que moveu fundos
+CREATE UNIQUE INDEX IF NOT EXISTS ux_intents_moved_key ON intents (idempotency_key)
+    WHERE status IN ('executing', 'executed', 'unconfirmed');
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
     intent_id TEXT,
     type TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    prev_hash TEXT NOT NULL,
-    hash TEXT NOT NULL
+    payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_type ON events (type, id);
+PRAGMA user_version = {SCHEMA_VERSION};
+COMMIT;
 """
 
 
-# colunas adicionadas depois da primeira versão: aplicadas por migração
-# (ALTER TABLE) em arquivos antigos e também em bancos novos
-_ADDED_COLUMNS = {
-    # custos da perna (em SOL/lamports)
-    "fee_lamports": "INTEGER",
-    "priority_fee_lamports": "INTEGER",
-    "rent_lamports": "INTEGER",
-    "other_lamports": "INTEGER",
-    "costs_source": "TEXT",
-    "costs_usd": "TEXT",
-    # taxas do trade usadas nas estimativas
-    "quote_mint": "TEXT",
-    "sol_usd_price": "TEXT",
-    "quote_usd_price": "TEXT",
-    # PnL da posição fechada (vendas): nativo no token de cotação + USD
-    "gross_pnl_quote": "TEXT",
-    "pnl_costs_sol": "TEXT",
-    "costs_quote": "TEXT",
-    "net_pnl_quote": "TEXT",
-    "gross_pnl_usd": "TEXT",
-    "pnl_complete": "INTEGER",
-    # recusas idênticas seguidas somadas numa só linha (além da primeira)
-    "repeat_count": "INTEGER",
-}
-
-
-# uma chave de idempotência só pode estar em uma intenção que moveu fundos
-_UNIQUE_MOVED_KEY = (
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_intents_moved_key ON intents "
-    "(idempotency_key) WHERE status IN ('executing', 'executed', 'unconfirmed')"
-)
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    _add_columns(conn)
-    try:
-        with conn:
-            conn.execute(_UNIQUE_MOVED_KEY)
-    except sqlite3.IntegrityError:
-        # ledger antigo já com chaves duplicadas: abrir continua possível
-        logger.warning("Chaves de idempotência duplicadas: índice único ignorado")
-
-
-def _add_columns(conn: sqlite3.Connection) -> None:
-    existing = {r["name"] for r in conn.execute("PRAGMA table_info(intents)")}
-    with conn:
-        for name, kind in _ADDED_COLUMNS.items():
-            if name in existing:
-                continue
-            try:
-                conn.execute(f"ALTER TABLE intents ADD COLUMN {name} {kind}")
-            except sqlite3.OperationalError as ex:
-                # outro processo (bot/CLI) migrou ao mesmo tempo
-                if "duplicate column" not in str(ex):
-                    raise
+class LedgerFormatError(Exception):
+    """O arquivo é de outra versão do esquema: mova ou apague."""
 
 
 # --- ajudantes de SQL ---------------------------------------------------------
@@ -148,15 +121,23 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _event_hash(
-    prev_hash: str, ts: str, intent_id: str | None, type_: str, payload: str
-) -> str:
-    content = "|".join((prev_hash, ts, intent_id or "", type_, payload))
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+def _open_schema(conn: sqlite3.Connection, path: str) -> None:
+    """Cria o esquema num banco vazio; recusa um de outra versão."""
+    has_tables = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'intents'"
+    ).fetchone()
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if has_tables and version != SCHEMA_VERSION:
+        raise LedgerFormatError(
+            f"ledger {path} está num formato antigo (versão {version}, esperada "
+            f"{SCHEMA_VERSION}): mova ou apague o arquivo"
+        )
+    if not has_tables:
+        conn.executescript(_SCHEMA)
 
 
 class LedgerStore:
-    """Conexão compartilhada pelas partes do ledger, e a cadeia de eventos."""
+    """Conexão compartilhada pelas partes do ledger, e o log de eventos."""
 
     def __init__(self, path: str | Path = ":memory:"):
         self.path = str(path)
@@ -169,8 +150,11 @@ class LedgerStore:
             self.conn.execute("PRAGMA journal_mode=WAL")
             # seguro com WAL: evita um fsync por commit no loop do bot
             self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.executescript(_SCHEMA)
-        _migrate(self.conn)
+        try:
+            _open_schema(self.conn, self.path)
+        except Exception:
+            self.conn.close()
+            raise
 
     def close(self) -> None:
         self.conn.close()
@@ -179,11 +163,8 @@ class LedgerStore:
     def _write(self) -> Iterator[None]:
         """Transação de escrita que já começa com o lock (`BEGIN IMMEDIATE`).
 
-        Sem isso, `_add_event` leria o último hash fora da transação: outro
-        processo (a CLI ou outro runner) poderia gravar um evento entre a
-        leitura e o INSERT, e os dois eventos apontariam para o mesmo
-        `prev_hash`, bifurcando a cadeia. Não guarde o hash em memória pelo
-        mesmo motivo.
+        Leitura e escrita ficam na mesma transação: outro processo (outro bot)
+        não grava entre as duas.
         """
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
@@ -192,37 +173,12 @@ class LedgerStore:
     # --- eventos ---------------------------------------------------------------
 
     def _add_event(self, type_: str, intent_id: str | None, payload: dict) -> None:
-        row = self.conn.execute(
-            "SELECT hash FROM events ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        prev_hash = row["hash"] if row else GENESIS_HASH
-        ts = _now()
         body = json.dumps(payload, default=_json_default, sort_keys=True)
-        digest = _event_hash(prev_hash, ts, intent_id, type_, body)
         self.conn.execute(
-            "INSERT INTO events (ts, intent_id, type, payload, prev_hash, hash) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, intent_id, type_, body, prev_hash, digest),
+            "INSERT INTO events (ts, intent_id, type, payload) VALUES (?, ?, ?, ?)",
+            (_now(), intent_id, type_, body),
         )
 
     def add_event(self, type_: str, payload: dict, intent_id: str | None = None):
         with self._write():
             self._add_event(type_, intent_id, payload)
-
-    def verify_chain(self) -> int | None:
-        """Retorna o id do primeiro evento adulterado, ou None se íntegro."""
-        prev_hash = GENESIS_HASH
-        for row in self.conn.execute("SELECT * FROM events ORDER BY id"):
-            expected = _event_hash(
-                prev_hash, row["ts"], row["intent_id"], row["type"], row["payload"]
-            )
-            if row["prev_hash"] != prev_hash or row["hash"] != expected:
-                return row["id"]
-            prev_hash = row["hash"]
-        return None
-
-    def last_event_time(self, type_: str) -> datetime | None:
-        row = self.conn.execute(
-            "SELECT ts FROM events WHERE type = ? ORDER BY id DESC LIMIT 1", (type_,)
-        ).fetchone()
-        return datetime.fromisoformat(row["ts"]) if row else None

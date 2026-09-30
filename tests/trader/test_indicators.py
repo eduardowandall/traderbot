@@ -90,6 +90,20 @@ class TestBarSeries:
         assert not bars.update(T0, Decimal(7))
         assert bars.closes == D(7)
 
+    def test_short_gaps_repeat_the_last_close(self):
+        bars = ind.BarSeries(Interval.MINUTE_1, maxlen=20)
+        bars.update(T0, Decimal(1))
+        bars.update(T0 + timedelta(minutes=ind.MAX_GAP_BARS + 1), Decimal(2))
+        assert bars.closes == D(*[1] * (ind.MAX_GAP_BARS + 1), 2)
+
+    def test_a_long_gap_restarts_the_series(self):
+        # T4: um buraco longo virava barras planas (RSI 0/100, volatilidade ~0)
+        bars = ind.BarSeries(Interval.MINUTE_1, maxlen=20)
+        for i in range(10):
+            bars.update(T0 + timedelta(minutes=i), Decimal(i))
+        bars.update(T0 + timedelta(minutes=9 + ind.MAX_GAP_BARS + 2), Decimal(5))
+        assert bars.closes == D(5)
+
     def test_maxlen_keeps_the_most_recent_bars(self):
         bars = ind.BarSeries(Interval.SECOND_15, maxlen=2)
         for i in range(4):
@@ -100,15 +114,11 @@ class TestBarSeries:
     def test_seed_from_unsorted_candles(self):
         def candle(minutes, price):
             return TickerData(
-                buy=Decimal(0),
                 timestamp=T0 + timedelta(minutes=minutes),
                 high=Decimal(0),
                 last=Decimal(price),
                 low=Decimal(0),
                 open=Decimal(0),
-                pair="x",
-                sell=Decimal(0),
-                vol=Decimal(0),
             )
 
         bars = ind.BarSeries(Interval.MINUTE_1, maxlen=10)

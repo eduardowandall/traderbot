@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from factories import make_intent, open_ledger
 
-from trader.execution import KillSwitch, TradeGateway
+from trader.execution import TradeGateway
 from trader.ledger import Ledger, ledger_path
 from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.models.intent import IntentSide, PolicyDecision
@@ -16,7 +16,7 @@ SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 
 
 def _gateway(tmp_path):
-    return TradeGateway(open_ledger(), Policy(), KillSwitch(tmp_path / "HALT"), False)
+    return TradeGateway(open_ledger(), Policy(), False)
 
 
 def _order(side):
@@ -57,12 +57,13 @@ def test_for_mode_uses_the_mode_ledger_and_policy():
         assert gateway.real_mode is False
         gateway.add_event("hello", {"x": 1})
     with Ledger(ledger_path(RunningMode.PAPER)) as ledger:
-        assert ledger.last_event_time("hello") is not None
+        types = [r["type"] for r in ledger.conn.execute("SELECT type FROM events")]
+        assert types == ["hello"]
 
 
 def test_for_mode_with_explicit_policy_ignores_a_broken_policy_file():
-    # `halt` precisa funcionar mesmo com o policy.toml quebrado
+    # uma política explícita nunca lê o policy.toml
     policy_file().write_text("this is [not toml", encoding="utf-8")
     with TradeGateway.for_mode(RunningMode.REAL, policy=Policy()) as gateway:
         assert gateway.real_mode is True
-        gateway.add_event("halt", {"reason": "teste"})
+        gateway.add_event("teste", {})

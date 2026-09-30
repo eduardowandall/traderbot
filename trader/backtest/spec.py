@@ -1,48 +1,25 @@
-"""Specs de estratégia para o agente: schema, validação e backtest local.
+"""Backtest de uma spec: o único motor, usado por `main.py backtest`.
 
-Nada é gravado aqui (o registro de specs vem na fase 3). O backtest usa o
-mesmo `Backtester` do `main.py backtest`, com a spec como estratégia e o
-`budget_usd` como saldo inicial.
+Reproduz a spec com o orçamento e a perda máxima dela (o mesmo teto do bucket
+ao vivo) e recusa dados curtos demais: sem aquecer, a spec nunca opera, e um
+resultado com 0 trades enganaria.
 """
 
 from dataclasses import asdict
-from datetime import datetime
 from decimal import Decimal
 
-from trader.backtest import Backtester, BacktestResult, Tick, ticks_from_candles
+from trader.backtest.replay import Backtester, BacktestResult
+from trader.backtest.ticks import Tick, ticks_from_candles
 from trader.indicators import to_utc
 from trader.market import MarketData
 from trader.models import SOLANA_MINTS
 from trader.models.public_data import Interval
-from trader.policy import Policy
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
-from trader.strategy_spec.validate import SpecLimits, parse_spec, validate
 
 DEFAULT_BACKTEST_CANDLES = 1000
-
-
-def limits_from_policy(policy: Policy) -> SpecLimits:
-    return SpecLimits(
-        max_trade_usd=policy.max_trade_usd, allowed_symbols=policy.allowed_symbols
-    )
-
-
-def schema() -> dict:
-    return StrategySpec.model_json_schema()
-
-
-def check(text: str, limits: SpecLimits, now: datetime | None = None) -> dict:
-    """Lê e valida; `SpecParseError` sobe para a CLI se o JSON for inválido."""
-    spec = parse_spec(text)
-    errors = validate(spec, limits, now)
-    return {
-        "spec_id": spec.spec_id(),
-        "valid": not errors,
-        "errors": [asdict(e) for e in errors],
-        "warmup_bars": spec.history(),
-        "timeframe": str(spec.timeframe),
-    }
+# barras avaliadas depois do aquecimento, no mínimo
+MIN_EVAL_BARS = 20
 
 
 async def fetch_ticks(data: MarketData, spec: StrategySpec, n: int) -> list[Tick]:
@@ -52,10 +29,6 @@ async def fetch_ticks(data: MarketData, spec: StrategySpec, n: int) -> list[Tick
     return ticks_from_candles(raw, spec.timeframe)
 
 
-# barras avaliadas depois do aquecimento, no mínimo
-MIN_EVAL_BARS = 20
-
-
 def bars_in(ticks: list[Tick], interval: Interval) -> int:
     """Quantas barras do timeframe os ticks cobrem."""
     return len(
@@ -63,16 +36,15 @@ def bars_in(ticks: list[Tick], interval: Interval) -> int:
     )
 
 
-async def backtest(
+async def backtest_spec(
     spec: StrategySpec,
     ticks: list[Tick],
-    fee_bps: Decimal,
-    seed: str,
+    fee_bps: Decimal = Decimal("30"),
+    seed: str = "0",
     slippage_bps: Decimal = Decimal("10"),
 ) -> dict:
     bars = bars_in(ticks, spec.timeframe)
     if bars < spec.history() + MIN_EVAL_BARS:
-        # sem aquecer, a spec nunca opera: um "ok" com 0 trades enganaria
         raise ValueError(
             f"{bars} barras de {spec.timeframe} < aquecimento de "
             f"{spec.history()} barras + {MIN_EVAL_BARS} avaliadas: use mais candles"
@@ -85,7 +57,6 @@ async def backtest(
         fee_bps=fee_bps,
         slippage_bps=slippage_bps,
         seed=seed,
-        # mesmo teto do bucket ao vivo: prejuízo realizado reduz o orçamento
         budget_usd=spec.budget_usd,
         max_loss_usd=spec.max_loss_usd,
     ).run()

@@ -3,12 +3,11 @@ from decimal import Decimal
 import pytest
 from factories import SOL, USDC, make_intent, memory_gateway, mock_provider
 
-from trader.execution import KillSwitch, PolicyDeniedError
+from trader.execution import PolicyDeniedError
 from trader.execution.fills import Fill, execute_trade
 from trader.models.costs import TradeCosts
 from trader.models.intent import IntentStatus
 from trader.models.order import SwapResult
-from trader.paths import data_dir
 from trader.policy import Policy
 
 RESULT = SwapResult("sig", USDC, SOL, in_amount=100, out_amount=7)
@@ -69,20 +68,6 @@ class TestExecuteTrade:
 
 
 class TestInMemoryGateway:
-    async def test_ignores_the_live_kill_switch(self):
-        KillSwitch().activate("parado ao vivo")
-
-        fill = await execute_trade(
-            memory_gateway(), mock_provider(), make_intent(), _swap
-        )
-
-        assert fill.result == RESULT
-
-    def test_halt_never_touches_the_live_flag(self):
-        memory_gateway().halt("replay")
-
-        assert not (data_dir() / "HALT").exists()
-
     async def test_keeps_idempotency(self):
         gateway = memory_gateway()
         intent = make_intent(key="k")

@@ -10,7 +10,7 @@ Run the CI gate with the Bash tool, from the project root:
 uv run --no-sync python .claude/scripts/check.py $ARGUMENTS
 ```
 
-It mirrors `.github/workflows/ci.yml` (pytest also runs with `-W error::ResourceWarning`):
+It mirrors `.github/workflows/ci.yml`:
 one `PASS`/`FAIL` line per step, and the output tail of each failing step.
 Paths narrow ruff; test paths (under `tests/`) narrow pytest; pyright always runs on `.`.
 

@@ -11,41 +11,34 @@ aumenta. Como todos os buckets dividem a carteira, cada compra relê o saldo e
 as ordens passam uma por vez (`asyncio.Lock`). A política do gateway continua
 valendo para cada ordem, por cima do bucket.
 
-Swaps manuais (`swap`) passam pelo mesmo lock e pelo mesmo caminho, no
-bucket `manual` (ver `manual.py`).
-
-O modo (real/dry/paper) é só do serviço: quem pede ordens nunca o conhece.
+O modo (real/paper) é só do serviço: quem pede ordens nunca o conhece.
 """
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
 from solders.pubkey import Pubkey
 
-from trader.async_account import AsyncAccount
 from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
+from trader.execution.account import AsyncAccount
 from trader.market.prices import PriceOracle
 from trader.models import Order, OrderSide
 from trader.models.errors import SwapRejectedError
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.trading_service.manual import execute_swap
 from trader.trading_service.protocol import (
     BucketSnapshot,
     BucketStatus,
     OrderReply,
     OrderRequest,
-    SwapRequest,
 )
 
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
-# bucket dos swaps manuais: conta "<modo>:manual", sem posição nem orçamento
-MANUAL_BUCKET = "manual"
 
 
 @dataclass
@@ -55,6 +48,9 @@ class _Bucket:
     status: BucketStatus = BucketStatus.ACTIVE
     # prejuízo realizado que encerra o bucket (o `max_loss_usd` da spec)
     max_loss_usd: Decimal | None = None
+    # vendendo a sobra de um bucket encerrado: a venda passa por
+    # `submit_order` de novo, que não pode tentar fechar outra vez
+    closing: bool = False
 
 
 def remaining_budget(budget_usd: Decimal, realized_usd: Decimal) -> Decimal:
@@ -110,12 +106,9 @@ class TradeService:
             prices=self.prices,
         )
         bucket = _Bucket(account, budget_usd, max_loss_usd=max_loss_usd)
-        if budget_usd is not None:
-            account.spend_cap = lambda: self._cap(bucket)
+        self.gateway.open_account(account.account_id)
         account.restore_from_ledger()
-        if self.provider.balances_track_fills:
-            # em dry run a carteira real não reflete as ordens simuladas
-            await account.reconcile_position()
+        await account.reconcile_position()
         self._buckets[name] = bucket
         self._check_max_loss(name, bucket)  # já restaurado além do limite?
 
@@ -141,16 +134,19 @@ class TradeService:
         except KeyError:
             raise ValueError(f"bucket {name} não está aberto") from None
 
-    def _cap(self, bucket: _Bucket) -> Decimal:
-        assert bucket.budget_usd is not None
+    def _cap(self, bucket: _Bucket) -> Decimal | None:
+        """O que o bucket ainda pode gastar; None sem orçamento (a carteira toda)."""
+        if bucket.budget_usd is None:
+            return None
         return remaining_budget(bucket.budget_usd, bucket.account.book.realized_usd)
 
     async def get_bucket(self, name: str) -> BucketSnapshot:
         bucket = self._bucket(name)
         account = bucket.account
         available = await account.get_spendable_balance(account.input_mint)
-        if bucket.budget_usd is not None:
-            available = min(available, self._cap(bucket))
+        cap = self._cap(bucket)
+        if cap is not None:
+            available = min(available, cap)
         return BucketSnapshot(
             bucket=name,
             available_usd=available,
@@ -169,9 +165,6 @@ class TradeService:
         if request.side == OrderSide.BUY and bucket.status != BucketStatus.ACTIVE:
             return OrderReply.of_rejection(f"bucket {name} encerrado: sem compras")
         async with self._lock:
-            # o livro segue o ledger: uma intenção resolvida à mão (ou outro
-            # processo) muda a posição sem passar por esta conta
-            bucket.account.sync_with_ledger()
             reply = await self._place(bucket, request)
         self._check_max_loss(name, bucket)
         await self._close_if_retiring(name, bucket, request.price)
@@ -180,41 +173,50 @@ class TradeService:
     async def _close_if_retiring(
         self, name: str, bucket: _Bucket, price: Decimal
     ) -> None:
-        """Um bucket encerrado com sobra aberta (venda parcial) vende o resto."""
+        """Um bucket encerrado com sobra aberta (venda parcial) vende o resto.
+
+        Uma tentativa por ordem: se a venda falhar (reserva de SOL, tamanho
+        mínimo, breaker, RPC), a próxima ordem tenta de novo.
+        """
         if bucket.status == BucketStatus.ACTIVE or bucket.account.book.position is None:
             return
+        if bucket.closing:
+            return
         logger.warning(f"Bucket {name} encerrado com posição aberta: vendendo o resto")
-        await self.close_bucket(name, price)
+        bucket.closing = True
+        try:
+            await self.close_bucket(name, price)
+        finally:
+            bucket.closing = False
 
     async def _place(self, bucket: _Bucket, request: OrderRequest) -> OrderReply:
-        account = bucket.account
-        return await _reply(
-            account.account_id,
-            lambda: account.place_order(
-                request.price,
-                request.side,
-                request.quantity,
-                rationale=request.rationale,
-                idempotency_key=request.idempotency_key,
-            ),
-        )
+        """Executa e classifica o desfecho; nenhuma exceção de execução escapa."""
+        try:
+            order = await self._execute(bucket, request)
+        except (PolicyDeniedError, DuplicateIntentError) as ex:
+            return OrderReply.of_denial(_reasons(ex))
+        except (ValueError, SwapRejectedError) as ex:
+            # nada foi executado: saldo, orçamento, impacto de preço...
+            return OrderReply.of_rejection(str(ex))
+        except Exception as ex:
+            logger.error(f"Erro ao executar ordem de {bucket.account.account_id}: {ex}")
+            return OrderReply.of_error(f"{type(ex).__name__}: {ex}")
+        return OrderReply.of_fill(order)
 
-    async def swap(self, request: SwapRequest, source: str = "cli") -> OrderReply:
-        """Swap manual no bucket `manual` (qualquer par, sem posição)."""
-        account = self.account_id(MANUAL_BUCKET)
-        async with self._lock:
-            return await _reply(
-                account,
-                lambda: execute_swap(
-                    self.gateway,
-                    self.provider,
-                    account,
-                    request,
-                    source,
-                    self.clock(),
-                    self.prices,
-                ),
+    async def _execute(self, bucket: _Bucket, request: OrderRequest) -> Order:
+        account = bucket.account
+        if request.side == OrderSide.SELL:
+            # a venda tem chave fixa por posição (ver `AsyncAccount.sell`)
+            return await account.sell(
+                request.price, request.quantity, request.rationale
             )
+        return await account.buy(
+            request.price,
+            request.quantity,
+            request.rationale,
+            request.idempotency_key,
+            limit_usd=self._cap(bucket),
+        )
 
     async def close_bucket(self, name: str, price: Decimal) -> OrderReply | None:
         """Vende a posição aberta do bucket; None se não há posição."""
@@ -231,23 +233,6 @@ class TradeService:
 
     async def aclose(self) -> None:
         await self.provider.aclose()
-
-
-async def _reply(
-    account_id: str, execute: Callable[[], Awaitable[Order]]
-) -> OrderReply:
-    """Executa e classifica o desfecho; nenhuma exceção de execução escapa."""
-    try:
-        order = await execute()
-    except (PolicyDeniedError, DuplicateIntentError) as ex:
-        return OrderReply.of_denial(_reasons(ex))
-    except (ValueError, SwapRejectedError) as ex:
-        # nada foi executado: saldo, orçamento, impacto de preço...
-        return OrderReply.of_rejection(str(ex))
-    except Exception as ex:
-        logger.error(f"Erro ao executar ordem de {account_id}: {ex}")
-        return OrderReply.of_error(f"{type(ex).__name__}: {ex}")
-    return OrderReply.of_fill(order)
 
 
 def _reasons(ex: PolicyDeniedError | DuplicateIntentError) -> tuple[str, ...]:

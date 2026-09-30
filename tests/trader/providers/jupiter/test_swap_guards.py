@@ -56,7 +56,7 @@ class TestPriceImpact:
         provider = _provider(max_price_impact_pct=Decimal("1"))
         provider.jupiter_client.get_quote = AsyncMock(return_value=_quote("0.05"))
         with pytest.raises(SwapRejectedError):
-            await provider.swap("in", "out", 1000)
+            await provider.swap_with_details("in", "out", 1000)
         provider.jupiter_client.get_quote.assert_awaited_once()
         provider.executor.rpc_client.send_transaction.assert_not_awaited()  # type: ignore[attr-defined]
 

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 from factories import memory_gateway, mock_provider
 
-from trader.async_account import AsyncAccount
+from trader.execution.account import AsyncAccount
 from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.book import remainder_entry
@@ -27,16 +27,17 @@ def _account(gateway, sol_balance="10"):
         ]
     )
 
-    async def buy(input_mint, output_mint, type_order, quantity, price):
+    async def buy(input_mint, output_mint, spend_amount):
+        # as compras destes testes são a 100 USDC/SOL
         return SwapResult(
             "buy-sig",
             USDC.mint,
             SOL.mint,
-            USDC.ui_to_raw(quantity * price),
-            SOL.ui_to_raw(quantity),
+            USDC.ui_to_raw(spend_amount),
+            SOL.ui_to_raw(spend_amount / 100),
         )
 
-    async def sell(input_mint, output_mint, type_order, quantity):
+    async def sell(input_mint, output_mint, quantity):
         return SwapResult(
             f"sell-{quantity}",
             SOL.mint,

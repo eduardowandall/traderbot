@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PYTEST_FLAGS = ["-q", "-p", "no:cacheprovider", "-W", "error::ResourceWarning"]
+PYTEST_FLAGS = ["-q", "-p", "no:cacheprovider"]
 TAIL_LINES = 40
 # the line each tool ends with (pyright may append a "new version" nag after it)
 SUMMARY = re.compile(r"passed|failed|error|checks|formatted|reformatted", re.I)

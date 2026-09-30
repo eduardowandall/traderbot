@@ -59,7 +59,7 @@ class TransactionFailedError(Exception):
 
 
 class AsyncRPCClient:
-    def __init__(self, client=None, is_dryrun=False):
+    def __init__(self, client=None):
         self.logger = logging.getLogger(self.__module__)
         if client:
             self.client = client
@@ -70,7 +70,6 @@ class AsyncRPCClient:
                 raise ValueError("HELIUS_RPC_URL não definida")
             self.client = AsyncClient(rpc_url)
         self._client_connected = False
-        self.is_dryrun = is_dryrun
 
     async def aclose(self) -> None:
         await self.client.close()
@@ -97,11 +96,6 @@ class AsyncRPCClient:
                 return resp.value.transaction
         return None
 
-    async def get_fee_for_message(self, message) -> int | None:
-        """Taxa (base + priority) que a rede cobraria pela mensagem."""
-        resp = await self.client.get_fee_for_message(message)
-        return resp.value
-
     @logger_wrapper
     async def is_connected(self):
         if self._client_connected:
@@ -111,8 +105,6 @@ class AsyncRPCClient:
 
     @logger_wrapper
     async def check_signature_is_confirmed(self, signature) -> bool:
-        if self.is_dryrun:
-            return True
         result = await self.client.get_signature_statuses([signature])
         status = result.value[0]
 
@@ -167,9 +159,6 @@ class AsyncRPCClient:
     async def send_transaction(
         self, new_tx: VersionedTransaction
     ) -> SendTransactionResp:
-        if self.is_dryrun:
-            return SendTransactionResp(value=Signature.new_unique())
-
         await self.is_connected()
         resp = await self.client.send_raw_transaction(bytes(new_tx))
         return resp

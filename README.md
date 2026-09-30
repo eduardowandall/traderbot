@@ -1,192 +1,94 @@
 # Trader
 
-A Solana trading bot that buys and sells tokens through the **Jupiter DEX**
-using pluggable trading strategies. It fetches live prices from Jupiter,
-decides when to trade through a configured strategy, and executes swaps
-on Solana.
+A Solana trading bot that swaps tokens through the **Jupiter DEX**. Every
+strategy is a small JSON **spec** (entry conditions, a stop, exits, a budget);
+the bot runs one spec against live prices, and every order passes a risk
+policy and is recorded in a local ledger.
 
-## Running
+How the code works, following one trade: [`docs/architecture.md`](docs/architecture.md).
 
-### Requirements
-
-- Python 3.14
-- `uv` (package manager)
-- A [Helius](https://www.helius.dev/) API key — set as `HELIUS_RPC_URL` in `.env`
-- A Solana wallet (e.g., [Phantom](https://phantom.app/), [Solflare](https://solflare.com/)) — set its private key as `SOLANA_PRIVATE_KEY` in `.env` (required even for dry runs)
-
-### Setup
+## Quick start (paper: no key, no money)
 
 ```bash
 uv sync
-cp .env.example .env
+uv run main.py run paper docs/examples/spec-random.json --seed 1
 ```
 
-Fill in `.env`:
+`paper` trades a **simulated wallet** (`.data/paper-wallet.json`, created with
+100 USDC and 0.5 SOL) at real Jupiter prices and quotes. Stop it with Ctrl+C.
 
-| Variable             | Description                                             |
-| -------------------- | ------------------------------------------------------- |
-| `HELIUS_RPC_URL`     | Helius RPC endpoint used for Solana blockchain calls    |
-| `SOLANA_PRIVATE_KEY` | Wallet private key (base58). Required even for dry runs |
-| `SOLANA_PUBLIC_KEY`  | Optional. Validated against the derived key             |
-| `TELEGRAM_CHAT_ID`   | Optional. Chat for `--notification-service telegram`    |
-| `TELEGRAM_BOT_TOKEN` | Optional. Bot token for Telegram notifications          |
-| `JUPITER_API_URL`    | Optional. Jupiter quote/swap API base URL. Defaults to `https://api.jup.ag` |
-| `JUPITER_API_KEY`    | Optional. Sent as `x-api-key`. Without it, requests still work but at a lower (keyless) rate limit. Get one at [developers.jup.ag/portal](https://developers.jup.ag/portal) |
-
-### Run the bot
+## The two commands
 
 ```bash
-uv run --env-file .env main.py run <mode> <spec.json> [--seed N]
+uv run main.py run <paper|real> <spec.json> [--seed N] [--record-ticks FILE]
+uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps 30] [--slippage-bps 10]
 ```
 
-- **Mode**: `dry` (default) fetches prices and simulates but never sends a real transaction. `paper` uses a simulated wallet (see below). `real` ⚠️ trades real money.
-- **Spec**: the path to a JSON strategy spec, the only kind of strategy. Its `symbol` (`OUTPUT-INPUT`: `SOL-USDC` buys SOL with USDC) is the pair traded; `--seed` fixes its `random_chance` draws. The examples in `docs/examples/` include the old built-in strategies: `spec-random.json`, `spec-target-value.json` and `spec-wma-composer.json`. Combining conditions is done with the spec's `entry.mode` / `exit.mode` (`all`/`any`).
+- **run**: the mode is required. The spec's `symbol` (`OUTPUT-INPUT`:
+  `SOL-USDC` buys SOL with USDC) is the pair. The spec trades in its own
+  bucket with its `budget_usd`; losing `max_loss_usd` retires it.
+  `--record-ticks` saves the prices for a later backtest.
+- **backtest**: replays recent candles (or recorded ticks) with the spec's
+  budget and prints one JSON object. The input token must be USDC or USDT.
+  It refuses fewer bars than the spec needs to warm up.
+- Examples are in `docs/examples/` (`spec-sol-dip.json` is the reference).
+
+## Real mode
 
 ```bash
-# Dry run, random spec
-uv run --env-file .env main.py run dry docs/examples/spec-random.json
-
-# Dry run, the old composer defaults (four WMA crossovers + 3.1% trailing stop)
-uv run --env-file .env main.py run dry docs/examples/spec-wma-composer.json
+cp .env.example .env    # fill in HELIUS_RPC_URL and SOLANA_PRIVATE_KEY
+cp policy.example.toml policy.toml   # set real_trading_enabled = true
+uv run --env-file .env main.py run real <spec.json>
 ```
 
-### Swap
+Use a dedicated low-balance wallet. Real mode stays denied until the policy
+enables it.
 
-Execute a one-shot swap between any two known symbols:
+## Configuration
+
+| Variable | What |
+|---|---|
+| `SOLANA_PRIVATE_KEY` | Real mode: wallet private key (base58) |
+| `SOLANA_PUBLIC_KEY` | Optional: checked against the key |
+| `HELIUS_RPC_URL` | Real mode: Solana RPC (Helius) |
+| `JUPITER_API_URL` / `JUPITER_API_KEY` | Optional: API host (default `https://api.jup.ag`) and key (keyless works, at a lower rate limit) |
+| `TELEGRAM_CHAT_ID` / `TELEGRAM_BOT_TOKEN` | Optional: both set = Telegram notifications |
+| `TRADER_DATA_DIR` / `TRADER_POLICY_FILE` / `TRADER_LOG_DIR` | Optional: state, policy and log locations (default `.data/`, `policy.toml`, `.logs/` under the project root) |
+
+**Policy** (`policy.toml`, not in git; start from `policy.example.toml`).
+Defaults: real mode off; $25 per trade, $100 per 24h, 10 trades per hour, a
+$20 daily loss stops buys, 3 failures in a row stop trading. Paper gets roomy
+limits by default. `[limits]` applies to every mode; `[paper.*]` and `[real.*]`
+override only in that mode.
+
+## What to know when running it
+
+- **Costs and PnL.** Every swap records the network fee, account rent and any
+  other SOL charged (real mode reads them from the confirmed transaction; paper
+  simulates them). PnL is net of those, in the quote token with a USD
+  estimate. LP fees and slippage are already in the amounts received.
+- **Looking at what happened:**
+  `uv run --no-sync python .claude/scripts/ledger_dump.py paper` prints the
+  recent intents (executed, denied with the reason, failed), PnL per bucket
+  and the paper wallet, read-only.
+- **A process killed mid-swap** leaves an UNCONFIRMED intent, and that mode
+  stops trading. Check the signature on an explorer, then move or delete
+  `.data/ledger-<mode>.sqlite3`.
+- **The circuit breaker** (3 failures in a row) re-arms when you restart the bot.
+- **Starting paper over:** delete `.data/paper-wallet.json` and
+  `.data/ledger-paper.sqlite3`.
+- **A new token** goes in `SOLANA_MINTS` (`trader/models/mints.py`).
+
+## Development
 
 ```bash
-uv run --env-file .env main.py swap <mode> <SYMBOL_IN> <SYMBOL_OUT> <quantity> [--slippage-bps N] [--max-price-impact PCT]
+uv run pytest .          # tests
+uv run pytest -m live    # live checks against Jupiter (paper, read-only, ~1 min)
+uv run ruff check .      # lint (--fix to auto-fix)
+uv run ruff format .     # format
+uv run pyright .         # types
 ```
 
-- **Mode**: `dry` builds the swap but never sends a real transaction. `real` ⚠️ trades real money.
-- **Symbols**: any pair from `SOLANA_MINTS` (SOL, USDC, USDT, BONK, JUP, ...).
-- **Quantity**: amount of `SYMBOL_IN` to spend (in UI units).
-- **Slippage**: tolerance in basis points (default 50; max 1000). Retries escalate by 25 bps, up to 100 bps.
-- **Max price impact**: the swap is refused if the quote's price impact is above this % (default 1).
-- If a transaction is sent but not confirmed in time, the command fails with `TransactionSubmittedError` and is **not** retried. Check the signature before trying again.
-
-```bash
-# Dry run: swap 1000 JUP for USDC
-uv run --env-file .env main.py swap dry JUP USDC 1000
-
-# Real swap: sell 0.5 SOL for USDC with 1% slippage
-uv run --env-file .env main.py swap real SOL USDC 0.5 --slippage-bps 100
-```
-
-### Paper trading and backtests
-
-`paper` mode trades against a **simulated wallet** using real Jupiter prices
-and quotes. It needs no private key and no RPC, and both buys and sells work.
-
-```bash
-uv run main.py paper reset "USDC=20 SOL=0.5"     # simulated balances (.data/paper-wallet.json)
-uv run main.py run paper docs/examples/spec-random.json --record-ticks .data/ticks/sol.csv
-uv run main.py paper balance
-uv run main.py ledger list paper
-```
-
-Backtests replay recorded ticks, or Jupiter candles, through a strategy. They
-are deterministic: the same `--seed` always gives the same result.
-
-```bash
-uv run main.py backtest docs/examples/spec-random.json --ticks .data/ticks/sol.csv --balance 20 --seed 1
-uv run main.py backtest docs/examples/spec-wma-composer.json --candles 1000
-```
-
-The input token of the pair must be USDC or USDT, because prices are in USD.
-`--fee-bps` (default 30) models swap costs.
-
-### Net PnL and costs
-
-Every swap records what it actually cost:
-- the network fee (base + priority)
-- rent for new token accounts (refundable)
-- any other SOL the route charged
-
-PnL is reported net of those costs, in the pair's **quote token** (USDC for
-SOL-USDC, SOL for USDC-SOL), with an estimated USD value next to it.
-
-```bash
-uv run main.py pnl paper                 # net PnL per account: native + ~USD, costs paid in SOL
-uv run main.py ledger list paper         # per trade: costs and net PnL
-```
-
-**Where the costs come from:**
-- Real mode reads them from the confirmed transaction.
-- Dry mode estimates the fee Solana would charge.
-- Paper mode simulates the base fee and the account rent.
-
-**Not subtracted again:** LP fees, price impact and slippage are already in
-the amounts actually received.
-
-**Pairs without SOL** (e.g. JUP-USDC) keep costs in SOL only and are marked
-incomplete.
-
-### Risk policy, ledger and kill switch
-
-Every order goes through a risk policy and is recorded in a local ledger. This
-covers orders from strategies and from `swap`.
-
-- **Policy**: copy `policy.example.toml` to `policy.toml` and adjust it. Without
-  a file, conservative defaults apply:
-  - **real mode is disabled** until you set `real_trading_enabled = true`
-  - $25 per trade and $100 per 24h
-  - 10 trades per hour
-  - a $20 daily loss stops new buys
-  - 3 failures in a row halt trading
-- **Per-mode overrides**: `[paper.limits]`, `[dry.limits]` and `[real.trading]`
-  (etc.) override only the keys they set, only in that mode. For example, you
-  can give paper loose limits while real keeps the strict ones. Typos in any
-  section are rejected.
-- **Ledger**: `.data/ledger-<mode>.sqlite3`. On restart, open positions and
-  PnL are restored from it.
-- **Locations**: `.data/` and `policy.toml` are always read from the project
-  root, whatever directory you run commands from, so `halt` always reaches the
-  running bot. Override them with `TRADER_DATA_DIR` and `TRADER_POLICY_FILE`
-  (relative values are taken from the project root).
-
-```bash
-uv run main.py ledger list dry          # recent intents (executed / denied / failed)
-uv run main.py ledger verify dry        # check the tamper-evident event chain
-uv run main.py halt "reason"            # kill switch: no trade runs
-uv run main.py resume dry               # clear the kill switch and re-arm the breaker
-uv run main.py ledger resolve real <intent_id> failed --note "not on explorer"
-```
-
-If a transaction is sent but never confirmed, **all trading stops** until you
-check it on an explorer and resolve it as `executed` or `failed`.
-
-## Contributing
-
-### Development
-
-```bash
-uv run pytest .              # run tests
-uv run ruff check .          # lint
-uv run ruff check --fix .    # lint and auto-fix
-uv run ruff format .         # format
-uv run pyright .             # type check
-```
-
-CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every push/PR: lint, format check, type check, and the full test suite.
-
-### Architecture
-
-- `main.py` — entry point; the commands live in `trader/cli/` (`run`, `swap`, `backtest`, `pnl`, `halt`/`resume`, `ledger`, `paper`) and `trader/agent_api/cli.py` (`market`, `strategy`, JSON output)
-- `trader/bot/` — main loop: fetch price → run strategy → submit the order to its bucket (`trader/trading_service/`)
-- `trader/strategy_spec/` — declarative JSON strategy specs (the only kind of strategy)
-- `trader/trading_strategy.py` — the `TradingStrategy` base the bot and backtester call
-- `trader/providers/jupiter/` — Jupiter HTTP client, Solana/Helius RPC, swap service
-- `trader/models/` — data models + `SOLANA_MINTS` (known tokens, symbol ↔ mint)
-- `trader/policy/` — risk policy (`evaluate()` is pure; loaded from `policy.toml`)
-- `trader/ledger/` — SQLite ledger of intents/orders/events (hash-chained)
-- `trader/execution/` — `TradeGateway` (only path to a swap) and kill switch
-- `trader/paper/` — simulated wallet + paper provider (real quotes, simulated fills)
-- `trader/backtest/` — tick recording and deterministic replay
-- `trader/logging_config.py` — logging (console + files in `.logs/`)
-- `docs/plan.md` — goal, progress and roadmap; `docs/architecture.md` — a guided tour of the code
-
-### Notes
-
-- New tokens must be added to `SOLANA_MINTS` in `trader/models/mints.py`.
-- New strategies are specs (`run paper spec.json`); a missing building block becomes a new condition type in `trader/strategy_spec/`. `trader/__init__.py` must stay empty.
+CI (`.github/workflows/ci.yml`) runs lint, format, types and tests on ubuntu and
+windows. Contributor notes and the rules that are easy to break are in
+[`AGENTS.md`](AGENTS.md); the roadmap is [`docs/plan.md`](docs/plan.md).

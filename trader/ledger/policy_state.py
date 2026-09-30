@@ -16,7 +16,12 @@ STALE_EXECUTING_SECONDS = 300
 
 
 class PolicyStateQueries(LedgerStore):
-    def policy_state(self, now: datetime | None = None) -> PolicyState:
+    def policy_state(
+        self,
+        now: datetime | None = None,
+        failures_since: datetime | None = None,
+        account: str | None = None,
+    ) -> PolicyState:
         now = now or datetime.now(UTC)
         day_ago = (now - timedelta(hours=24)).isoformat()
         hour_ago = (now - timedelta(hours=1)).isoformat()
@@ -25,8 +30,8 @@ class PolicyStateQueries(LedgerStore):
             daily_notional_usd=daily_notional,
             trades_last_hour=trades_last_hour,
             daily_realized_pnl_usd=self._realized_pnl_since(day_ago),
-            consecutive_failures=self._consecutive_failures(),
-            unresolved_intent_ids=self._unresolved_ids(now),
+            consecutive_failures=self._consecutive_failures(failures_since),
+            unresolved_intent_ids=self._unresolved_ids(now, account),
         )
 
     def _spending(self, day_ago: str, hour_ago: str) -> tuple[Decimal, int]:
@@ -51,32 +56,37 @@ class PolicyStateQueries(LedgerStore):
         ).fetchall()
         return sum((Decimal(r["realized_pnl_usd"]) for r in rows), Decimal("0"))
 
-    def _consecutive_failures(self) -> int:
-        """Falhas desde o último sucesso ou o último `resume`."""
-        resumed_at = self.last_event_time("resume")
+    def _consecutive_failures(self, since: datetime | None) -> int:
+        """Falhas desde o último sucesso (e desde `since`, se dado)."""
         row = self.conn.execute(
             "SELECT COUNT(*) AS n FROM intents WHERE status = ? AND updated_at > "
             "MAX(?, COALESCE((SELECT MAX(updated_at) FROM intents "
             "WHERE status = ?), ''))",
             (
                 str(IntentStatus.FAILED),
-                resumed_at.isoformat() if resumed_at else "",
+                since.isoformat() if since else "",
                 str(IntentStatus.EXECUTED),
             ),
         ).fetchone()
         return row["n"]
 
-    def _unresolved_ids(self, now: datetime) -> tuple[str, ...]:
-        """Sem confirmação, ou executando há tempo demais (processo morto?).
+    def _unresolved_ids(self, now: datetime, account: str | None) -> tuple[str, ...]:
+        """Sem confirmação, ou executando: da própria conta, ou há tempo demais.
 
-        Uma intenção executando agora em outro processo (o swap da CLI, outro
-        runner) não bloqueia as vendas dos demais: só conta se passar de
-        `STALE_EXECUTING_SECONDS`.
+        Uma conta vive num processo só, então uma intenção dela ainda
+        EXECUTING é um swap cujo registro falhou (ou um processo morto): ela
+        bloqueia sempre, senão a conta compraria de novo. De outra conta
+        (outro bot) só bloqueia depois de `STALE_EXECUTING_SECONDS`.
         """
         stale = (now - timedelta(seconds=STALE_EXECUTING_SECONDS)).isoformat()
         rows = self.conn.execute(
             "SELECT intent_id FROM intents WHERE status = ? "
-            "OR (status = ? AND updated_at < ?) ORDER BY created_at",
-            (str(IntentStatus.UNCONFIRMED), str(IntentStatus.EXECUTING), stale),
+            "OR (status = ? AND (updated_at < ? OR account = ?)) ORDER BY created_at",
+            (
+                str(IntentStatus.UNCONFIRMED),
+                str(IntentStatus.EXECUTING),
+                stale,
+                account,
+            ),
         ).fetchall()
         return tuple(r["intent_id"] for r in rows)

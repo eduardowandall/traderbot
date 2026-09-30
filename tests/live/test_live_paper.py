@@ -1,65 +1,87 @@
-"""Paper de ponta a ponta com quotes reais: swaps manuais e o bot no websocket."""
+"""Paper de ponta a ponta com quotes reais: um bucket e o bot no websocket."""
 
 import asyncio
+import json
 from decimal import Decimal
+from pathlib import Path
 
 from factories import example_spec
-from live_helpers import LOOSE_PAPER_POLICY, invoke
+from live_helpers import LOOSE_PAPER_POLICY
 
 from trader.backtest import Backtester, TickRecorder, load_ticks
+from trader.backtest.spec import result_to_dict
 from trader.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.bot.config import BotConfig
 from trader.ledger import Ledger, ledger_path
 from trader.market import JupiterMarketData
-from trader.models import SOLANA_MINTS
+from trader.models import SOLANA_MINTS, OrderSide
 from trader.models.intent import IntentStatus
 from trader.models.mode import RunningMode
 from trader.models.order import order_from_json
-from trader.notification.notification_service import NullNotificationService
+from trader.notification import NotificationService
 from trader.paths import policy_file
+from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
 from trader.trading_service.local import LocalTradeClient
+from trader.trading_service.protocol import OrderRequest, ReplyStatus
 from trader.wiring import build_trade_service
 
 BOT_SECONDS = 30
+TOKEN, QUOTE = SOLANA_MINTS.get_pair("SOL-USDC")
+
+
+def _busy_random() -> SpecStrategy:
+    """O exemplo aleatório, mas comprando com 40% e vendendo com 20% por tick.
+
+    O exemplo em si opera ~0.5% dos ticks: em 30s, muitas vezes nada.
+    """
+    spec = json.loads(Path(example_spec("random")).read_text(encoding="utf-8"))
+    spec["entry"]["conditions"] = [{"type": "random_chance", "pct": 40}]
+    spec["exit"]["conditions"] = [{"type": "random_chance", "pct": 20}]
+    strategy = SpecStrategy(StrategySpec.model_validate(spec))
+    strategy.seed(1)
+    return strategy
 
 
 def _records():
     with Ledger(ledger_path("paper")) as ledger:
-        return ledger.list_intents(100), ledger.verify_chain()
+        return ledger.list_intents(100)
 
 
-def test_manual_swaps_record_fills_and_costs():
-    # política padrão (25 USD por trade, valor desconhecido recusado): o
-    # SOL -> JUP passa porque a Price API dá o valor em USD do SOL gasto
-    bought = invoke("swap", "paper", "USDC", "SOL", "5")
-    spent_sol = invoke("swap", "paper", "SOL", "JUP", "0.01")
-    denied = invoke("swap", "paper", "USDC", "SOL", "50")
+def test_a_paper_round_trip_records_fills_and_costs():
+    # política padrão do paper: uma compra de 5 USD e a venda dela
+    asyncio.run(_round_trip())
 
-    assert bought.exit_code == 0, bought.output
-    assert "gasto 5 USDC" in bought.stdout
-    assert "custos [simulated]" in bought.stdout
-    assert "~$" in bought.stdout  # par com stablecoin: custo em USD
-    assert spent_sol.exit_code == 0, spent_sol.output
-    assert "~$" in spent_sol.stdout  # sem stablecoin: custo em USD pela API
-    assert denied.exit_code == 1
-    assert "acima do limite" in denied.stderr
-
-    records, broken = _records()
-    assert broken is None
-    executed = [r for r in records if r.status == IntentStatus.EXECUTED]
-    assert len(executed) == 2
-    assert all(r.intent.account == "paper:manual" for r in executed)
+    executed = [r for r in _records() if r.status == IntentStatus.EXECUTED]
+    assert len(executed) == 2, [(r.status, r.error) for r in _records()]
+    assert all(r.intent.account == "paper:live" for r in executed)
     assert all(r.order_json and r.fee_lamports for r in executed)
-    # a primeira conta de JUP da carteira paga rent
-    jup = next(r for r in executed if r.intent.spend_mint == _mint("SOL"))
-    assert jup.rent_lamports and jup.rent_lamports > 0
-    assert jup.intent.notional_usd and 0 < jup.intent.notional_usd < 25
-    assert jup.order_json and order_from_json(jup.order_json).sol_usd
+    sell = next(r for r in executed if r.intent.spend_mint == TOKEN.mint)
+    assert sell.realized_pnl_usd is not None
+    assert sell.order_json and order_from_json(sell.order_json).sol_usd
 
-    pnl = invoke("pnl", "paper")
-    assert pnl.exit_code == 0
-    assert "paper:manual: 2 pernas" in pnl.stdout
+
+async def _round_trip():
+    service = build_trade_service(RunningMode.PAPER)
+    with service.gateway:
+        try:
+            await service.open_bucket("live", QUOTE.mint, TOKEN.mint)
+            data = JupiterMarketData()
+            try:
+                price = await data.get_price(TOKEN.mint)
+            finally:
+                await data.aclose()
+            buy = await service.submit_order(
+                "live", OrderRequest(OrderSide.BUY, Decimal(5) / price, price)
+            )
+            assert buy.status == ReplyStatus.FILLED, buy
+            assert buy.order
+            sell = await service.submit_order(
+                "live", OrderRequest(OrderSide.SELL, buy.order.quantity, price)
+            )
+            assert sell.status == ReplyStatus.FILLED, sell
+        finally:
+            await service.aclose()
 
 
 def test_paper_bot_trades_on_the_live_feed(tmp_path):
@@ -68,8 +90,7 @@ def test_paper_bot_trades_on_the_live_feed(tmp_path):
 
     asyncio.run(_run_bot(ticks_file))
 
-    records, broken = _records()
-    assert broken is None
+    records = _records()
     executed = [r for r in records if r.status == IntentStatus.EXECUTED]
     assert executed, [(r.status, r.error, r.decision_reasons) for r in records]
     assert all(r.intent.account == "paper:SOL-USDC" for r in executed)
@@ -77,8 +98,8 @@ def test_paper_bot_trades_on_the_live_feed(tmp_path):
 
     ticks = load_ticks(ticks_file)
     assert len(ticks) >= 5
-    first, second = (asyncio.run(_replay(ticks)) for _ in range(2))
-    assert first.summary() == second.summary()  # replay determinístico
+    first, second = (result_to_dict(asyncio.run(_replay(ticks))) for _ in range(2))
+    assert first == second  # replay determinístico
 
 
 async def _run_bot(ticks_file):
@@ -87,11 +108,10 @@ async def _run_bot(ticks_file):
     Cancelar a task no meio de um swap deixaria a intenção UNCONFIRMED; o
     `stop()` só vale entre ticks.
     """
-    token, quote = SOLANA_MINTS.get_pair("SOL-USDC")
-    strategy = SpecStrategy.from_file(example_spec("random"))
+    strategy = _busy_random()
     service = build_trade_service(RunningMode.PAPER)
     trader = LocalTradeClient(
-        service, "SOL-USDC", quote.mint, token.mint, owns_service=True
+        service, "SOL-USDC", QUOTE.mint, TOKEN.mint, owns_service=True
     )
     with service.gateway, TickRecorder(ticks_file) as recorder:
         bot = AsyncWebsocketTradingBot(
@@ -101,7 +121,7 @@ async def _run_bot(ticks_file):
                 strategy=strategy,
                 market=JupiterMarketData(),
                 trader=trader,
-                notifier=NullNotificationService(),
+                notifier=NotificationService(),
                 on_tick=recorder.record,
             )
         )
@@ -112,11 +132,7 @@ async def _run_bot(ticks_file):
 
 
 async def _replay(ticks):
-    strategy = SpecStrategy.from_file(example_spec("random"))
+    strategy = _busy_random()
     return await Backtester(
         strategy, "SOL-USDC", ticks, initial_balance=Decimal(100)
     ).run()
-
-
-def _mint(symbol: str) -> str:
-    return SOLANA_MINTS.get_by_symbol(symbol).mint

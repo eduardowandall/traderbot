@@ -1,12 +1,14 @@
 """A12: `no_last_exit` (primeira compra) e `below_last_exit` (recompra)."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from factories import example_spec, make_intent, make_spec, open_ledger
 
-from trader.execution import KillSwitch, TradeGateway
-from trader.models import SOLANA_MINTS, Order, OrderSide, Position, PositionType
+from trader.execution import TradeGateway
+from trader.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.models.intent import IntentSide, PolicyDecision
 from trader.models.order import SwapResult
 from trader.policy import Policy
@@ -19,8 +21,13 @@ SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 
 
 def _strategy() -> SpecStrategy:
-    # a spec de teste: take_profit 0.12%, stop_loss 0.08%, recompra -0.05%
-    strategy = SpecStrategy.from_file(example_spec("scalp-test"))
+    # a spec de exemplo com números fixos (o dono ajusta os do arquivo):
+    # take_profit 0.12%, stop_loss 0.08%, recompra -0.05%
+    spec = json.loads(Path(example_spec("scalp-test")).read_text(encoding="utf-8"))
+    spec["exit"]["conditions"] = [{"type": "take_profit", "pct": 0.12}]
+    spec["exit"]["stop"] = {"type": "stop_loss", "pct": 0.08}
+    spec["entry"]["conditions"][1] = {"type": "below_last_exit", "pct": 0.05}
+    strategy = SpecStrategy(StrategySpec.model_validate(spec))
     ticks = iter(T0 + timedelta(seconds=15 * i) for i in range(1000))
     strategy.set_clock(lambda: next(ticks))
     return strategy
@@ -28,11 +35,11 @@ def _strategy() -> SpecStrategy:
 
 def _position(price) -> Position:
     order = Order("buy-1", USDC, SOL, Decimal(1), Decimal(price), OrderSide.BUY, T0)
-    return Position(PositionType.LONG, order, None)
+    return Position(order, None)
 
 
 def _tick(strategy, price, position=None):
-    return strategy.on_market_refresh(Decimal(str(price)), None, Decimal(100), position)
+    return strategy.on_market_refresh(Decimal(str(price)), Decimal(100), position)
 
 
 def test_the_first_buy_comes_from_the_explicit_no_last_exit():
@@ -98,7 +105,7 @@ def test_the_ledger_restores_the_last_sell_price():
     order = Order("sell-1", SOL, USDC, Decimal(1), Decimal("101.5"), OrderSide.SELL, T0)
     ledger.attach_order(sell.intent_id, order)
 
-    state = TradeGateway(ledger, Policy(), KillSwitch(), False).restore(account)
+    state = TradeGateway(ledger, Policy(), False).restore(account)
 
     assert ledger.last_exit_price(account) == Decimal("101.5")
     assert state.last_exit_price == Decimal("101.5")

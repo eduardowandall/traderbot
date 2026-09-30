@@ -1,23 +1,18 @@
-from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from factories import make_spec, memory_gateway
+from factories import StubStrategy, make_spec
 
 from trader.backtest import (
     Backtester,
     Tick,
     TickRecorder,
     load_ticks,
-    ticks_from_candles,
 )
-from trader.execution import KillSwitch, TradeGateway
-from trader.models import OrderSide, OrderSignal, TickerData
-from trader.models.intent import IntentStatus
+from trader.models import OrderSide, OrderSignal
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
-from trader.trading_strategy import TradingStrategy
 
 START = datetime(2026, 9, 1, 12, 0)
 
@@ -44,7 +39,7 @@ def _ticks(prices, step_seconds=60):
     ]
 
 
-class BuyThenSell(TradingStrategy):
+class BuyThenSell(StubStrategy):
     """Compra no primeiro tick e vende no tick `sell_at`."""
 
     def __init__(self, sell_at):
@@ -52,7 +47,7 @@ class BuyThenSell(TradingStrategy):
         self.sell_at = sell_at
         self.tick = 0
 
-    def on_market_refresh(self, price, spread, balance, current_position):
+    def on_market_refresh(self, price, balance, current_position):
         self.tick += 1
         if not current_position and self.tick == 1:
             return OrderSignal(OrderSide.BUY, balance / price)
@@ -81,21 +76,6 @@ class TestBacktester:
         assert result.final_equity == Decimal("110")
         assert result.return_pct == Decimal("10")
         assert not result.open_position
-
-    async def test_replays_through_a_gateway_that_ignores_the_live_halt(
-        self, monkeypatch
-    ):
-        KillSwitch().activate("bot ao vivo parado")
-        gateway = memory_gateway()  # fechado pela fixture, não pelo replay
-        gateway.close = lambda: None  # para o teste ler o ledger depois
-        monkeypatch.setattr(TradeGateway, "in_memory", lambda policy=None: gateway)
-
-        result = await _run(BuyThenSell(sell_at=3), [100, 105, 110])
-
-        assert len(result.trades) == 2
-        records = gateway.ledger.list_intents()
-        assert [r.status for r in records] == [IntentStatus.EXECUTED] * 2
-        assert all(r.order_json for r in records)
 
     async def test_fees_reduce_result(self):
         free = await _run(BuyThenSell(3), [100, 105, 110], fee_bps=Decimal("0"))
@@ -141,8 +121,8 @@ class TestBacktester:
         assert result.trades[0].side == OrderSide.BUY
 
     async def test_rejected_signals_are_counted(self):
-        class SellWithoutPosition(TradingStrategy):
-            def on_market_refresh(self, price, spread, balance, current_position):
+        class SellWithoutPosition(StubStrategy):
+            def on_market_refresh(self, price, balance, current_position):
                 return OrderSignal(OrderSide.SELL, Decimal("1"))
 
         result = await _run(SellWithoutPosition(), [100, 101])
@@ -156,12 +136,6 @@ class TestBacktester:
     def test_requires_ticks(self):
         with pytest.raises(ValueError, match="tick"):
             Backtester(BuyThenSell(2), "SOL-USDC", [], Decimal("1"))
-
-    async def test_summary(self):
-        result = await _run(BuyThenSell(3), [100, 105, 110])
-        text = result.summary()
-        assert "SOL-USDC" in text
-        assert "trades: 2 (1 fechados, win rate 100.0%)" in text
 
 
 class TestTicks:
@@ -192,26 +166,6 @@ class TestTicks:
         with pytest.raises(ValueError, match=":4:"):
             load_ticks(path)
 
-    def test_ticks_from_candles(self):
-        candle = TickerData(
-            buy=Decimal("1"),
-            timestamp=START,
-            high=Decimal("3"),
-            last=Decimal("2"),
-            low=Decimal("1"),
-            open=Decimal("1"),
-            pair="x",
-            sell=Decimal("1"),
-            vol=Decimal("0"),
-        )
-        later = replace(
-            candle, timestamp=START + timedelta(minutes=1), last=Decimal("4")
-        )
-        assert ticks_from_candles([later, candle]) == [
-            Tick(START, Decimal("2")),
-            Tick(START + timedelta(minutes=1), Decimal("4")),
-        ]
-
 
 class TestStrategyDeterminism:
     def test_random_strategy_seed(self):
@@ -219,7 +173,7 @@ class TestStrategyDeterminism:
             strategy = _random_spec(buy=50, sell=50)
             strategy.seed(seed)
             return [
-                strategy.on_market_refresh(Decimal("1"), None, Decimal("1"), None)
+                strategy.on_market_refresh(Decimal("1"), Decimal("1"), None)
                 for _ in range(50)
             ]
 
@@ -227,10 +181,10 @@ class TestStrategyDeterminism:
         assert signals(1) != signals(2)
 
 
-class Churn(TradingStrategy):
+class Churn(StubStrategy):
     """Compra sem posição, vende com posição: um tick cada."""
 
-    def on_market_refresh(self, price, spread, balance, current_position):
+    def on_market_refresh(self, price, balance, current_position):
         if current_position:
             return OrderSignal(OrderSide.SELL, current_position.entry_order.quantity)
         return OrderSignal(OrderSide.BUY, Decimal("10") / price)

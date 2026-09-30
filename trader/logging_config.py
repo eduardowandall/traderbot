@@ -169,8 +169,3 @@ def redacted_excepthook(exc_type, exc, tb) -> None:
     """Traceback de um erro que escapou, com os segredos mascarados."""
     text = "".join(traceback.format_exception(exc_type, exc, tb))
     sys.stderr.write(redact(text))
-
-
-def install_excepthook() -> None:
-    """Erros não tratados da CLI saem pelo `redact()`, como os logs."""
-    sys.excepthook = redacted_excepthook
