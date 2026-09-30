@@ -9,7 +9,8 @@ from trader.models.mode import RunningMode
 
 
 def pnl(
-    mode: RunningMode = typer.Argument(RunningMode.PAPER),
+    # mesmo padrão dos outros comandos (dry); passe `paper` para o paper
+    mode: RunningMode = typer.Argument(RunningMode.DRY),
     account: str | None = typer.Option(None, help="Só esta conta (ex: paper:SOL-USDC)"),
 ):
     """PnL líquido por conta: nativo (token de cotação), custos em SOL e ~USD."""

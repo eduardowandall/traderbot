@@ -9,14 +9,50 @@ O PnL fica em duas formas:
 - `realized_usd`, a estimativa líquida em USD usada pelo orçamento do bucket.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
-from trader.models.costs import PnLResult
+from trader.models.costs import PnLResult, TradeCosts
 from trader.models.order import Order
 from trader.models.position import Position, PositionType
 
 ZERO = Decimal("0")
+# resto abaixo desta fração da entrada é poeira: a posição fecha
+DUST_FRACTION = Decimal("0.01")
+
+
+def remainder_entry(entry: Order, sold: Decimal) -> Order | None:
+    """A entrada do que sobra depois de vender `sold`; None se nada (ou poeira).
+
+    Quantidade, valor em cotação e custos são proporcionais ao que sobrou.
+    """
+    remaining = entry.quantity - sold
+    if entry.quantity <= 0 or remaining <= entry.quantity * DUST_FRACTION:
+        return None
+    share = remaining / entry.quantity
+    quote_amount = entry.quote_amount
+    return replace(
+        entry,
+        quantity=remaining,
+        quote_amount=None if quote_amount is None else quote_amount * share,
+        costs=_scaled(entry.costs, share),
+    )
+
+
+def _scaled(costs: TradeCosts | None, share: Decimal) -> TradeCosts | None:
+    if costs is None:
+        return None
+    return replace(
+        costs,
+        fee_lamports=int(costs.fee_lamports * share),
+        priority_fee_lamports=int(costs.priority_fee_lamports * share),
+        rent_lamports=int(costs.rent_lamports * share),
+        other_lamports=int(costs.other_lamports * share),
+        # valores efetivos são do swap inteiro: não valem para uma fração
+        actual_in_amount=None,
+        actual_out_amount=None,
+        quoted_out_amount=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -67,16 +103,34 @@ class PositionBook:
         return self.position
 
     def close(self, exit_order: Order) -> ClosedPosition:
-        position = self.position
-        if position is None:
+        """Fecha a posição inteira (o PnL conta só a fração vendida)."""
+        closed = self._realize(exit_order)
+        self.position = None
+        return closed
+
+    def reduce(self, exit_order: Order) -> ClosedPosition:
+        """Venda parcial: realiza a fração vendida e mantém o resto aberto."""
+        entry = self._open().entry_order
+        closed = self._realize(exit_order)
+        rest = remainder_entry(entry, exit_order.quantity)
+        self.position = (
+            None if rest is None else Position(PositionType.LONG, rest, None)
+        )
+        return closed
+
+    def _open(self) -> Position:
+        if self.position is None:
             raise ValueError("não há posição aberta para fechar")
+        return self.position
+
+    def _realize(self, exit_order: Order) -> ClosedPosition:
+        position = self._open()
         position.exit_order = exit_order
         closed = ClosedPosition(
             position, position.realized_pnl_detail(), position.realized_pnl
         )
         self.realized_usd += closed.realized_usd
         self._book(closed.pnl)
-        self.position = None
         return closed
 
     def _book(self, pnl: PnLResult | None) -> None:

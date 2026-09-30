@@ -10,8 +10,10 @@ from datetime import datetime
 from decimal import Decimal
 
 from trader.backtest import Backtester, BacktestResult, Tick, ticks_from_candles
+from trader.indicators import to_utc
 from trader.market import MarketData
 from trader.models import SOLANA_MINTS
+from trader.models.public_data import Interval
 from trader.policy import Policy
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
@@ -38,31 +40,63 @@ def check(text: str, limits: SpecLimits, now: datetime | None = None) -> dict:
         "spec_id": spec.spec_id(),
         "valid": not errors,
         "errors": [asdict(e) for e in errors],
-        "warmup_bars": spec.lookback(),
+        "warmup_bars": spec.history(),
         "timeframe": str(spec.timeframe),
     }
 
 
 async def fetch_ticks(data: MarketData, spec: StrategySpec, n: int) -> list[Tick]:
-    """Um tick por candle do timeframe da spec (fechamento)."""
+    """Ticks dos candles fechados do timeframe da spec (abertura->mín->máx->fech)."""
     token, _ = SOLANA_MINTS.get_pair(spec.symbol)
-    return ticks_from_candles(await data.get_candles(token.mint, spec.timeframe, n))
+    raw = await data.get_candles(token.mint, spec.timeframe, n)
+    return ticks_from_candles(raw, spec.timeframe)
+
+
+# barras avaliadas depois do aquecimento, no mínimo
+MIN_EVAL_BARS = 20
+
+
+def bars_in(ticks: list[Tick], interval: Interval) -> int:
+    """Quantas barras do timeframe os ticks cobrem."""
+    return len(
+        {int(to_utc(t.timestamp).timestamp()) // interval.seconds for t in ticks}
+    )
 
 
 async def backtest(
-    spec: StrategySpec, ticks: list[Tick], fee_bps: Decimal, seed: str
+    spec: StrategySpec,
+    ticks: list[Tick],
+    fee_bps: Decimal,
+    seed: str,
+    slippage_bps: Decimal = Decimal("10"),
 ) -> dict:
+    bars = bars_in(ticks, spec.timeframe)
+    if bars < spec.history() + MIN_EVAL_BARS:
+        # sem aquecer, a spec nunca opera: um "ok" com 0 trades enganaria
+        raise ValueError(
+            f"{bars} barras de {spec.timeframe} < aquecimento de "
+            f"{spec.history()} barras + {MIN_EVAL_BARS} avaliadas: use mais candles"
+        )
     result = await Backtester(
         SpecStrategy(spec),
         spec.symbol,
         ticks,
         initial_balance=spec.budget_usd,
         fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
         seed=seed,
         # mesmo teto do bucket ao vivo: prejuízo realizado reduz o orçamento
         budget_usd=spec.budget_usd,
+        max_loss_usd=spec.max_loss_usd,
     ).run()
-    return {"spec_id": spec.spec_id(), "fee_bps": fee_bps, **result_to_dict(result)}
+    return {
+        "spec_id": spec.spec_id(),
+        "fee_bps": fee_bps,
+        "slippage_bps": slippage_bps,
+        "bars": bars,
+        "warmup_bars": spec.history(),
+        **result_to_dict(result),
+    }
 
 
 def result_to_dict(result: BacktestResult) -> dict:

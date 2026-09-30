@@ -13,6 +13,7 @@ Quem executa é o `Executor` (`executor.py`): on-chain (com chave) ou simulado
 
 import asyncio
 import logging
+import time
 from dataclasses import replace
 from decimal import Decimal
 
@@ -40,6 +41,16 @@ COSTS_TIMEOUT_SECONDS = 20
 DEFAULT_MAX_PRICE_IMPACT_PCT = Decimal("1")
 DEFAULT_MAX_SLIPPAGE_BPS = 100
 SLIPPAGE_RETRY_STEP_BPS = 25
+RETRY_DELAYS_SECONDS = (0.5, 1.0)
+# depois disso, nenhuma tentativa nova: o sinal e a checagem da política
+# ficaram velhos
+SWAP_DEADLINE_SECONDS = 60.0
+
+
+async def _pause_before(attempt: int) -> None:
+    """Antes do envio: dá tempo à quote e ao limite de taxa da API."""
+    if attempt:
+        await asyncio.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
 
 
 class AsyncJupiterProvider[E: Executor]:
@@ -165,20 +176,21 @@ class AsyncJupiterProvider[E: Executor]:
         slippage_bps: int = 50,
     ) -> SwapResult:
         last_error: Exception | None = None
-        slippages = self._retry_slippages(slippage_bps)
-        for i in range(3):
+        deadline = time.monotonic() + SWAP_DEADLINE_SECONDS
+        for attempt, slippage in enumerate(self._retry_slippages(slippage_bps)):
+            if attempt and time.monotonic() > deadline:
+                # nunca no meio de uma tentativa (um envio interrompido não é
+                # seguro): só não começa outra depois do prazo
+                break
+            await _pause_before(attempt)
             try:
-                return await self._do_swap(
-                    input_mint, output_mint, amount_in, slippages[i]
-                )
+                return await self._do_swap(input_mint, output_mint, amount_in, slippage)
             except TransactionSubmittedError, SwapRejectedError:
                 raise
             except Exception as e:
                 last_error = e
-                if i == 2:
-                    break
                 self.logger.warning(
-                    f"Erro ao executar swap: {e}. Tentando novamente..."
+                    f"Erro ao executar swap (tentativa {attempt + 1}): {e}"
                 )
         raise RuntimeError(
             f"Erro ao executar swap após múltiplas tentativas: {last_error}"

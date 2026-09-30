@@ -107,7 +107,7 @@ class TestSchemaAndCatalogue:
 
     def test_every_condition_type_has_a_predicate(self):
         declared = (
-            _union_types(models.MarketCondition)
+            _union_types(models.EntryCondition)
             | _union_types(models.ExitCondition)
             | _union_types(models.Stop)
         )

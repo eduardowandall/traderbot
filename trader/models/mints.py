@@ -101,3 +101,6 @@ SOLANA_MINTS = SolanaMints(
         Mint("C29ebrgYjYoJPMGPnPSGY1q3mMGk4iDSqnQeQQA7moon", "NOBODY", 9),
     ]
 )
+
+# o SOL (wSOL) paga as taxas de rede; usado em custos, reservas e taxas
+SOL_MINT = SOLANA_MINTS.get_by_symbol("SOL").mint

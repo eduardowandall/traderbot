@@ -32,17 +32,27 @@ MARKET_DATA: Callable[[], MarketData] = JupiterMarketData
 MODE_HELP = "Seção da política usada nos limites (paper, dry ou real)"
 
 
+def _errors_of(ex: Exception) -> list[dict]:
+    """O erro como lista `[{"path", "msg"}]` para o JSON."""
+    if isinstance(ex, SpecParseError):
+        return [{"path": e.path, "msg": e.msg} for e in ex.errors]
+    if isinstance(ex, ValueError | OSError):
+        return [{"path": "", "msg": str(ex)}]
+    # rede, API, qualquer outra coisa: o agente sempre recebe JSON
+    return [{"path": "", "msg": f"{type(ex).__name__}: {ex}"}]
+
+
 def json_errors(command: Callable[..., None]) -> Callable[..., None]:
-    """Erros esperados viram `{"ok": false, ...}` em vez de traceback."""
+    """Qualquer erro vira `{"ok": false, ...}` em vez de traceback."""
 
     @functools.wraps(command)
     def wrapper(*args, **kwargs):
         try:
             command(*args, **kwargs)
-        except SpecParseError as ex:
-            fail([{"path": e.path, "msg": e.msg} for e in ex.errors])
-        except (ValueError, OSError) as ex:
-            fail([{"path": "", "msg": str(ex)}])
+        except typer.Exit:
+            raise
+        except Exception as ex:
+            fail(_errors_of(ex))
 
     return wrapper
 
@@ -131,7 +141,7 @@ def strategy_validate(
     """Confere formato e limites; não grava nada."""
     report = strategies.check(file.read_text(encoding="utf-8"), _limits(mode))
     if not report["valid"]:
-        fail(report["errors"])
+        fail(report.pop("errors"), **report)
     emit(report)
 
 
@@ -147,6 +157,7 @@ def strategy_backtest(
     ),
     ticks: Path | None = typer.Option(None, help="CSV de ticks (run --record-ticks)"),
     fee_bps: str = typer.Option("30", help="Custo por swap em bps"),
+    slippage_bps: str = typer.Option("10", help="Desvio de preço por perna, em bps"),
     seed: str = typer.Option("0", help="Semente"),
 ):
     """Reproduz a spec em candles recentes (ou ticks gravados)."""
@@ -157,6 +168,12 @@ def strategy_backtest(
         else _with_market(lambda data: strategies.fetch_ticks(data, spec, candles))
     )
     result = asyncio.run(
-        strategies.backtest(spec, tick_list, _decimal(fee_bps, "fee-bps"), seed)
+        strategies.backtest(
+            spec,
+            tick_list,
+            _decimal(fee_bps, "fee-bps"),
+            seed,
+            _decimal(slippage_bps, "slippage-bps"),
+        )
     )
     emit(result)

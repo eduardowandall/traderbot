@@ -195,7 +195,7 @@ class TestAccountWithGateway:
         assert buy.intent.notional_usd == Decimal("10.0")
         assert buy.order_json
         assert sell.intent.side == IntentSide.SELL
-        assert sell.intent.idempotency_key == "dry:SOL-USDC:sell:buy-sig"
+        assert sell.intent.idempotency_key == "dry:SOL-USDC:sell:buy-sig:0.1"
         assert sell.realized_pnl_usd == Decimal("1.0")
         assert gateway.ledger.verify_chain() is None
 

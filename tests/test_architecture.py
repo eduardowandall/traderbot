@@ -40,7 +40,6 @@ PACKAGES: dict[str, str] = {
     "trader.indicators": "core",
     "trader.trading_strategy": "strategy",
     "trader.strategy_spec": "strategy",
-    "trader.strategies_registry": "strategy",
     "trader.providers.jupiter.async_jupiter_client": "market",
     "trader.providers.jupiter.jupiter_data": "market",
     "trader.providers.jupiter.logging_utils": "market",

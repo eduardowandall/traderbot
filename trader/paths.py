@@ -28,6 +28,11 @@ def data_dir() -> Path:
     return _resolve(os.getenv("TRADER_DATA_DIR") or ".data")
 
 
+def logs_dir() -> Path:
+    """`TRADER_LOG_DIR`, ou `<raiz do projeto>/.logs`."""
+    return _resolve(os.getenv("TRADER_LOG_DIR") or ".logs")
+
+
 def policy_file() -> Path:
     """`TRADER_POLICY_FILE`, ou `<raiz do projeto>/policy.toml`."""
     return _resolve(os.getenv("TRADER_POLICY_FILE") or "policy.toml")

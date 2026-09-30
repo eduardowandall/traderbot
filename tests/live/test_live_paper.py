@@ -3,6 +3,7 @@
 import asyncio
 from decimal import Decimal
 
+from factories import example_spec
 from live_helpers import LOOSE_PAPER_POLICY, invoke
 
 from trader.backtest import Backtester, TickRecorder, load_ticks
@@ -16,7 +17,7 @@ from trader.models.mode import RunningMode
 from trader.models.order import order_from_json
 from trader.notification.notification_service import NullNotificationService
 from trader.paths import policy_file
-from trader.strategies_registry import get_strategy_factory
+from trader.strategy_spec.strategy import SpecStrategy
 from trader.trading_service.local import LocalTradeClient
 from trader.wiring import build_trade_service
 
@@ -81,13 +82,13 @@ def test_paper_bot_trades_on_the_live_feed(tmp_path):
 
 
 async def _run_bot(ticks_file):
-    """Como `main.py run paper SOL-USDC random`, parando por `stop()`.
+    """Como `main.py run paper spec-random.json`, parando por `stop()`.
 
     Cancelar a task no meio de um swap deixaria a intenção UNCONFIRMED; o
     `stop()` só vale entre ticks.
     """
     token, quote = SOLANA_MINTS.get_pair("SOL-USDC")
-    strategy = get_strategy_factory("random")(sell_chance="50", buy_chance="50")
+    strategy = SpecStrategy.from_file(example_spec("random"))
     service = build_trade_service(RunningMode.PAPER)
     trader = LocalTradeClient(
         service, "SOL-USDC", quote.mint, token.mint, owns_service=True
@@ -111,7 +112,7 @@ async def _run_bot(ticks_file):
 
 
 async def _replay(ticks):
-    strategy = get_strategy_factory("random")(sell_chance="50", buy_chance="50")
+    strategy = SpecStrategy.from_file(example_spec("random"))
     return await Backtester(
         strategy, "SOL-USDC", ticks, initial_balance=Decimal(100)
     ).run()

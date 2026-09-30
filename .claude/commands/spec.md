@@ -12,9 +12,10 @@ Input: $ARGUMENTS
 uv run --no-sync python .claude/scripts/spec_check.py <spec.json> [--candles 1000 | --ticks FILE] [--refresh-expiry]
 ```
 
-Validation rejects an `expires_at` in the past or more than 30 days ahead.
-`--refresh-expiry` checks a copy with it set to now + 3 days. Use it for
-stale or example specs (such as `docs/examples/spec-sol-dip.json`), and say
+Validation rejects an expiry in the past or more than 30 days ahead. Prefer
+`"ttl_days": N` (counted from the first tick the spec runs, so it never goes
+stale; the example uses it) over a fixed `expires_at`. For a spec with a stale
+`expires_at`, `--refresh-expiry` checks a copy with it set to now + 3 days; say
 that you did.
 
 **If it is a description**, author a spec first:

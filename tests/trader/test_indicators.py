@@ -5,7 +5,6 @@ import pytest
 
 from trader import indicators as ind
 from trader.models import Interval, TickerData
-from trader.trading_strategy import WeightedMovingAverageStrategy
 
 
 def D(*values):
@@ -20,14 +19,6 @@ class TestMovingAverages:
     def test_wma_weights_recent_prices_more(self):
         assert ind.wma(D(1, 2, 3), 3) == Decimal(14) / Decimal(6)
         assert ind.wma(D(1, 2), 3) is None
-
-    def test_wma_matches_the_legacy_strategy(self):
-        prices = D(10, 11, 12.5, 11.8, 13, 12.2, 14, 13.7)
-        legacy = WeightedMovingAverageStrategy(short_window=5, long_window=5)
-        for window in (2, 5, 8):
-            assert ind.wma(prices, window) == legacy.weighted_moving_average(
-                prices, window
-            )
 
     def test_ema_seeded_by_sma(self):
         # semente (1+2+3)/3 = 2; alpha 0.5 -> 3 -> 4

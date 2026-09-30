@@ -6,11 +6,13 @@ como vem do feed da Jupiter).
 
 import csv
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from trader.indicators import to_utc
 from trader.models import TickerData
+from trader.models.public_data import Interval
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +58,47 @@ def load_ticks(path: str | Path) -> list[Tick]:
     return ticks
 
 
-def ticks_from_candles(candles: list[TickerData]) -> list[Tick]:
-    """Um tick por candle, no preço de fechamento."""
-    return sorted(
-        (Tick(c.timestamp, c.last) for c in candles), key=lambda t: t.timestamp
-    )
+def ticks_from_candles(
+    candles: list[TickerData],
+    interval: Interval | None = None,
+    now: datetime | None = None,
+) -> list[Tick]:
+    """Ticks de candles para o replay.
+
+    Com `interval`: cada candle fechado vira abertura -> mínima -> máxima ->
+    fechamento, dentro da barra (o `time` da Jupiter é a abertura; conferido
+    ao vivo), e o candle ainda em formação é descartado. A mínima antes da
+    máxima é a ordem conservadora para stops de posições compradas.
+    Sem `interval` (legado): um tick por candle, no fechamento.
+    """
+    ordered = sorted(candles, key=lambda c: c.timestamp)
+    if interval is None:
+        return [Tick(c.timestamp, c.last) for c in ordered]
+    bar = timedelta(seconds=interval.seconds)
+    cutoff = to_utc(now or datetime.now(UTC))
+    return [
+        tick
+        for c in ordered
+        if to_utc(c.timestamp) + bar <= cutoff
+        for tick in _bar_path(c, bar)
+    ]
+
+
+# passos interpolados por trecho (abertura->mín, mín->máx, máx->fech): uma
+# condição de nível dispara perto de onde o preço cruzou, não no extremo
+PATH_STEPS = 8
+
+
+def _bar_path(candle: TickerData, bar: timedelta) -> list[Tick]:
+    start, close = candle.timestamp, candle.last
+    # candles sem OHLC (só fechamento) viram um trecho plano no fechamento
+    points = [candle.open or close, candle.low or close, candle.high or close, close]
+    times = [timedelta(0), bar / 4, bar / 2, bar - timedelta(milliseconds=1)]
+    ticks = [Tick(start, points[0])]
+    for i in range(3):
+        a, b = points[i], points[i + 1]
+        steps = PATH_STEPS if a != b else 1
+        for k in range(1, steps + 1):
+            dt = times[i] + (times[i + 1] - times[i]) * k / steps
+            ticks.append(Tick(start + dt, a + (b - a) * k / steps))
+    return ticks

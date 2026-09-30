@@ -59,6 +59,7 @@ class SimulatedExecutor:
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
     ) -> SwapResult:
         in_amount, out_amount = int(quote.inAmount), int(quote.outAmount)
+        self.wallet.reload()  # outro processo pode ter aberto a conta do token
         rent = (
             self.account_rent_lamports if self.wallet.needs_account(output_mint) else 0
         )

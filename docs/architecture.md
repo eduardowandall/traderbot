@@ -48,7 +48,6 @@ trader/cli/                     owner CLI (Typer): bot.py (run, backtest), swap.
 policy.toml / policy.example.toml   owner's risk policy (TOML)
 trader/
   __init__.py                   empty on purpose: every `import trader.x` loads it
-  strategies_registry.py        STRATEGIES used by the CLI (random, target_value, composer, spec)
   paths.py                      data_dir() and policy_file(): where all state lives
   wiring.py                     the only place that turns a mode into components: key, provider, gateway, trade service
   indicators.py                 pure Decimal indicators (sma/ema/wma/rsi/volatility/...) + BarSeries
@@ -64,7 +63,7 @@ trader/
     account_data.py             MintBalance
     mode.py                     RunningMode (real / dry / paper)
     errors.py                   SwapRejectedError, TransactionSubmittedError (shared by every layer)
-  trading_strategy.py           TradingStrategy base + Random, TargetValue, WMA, TrailingStop, TargetPercent, StrategyComposer
+  trading_strategy.py           TradingStrategy base (clock, rng, setup, on_market_refresh); every strategy is a spec
   strategy_spec/                declarative strategies written by agents (JSON specs)
     models.py                   StrategySpec + the condition catalogue (pydantic), spec_id()
     conditions.py               IndicatorBank, TickContext, PREDICATES (one pure function per condition type)
@@ -97,19 +96,20 @@ trader/
   paper/                        SimulatedWallet (.data/paper-wallet.json) + SimulatedExecutor + paper_provider()
   backtest/                     tick recording/loading + Backtester (replays ticks with synthetic quotes)
   notification/                 Null / Telegram notifications
-tests/                          mirrors trader/ (tests/trader/...), plus tests/strategies and tests/test_main.py
-docs/                           plan.md (roadmap), this file, examples/
+tests/                          mirrors trader/ (tests/trader/...), plus tests/test_main.py
+docs/                           plan.md (roadmap), this file, examples/ (spec-random, spec-target-value, spec-wma-composer, spec-sol-dip)
 ```
 
 ## Step 4 — Starting the bot (`main.py run`)
 
-Example: `uv run main.py run paper SOL-USDC random 'sell_chance=20 buy_chance=40'`
+Example: `uv run main.py run paper docs/examples/spec-random.json --seed 1`
 
 `run` (`trader/cli/bot.py`) builds two separate sides and connects them:
 
-1. **The strategy.** `get_strategy_obj(name, args)` (`trader/cli/common.py`) looks the name up in
-   `STRATEGIES` (`trader/strategies_registry.py`) and builds it from the
-   `key=value` arguments. A spec must match the pair.
+1. **The strategy.** `load_spec_strategy(file, seed)` (`trader/cli/common.py`)
+   reads the spec into a `SpecStrategy`, the only kind of strategy; the pair
+   is the spec's `symbol`. `_check_limits` validates it against the mode's
+   policy, and it runs in the bucket `strategy:<spec_id>`.
 2. **The execution side.** `build_trade_service(mode)` (`trader/wiring.py`)
    is the only place that looks at the mode. It builds:
    - a **provider** (`build_provider`):
@@ -313,7 +313,7 @@ In **dry** mode the RPC client simulates the transaction and never sends it.
   - `strategy schema | validate FILE | backtest FILE` check a spec without
     storing it. The backtest uses the spec's timeframe and starts with
     `budget_usd`.
-  - Run a spec yourself with `run paper SOL-USDC spec 'file=spec.json'`
+  - Run a spec yourself with `run paper spec.json`
     (`docs/examples/spec-sol-dip.json` is an example).
 
 ## Step 8b — How a strategy spec works
@@ -366,7 +366,7 @@ directory**:
 | `data_dir()/HALT` | kill switch; if it exists, nothing trades |
 | `data_dir()/paper-wallet.json` | paper balances |
 | `policy_file()` (`policy.toml`) | the owner's risk policy |
-| `.logs/` | file logs |
+| `logs_dir()` (`TRADER_LOG_DIR`, else `<project root>/.logs`) | file logs: `trader-<ts>-<pid>.log`, rotating, pruned after 14 days, secrets redacted |
 
 `data_dir()` is `TRADER_DATA_DIR` if set, otherwise `<project root>/.data`.
 
@@ -411,7 +411,7 @@ Details and progress are in [`plan.md`](plan.md). In short:
   | Layer | Modules (today, plus planned) | May import |
   |---|---|---|
   | **core** | `trader` (the empty package init), `trader.models.*`, `trader.paths`, `trader.logging_config`, `trader.indicators`, `trader.trading_service.protocol` | core |
-  | **strategy** | `trader.trading_strategy`, `trader.strategy_spec.*`, `trader.strategies_registry` | core |
+  | **strategy** | `trader.trading_strategy`, `trader.strategy_spec.*` | core |
   | **market** (read-only data) | `trader.market.*`, the Jupiter HTTP/websocket client, `candles.py` and its dataclasses | core, market |
   | **venue** (moves funds) | `async_jupiter_svc`, `executor`, `async_rpc_client`, `swap_costs`, `trader.paper.*` | core, market, venue |
   | **risk** | `trader.policy.*`, `trader.ledger.*` | core, risk |

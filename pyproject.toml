@@ -37,7 +37,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 # a suíte live (tests/live/) fala com a Jupiter de verdade: só roda com
 # `uv run pytest -m live` (o -m da linha de comando vence o daqui)
-addopts = "-v --tb=short -m 'not live'"
+addopts = "-v --tb=short -m 'not live' -W error::ResourceWarning"
 markers = ["live: hits the real Jupiter endpoints (paper/read-only, no key)"]
 asyncio_mode = "auto"
 
@@ -92,5 +92,5 @@ known-first-party = ["trader"]
 max-complexity = 5
 
 [tool.pyright]
-include = ["trader/*"]
+include = ["trader", "tests", "main.py"]
 typeCheckingMode = "basic"

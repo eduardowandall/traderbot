@@ -1,12 +1,15 @@
+import random
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
 import pytest
+import typer
+from factories import example_spec
 from typer.testing import CliRunner
 
 import main as main_module
-from trader.cli.common import get_notification_svc, get_strategy_obj, parse_kwargs
+from trader.cli.common import get_notification_svc, load_spec_strategy, parse_kwargs
 from trader.ledger import Ledger, ledger_path
 from trader.models import SOLANA_MINTS, SwapResult
 from trader.models.intent import IntentStatus
@@ -17,13 +20,10 @@ from trader.notification.notification_service import (
 )
 from trader.paper import SimulatedExecutor
 from trader.paths import policy_file
-from trader.strategies_registry import NotImplementedStrategy
-from trader.trading_strategy import (
-    RandomStrategy,
-    StrategyComposer,
-    TargetValueStrategy,
-)
+from trader.strategy_spec.strategy import SpecStrategy
 from trader.wiring import build_gateway
+
+RANDOM_SPEC = example_spec("random")
 
 
 def test_parse_kwargs_key_values():
@@ -37,54 +37,26 @@ def test_parse_kwargs_bare_flag():
     assert parse_kwargs(["dry_run"]) == {"dry_run": True}
 
 
-def test_get_strategy_obj_with_args():
-    strategy = get_strategy_obj("random", "sell_chance=20 buy_chance=40")
-    assert isinstance(strategy, RandomStrategy)
-    assert strategy.sell_chance == "20"
-    assert strategy.buy_chance == "40"
-
-
-def test_get_strategy_obj_no_args_uses_defaults():
-    strategy = get_strategy_obj("composer", None)
-    assert isinstance(strategy, StrategyComposer)
-
-
-def test_get_strategy_obj_target_value_with_args():
-    strategy = get_strategy_obj(
-        "target_value", "target_buy_price=10.0 target_profit_percent=1.0"
-    )
-    assert isinstance(strategy, TargetValueStrategy)
-    assert strategy.target_buy_price == Decimal("10.0")
-
-
-def test_get_strategy_obj_unknown_strategy_raises():
-    with pytest.raises(NotImplementedStrategy):
-        get_strategy_obj("does_not_exist", None)
-
-
-def test_run_composer_without_strategy_args():
-    mock_bot = mock.Mock()
-    with (
-        mock.patch(
-            "trader.cli.bot.AsyncWebsocketTradingBot", return_value=mock_bot
-        ) as bot_cls,
-        mock.patch(
-            "trader.wiring.AsyncJupiterProvider.on_chain", return_value=mock.Mock()
-        ),
-        mock.patch("trader.wiring.keypair_from_env", return_value=mock.Mock()),
-    ):
+def test_run_seeds_the_spec():
+    with mock.patch("trader.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
         result = CliRunner().invoke(
-            main_module.app, ["run", "dry", "SOL-USDC", "composer"]
+            main_module.app, ["run", "paper", RANDOM_SPEC, "--seed", "1"]
         )
 
-    assert result.exit_code == 0
-    mock_bot.run.assert_called_once()
+    assert result.exit_code == 0, result.output
     config = bot_cls.call_args.args[0]
-    assert isinstance(config.strategy, StrategyComposer)
-    assert config.trader.service.mode == "dry"
+    assert isinstance(config.strategy, SpecStrategy)
+    assert config.symbol == "SOL-USDC"  # o par vem da spec
+    assert config.trader.name == f"strategy:{config.strategy.spec_id}"
+    assert config.strategy.rng.random() == random.Random("1").random()
 
 
-def test_run_random_with_strategy_args():
+def test_load_spec_strategy_rejects_a_missing_file():
+    with pytest.raises(typer.BadParameter, match="missing.json"):
+        load_spec_strategy(Path("missing.json"))
+
+
+def test_run_spec_in_dry_mode():
     mock_bot = mock.Mock()
     with (
         mock.patch(
@@ -97,14 +69,15 @@ def test_run_random_with_strategy_args():
     ):
         result = CliRunner().invoke(
             main_module.app,
-            ["run", "dry", "SOL-USDC", "random", "sell_chance=20 buy_chance=40"],
+            ["run", "dry", example_spec("wma-composer")],
         )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
+    mock_bot.run.assert_called_once()
     config = bot_cls.call_args.args[0]
-    assert isinstance(config.strategy, RandomStrategy)
-    assert config.strategy.sell_chance == "20"
-    assert config.strategy.buy_chance == "40"
+    assert isinstance(config.strategy, SpecStrategy)
+    assert config.strategy.spec.name == "wma-composer"
+    assert config.trader.service.mode == "dry"
 
 
 def test_get_notification_svc_null():
@@ -360,7 +333,7 @@ def test_run_paper_needs_no_private_key(monkeypatch):
     ) as bot_cls:
         result = CliRunner().invoke(
             main_module.app,
-            ["run", "paper", "SOL-USDC", "random", "buy_chance=1 sell_chance=1"],
+            ["run", "paper", RANDOM_SPEC],
         )
 
     assert result.exit_code == 0, result.output
@@ -388,9 +361,7 @@ def test_run_record_ticks_passes_recorder(tmp_path):
             [
                 "run",
                 "paper",
-                "SOL-USDC",
-                "random",
-                "buy_chance=1 sell_chance=1",
+                RANDOM_SPEC,
                 "--record-ticks",
                 "ticks/sol.csv",
             ],
@@ -408,9 +379,7 @@ def test_backtest_from_ticks_file():
         main_module.app,
         [
             "backtest",
-            "SOL-USDC",
-            "random",
-            "sell_chance=20 buy_chance=20",
+            RANDOM_SPEC,
             "--ticks",
             "ticks.csv",
             "--seed",
@@ -424,9 +393,7 @@ def test_backtest_from_ticks_file():
         main_module.app,
         [
             "backtest",
-            "SOL-USDC",
-            "random",
-            "sell_chance=20 buy_chance=20",
+            RANDOM_SPEC,
             "--ticks",
             "ticks.csv",
             "--seed",
@@ -437,7 +404,7 @@ def test_backtest_from_ticks_file():
 
 
 def test_backtest_requires_a_source():
-    result = CliRunner().invoke(main_module.app, ["backtest", "SOL-USDC", "random"])
+    result = CliRunner().invoke(main_module.app, ["backtest", RANDOM_SPEC])
     assert result.exit_code != 0
 
 
@@ -464,3 +431,26 @@ def test_repeated_denials_show_as_one_ledger_line():
     lines = [line for line in listed.stdout.splitlines() if "denied" in line]
     assert len(lines) == 1
     assert "(x3)" in lines[0]
+
+
+def test_resolving_a_buy_as_executed_reopens_its_position():
+    from factories import make_intent
+
+    from trader.execution.gateway import open_entry_of
+    from trader.models.intent import PolicyDecision
+
+    intent = make_intent(quantity=Decimal("0.1"), price=Decimal("100"))
+    with Ledger(ledger_path("dry")) as ledger:
+        ledger.record_intent(intent, PolicyDecision(True))
+        ledger.mark_unconfirmed(intent.intent_id, "timeout", signature="sig")
+
+    result = CliRunner().invoke(
+        main_module.app,
+        ["ledger", "resolve", "dry", intent.intent_id, "executed", "--note", "ok"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "estimada pela intenção" in result.stdout
+    with Ledger(ledger_path("dry")) as ledger:
+        entry = open_entry_of(ledger, intent.account)
+    assert entry is not None and entry.quantity == Decimal("0.1")

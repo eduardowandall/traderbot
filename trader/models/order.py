@@ -61,6 +61,9 @@ class Order:
     sol_usd: Decimal | None = None  # USD por SOL
     sol_in_quote: Decimal | None = None  # token de cotação por SOL
     costs: TradeCosts | None = None
+    # vendas: False quando a venda foi parcial e o resto segue aberto
+    # (ordens antigas, sem o campo, sempre fecharam a posição)
+    closes_position: bool = True
 
     def __eq__(self, value):
         return (

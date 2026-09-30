@@ -24,5 +24,5 @@
   "budget_usd": 50,
   "max_loss_usd": 10,
   "cooldown_minutes": 30,
-  "expires_at": "2099-01-01T00:00:00Z"
+  "ttl_days": 30
 }

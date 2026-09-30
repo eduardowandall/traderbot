@@ -1,0 +1,31 @@
+name: Live checks
+
+# Suíte live (tests/live/): fala com a Jupiter de verdade, só paper e leitura,
+# sem chave. Manual: os endpoints não documentados podem bloquear IPs de CI.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Live suite (pytest -m live)
+        env:
+          JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
+        run: uv run pytest -m live

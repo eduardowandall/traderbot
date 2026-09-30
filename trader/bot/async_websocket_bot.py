@@ -9,7 +9,6 @@ ledger nem provider, e não sabe em que modo roda — no mesmo processo
 import asyncio
 import logging
 import time
-import traceback
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -33,6 +32,8 @@ bot_logger = logging.getLogger("bot")
 
 # aquecimento de estratégias que não declaram `warmup()`
 DEFAULT_WARMUP = (Interval.SECOND_15, 100)
+# falhas seguidas de inicialização antes de avisar o dono
+STARTUP_ALERT_AFTER = 5
 
 
 @runtime_checkable
@@ -40,6 +41,18 @@ class WarmsUp(Protocol):
     """Estratégia que diz de quantos candles (e de que timeframe) precisa."""
 
     def warmup(self) -> tuple[Interval, int]: ...
+
+
+@runtime_checkable
+class Resumes(Protocol):
+    """Estratégia com estado que sobrevive a um reinício (cooldown, validade)."""
+
+    def resume(
+        self,
+        last_exit_at: datetime | None,
+        opened_at: datetime | None,
+        last_exit_price: Decimal | None = None,
+    ) -> None: ...
 
 
 class AsyncWebsocketTradingBot:
@@ -54,6 +67,9 @@ class AsyncWebsocketTradingBot:
         self.notification_service = config.notifier
         self.on_tick = config.on_tick
         self.is_running = False
+        self._opened = False  # bucket aberto (uma vez só)
+        self._started = False  # aquecido: o loop já processa ticks
+        self._startup_failures = 0
         self.logger = logging.getLogger(self.__module__)
         self.logger.debug(f"start bot {self.name}-{self.symbol}: {self.strategy!r}")
         bot_logger.debug(f"start bot {self.name}-{self.symbol}")
@@ -72,7 +88,7 @@ class AsyncWebsocketTradingBot:
     async def process_market_data(
         self, current_price: Decimal, snapshot: BucketSnapshot
     ) -> Order | None:
-        if snapshot.status == BucketStatus.RETIRING:
+        if snapshot.status == BucketStatus.RETIRING and snapshot.position is None:
             self.logger.warning(f"Bucket {snapshot.bucket} encerrando: parando o bot")
             self.is_running = False
             return None
@@ -134,11 +150,11 @@ class AsyncWebsocketTradingBot:
                 self.logger.warning(f"Erro ao encerrar conexões: {ex}")
 
     async def _loop(self):
-        await self._startup()
+        self.is_running = True
         backoff = self.error_backoff_initial
         while self.is_running:
             try:
-                await self._tick()
+                await self._step()
                 backoff = self.error_backoff_initial
             except KeyboardInterrupt:
                 self.logger.warning("Bot interrompido pelo usuário")
@@ -153,14 +169,44 @@ class AsyncWebsocketTradingBot:
             return self.strategy.warmup()
         return DEFAULT_WARMUP
 
+    async def _step(self):
+        # a inicialização também passa pelo backoff: um 429 ao buscar os
+        # candles de aquecimento não derruba o bot
+        if not self._started:
+            await self._guarded_startup()
+            return
+        await self._tick()
+
+    async def _guarded_startup(self):
+        try:
+            await self._startup()
+        except Exception:
+            self._startup_failures += 1
+            if self._startup_failures == STARTUP_ALERT_AFTER:
+                # ex: candles (datapi, sem fallback) fora do ar: o bot não opera
+                self.notification_service.send_message(
+                    f"Bot {self.symbol} não consegue iniciar "
+                    f"({self._startup_failures} tentativas); veja o log"
+                )
+            raise
+
     async def _startup(self):
-        self.is_running = True
-        # restaura a posição do ledger e reconcilia (lado da execução)
-        await self.trader.open()
+        if not self._opened:
+            # restaura a posição do ledger e reconcilia (lado da execução)
+            await self.trader.open()
+            self._opened = True
+            if isinstance(self.strategy, Resumes):
+                snapshot = await self.trader.bucket()
+                self.strategy.resume(
+                    snapshot.last_exit_at,
+                    snapshot.opened_at,
+                    last_exit_price=snapshot.last_exit_price,
+                )
         interval, count = self._warmup()
         self.strategy.setup(
             await self.market.get_candles(self.output_mint, interval, count)
         )
+        self._started = True
         self.notification_service.send_message(f"Bot iniciado para {self.symbol}")
 
     async def _tick(self):
@@ -187,7 +233,6 @@ class AsyncWebsocketTradingBot:
     async def _on_error(self, ex: Exception, backoff: float) -> float:
         """Trata um erro do loop e retorna o próximo backoff."""
         self.logger.error(f"ERROR: Erro no loop principal: {str(ex)}", exc_info=True)
-        traceback.print_exc()
         if self.stop_when_error:
             self.is_running = False
             return backoff
@@ -206,7 +251,7 @@ def log_ticker(symbol: str, price: Decimal, pnl_summary: str | None = None):
 
 def log_placed_order(order: Order):
     msg = f"[gray]{order.side.upper()}[/gray] {order.quantity:.8f} @ ${order.price:.8f} [gray]({order.order_id})[gray]"
-    bot_logger.debug(
+    bot_logger.info(
         msg,
         extra={"markup": True},
     )

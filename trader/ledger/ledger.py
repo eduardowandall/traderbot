@@ -12,12 +12,15 @@ Use um arquivo por modo (`ledger_path(mode)`) para que o histórico de dry-run
 nunca se misture com o real.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from trader.ledger.intents import IntentStore
 from trader.ledger.policy_state import PolicyStateQueries
 from trader.ledger.reports import AccountPnL, Reports
+from trader.models.intent import IntentRecord, PolicyDecision, TradeIntent
 from trader.paths import data_dir
+from trader.policy import PolicyState
 
 __all__ = ["AccountPnL", "Ledger", "ledger_path"]
 
@@ -27,6 +30,26 @@ def ledger_path(mode: str) -> Path:  # aceita RunningMode (StrEnum)
 
 
 class Ledger(IntentStore, Reports, PolicyStateQueries):
+    def authorize(
+        self,
+        intent: TradeIntent,
+        decide: Callable[[PolicyState], PolicyDecision],
+    ) -> tuple[IntentRecord | None, PolicyDecision | None]:
+        """Idempotência + política + registro numa transação só.
+
+        Devolve `(existente, None)` se a chave já moveu fundos (nada é
+        gravado), ou `(None, decisão)` com a intenção já registrada. Com o
+        lock desde a leitura, dois processos nunca passam juntos pelo mesmo
+        limite nem usam a mesma chave duas vezes.
+        """
+        with self._write():
+            existing = self.find_by_idempotency_key(intent.idempotency_key)
+            if existing is not None:
+                return existing, None
+            decision = decide(self.policy_state())
+            self._record_locked(intent, decision)
+            return None, decision
+
     def __enter__(self) -> Ledger:
         return self
 

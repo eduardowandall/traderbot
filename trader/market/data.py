@@ -8,6 +8,8 @@ sem `SOLANA_PRIVATE_KEY`. Quem executa swaps continua em
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Protocol
 
@@ -32,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 # tempo máximo esperando um preço do websocket antes de ir à Price API
 PRICE_TIMEOUT_SECONDS = 30.0
+# depois de uma falha do websocket, quanto tempo usar só a Price API
+WS_COOLDOWN_SECONDS = 60.0
+# intervalo mínimo entre consultas à Price API (limite da API sem chave)
+REST_POLL_SECONDS = 2.0
 
 
 def _is_timeout(ex: Exception) -> bool:
@@ -54,21 +60,36 @@ class JupiterMarketData:
         self,
         client: AsyncJupiterClient | None = None,
         price_timeout: float = PRICE_TIMEOUT_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
     ):
         self.client = client or AsyncJupiterClient()
         self.price_timeout = price_timeout
+        self.monotonic = monotonic
+        self._ws_down_until = 0.0
+        self._last_rest = -REST_POLL_SECONDS
 
     async def get_price(self, mint: str) -> Decimal:
+        if self.monotonic() < self._ws_down_until:
+            return await self._rest_price(mint)
         try:
             return await asyncio.wait_for(
                 self.client.get_price(mint), timeout=self.price_timeout
             )
         except Exception as ex:
-            reason = "sem preço no websocket" if _is_timeout(ex) else repr(ex)
+            if _is_timeout(ex):
+                reason = "sem preço no websocket"
+            else:
+                # websocket caído: nem tenta de novo por um tempo
+                reason = repr(ex)
+                self._ws_down_until = self.monotonic() + WS_COOLDOWN_SECONDS
             logger.warning(f"{reason}; usando a Price API para {mint}")
             return await self._rest_price(mint)
 
     async def _rest_price(self, mint: str) -> Decimal:
+        wait = self._last_rest + REST_POLL_SECONDS - self.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._last_rest = self.monotonic()
         prices = await self.client.get_usd_prices([mint])
         if mint not in prices:
             raise LookupError(f"Price API sem preço para {mint}")

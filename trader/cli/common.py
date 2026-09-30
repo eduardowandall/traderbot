@@ -1,7 +1,8 @@
-"""Ajudantes compartilhados pelos comandos do dono (argumentos, estratégias)."""
+"""Ajudantes compartilhados pelos comandos do dono (argumentos, a spec)."""
 
 import os
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 import typer
 
@@ -9,7 +10,7 @@ from trader.notification.notification_service import (
     NullNotificationService,
     TelegramNotificationService,
 )
-from trader.strategies_registry import get_strategy_factory
+from trader.strategy_spec.strategy import SpecStrategy
 
 
 def warn(message: str) -> None:
@@ -41,20 +42,15 @@ def parse_kwargs(argv: list[str]) -> dict[str, str]:
     return kwargs
 
 
-def get_strategy_obj(strategy: str, strategy_args: str | None = None):
-    strategy_cls = get_strategy_factory(strategy)
+def load_spec_strategy(spec_file: Path, seed: str | None = None) -> SpecStrategy:
+    """A estratégia de um `run`/`backtest`: sempre uma spec (o par vem dela)."""
     try:
-        args = parse_kwargs(strategy_args.split()) if strategy_args else {}
-        return strategy_cls(**args)
-    except ValueError as ex:
-        raise Exception(f"Erro ao configurar estratégia: {ex}") from ex
-
-
-def check_symbol(strategy_obj, symbol: str) -> None:
-    # estratégias com par próprio (specs) só rodam no par delas
-    expected = getattr(strategy_obj, "symbol", None)
-    if expected and expected != symbol:
-        raise typer.BadParameter(f"a estratégia é para {expected}, não {symbol}")
+        strategy = SpecStrategy.from_file(str(spec_file))
+    except (OSError, ValueError) as ex:
+        raise typer.BadParameter(f"spec {spec_file}: {ex}") from ex
+    if seed is not None:
+        strategy.seed(seed)
+    return strategy
 
 
 def get_notification_svc(

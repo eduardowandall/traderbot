@@ -27,7 +27,7 @@ from trader.paper.provider import paper_provider
 from trader.paper.wallet import SimulatedWallet
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.trading_service.local import LocalTradeClient
-from trader.trading_service.protocol import OrderRequest
+from trader.trading_service.protocol import BucketStatus, OrderRequest
 from trader.trading_service.service import TradeService
 from trader.trading_strategy import TradingStrategy
 
@@ -37,7 +37,7 @@ BPS = Decimal("10000")
 
 # loggers das estratégias: silenciados durante o replay (milhares de ticks
 # viram milhares de linhas; o resultado já resume o que aconteceu)
-STRATEGY_LOGGERS = ("trader.trading_strategy", "trader.strategy_spec")
+STRATEGY_LOGGERS = ("trader.strategy_spec",)
 
 
 @contextmanager
@@ -171,9 +171,13 @@ class Backtester:
         ticks: list[Tick],
         initial_balance: Decimal,
         fee_bps: Decimal = Decimal("30"),
+        # custo de execução além da taxa (desvio do preço do tick), por perna
+        slippage_bps: Decimal = Decimal("10"),
         seed: int | str = 0,
         # teto do bucket, como ao vivo (prejuízo realizado reduz o disponível)
         budget_usd: Decimal | None = None,
+        # prejuízo que encerra o bucket, como ao vivo
+        max_loss_usd: Decimal | None = None,
     ):
         self.token, self.quote = SOLANA_MINTS.get_pair(symbol)
         if not self.quote.is_usd_stable:
@@ -183,13 +187,17 @@ class Backtester:
             )
         if not ticks:
             raise ValueError("Nenhum tick para reproduzir")
+        if fee_bps < 0 or slippage_bps < 0:
+            raise ValueError("fee_bps e slippage_bps não podem ser negativos")
         self.symbol = symbol
         self.strategy = strategy
         self.ticks = ticks
         self.initial_balance = initial_balance
         self.fee_bps = fee_bps
+        self.slippage_bps = slippage_bps
         self.seed = seed
         self.budget_usd = budget_usd
+        self.max_loss_usd = max_loss_usd
 
     async def run(self) -> BacktestResult:
         with quiet_strategy_logs():
@@ -230,7 +238,7 @@ class Backtester:
         self, gateway: TradeGateway
     ) -> tuple[ReplayQuoteClient, SimulatedWallet, LocalTradeClient]:
         """Mesmo caminho do paper trading: TradeService -> gateway -> carteira."""
-        client = ReplayQuoteClient(self.quote, self.fee_bps)
+        client = ReplayQuoteClient(self.quote, self.fee_bps + self.slippage_bps)
         wallet = SimulatedWallet(initial={self.quote.symbol: self.initial_balance})
         provider = paper_provider(
             wallet,
@@ -251,12 +259,15 @@ class Backtester:
             self.quote.mint,
             self.token.mint,
             budget_usd=self.budget_usd,
+            max_loss_usd=self.max_loss_usd,
             source="backtest",
         )
         return client, wallet, trader
 
     async def _step(self, trader: LocalTradeClient, tick: Tick, run: _Run) -> None:
         snapshot = await trader.bucket()
+        if snapshot.status != BucketStatus.ACTIVE:
+            return  # bucket encerrado (perda máxima): ao vivo, o bot pararia
         signal = self.strategy.on_market_refresh(
             tick.price, None, snapshot.available_usd, snapshot.position
         )

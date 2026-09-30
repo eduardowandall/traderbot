@@ -5,15 +5,22 @@ Leem o `Ledger` direto, de propósito: são comandos do dono. `resolve` é a
 """
 
 import asyncio
+import os
+from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import Decimal
 
 import typer
 
+from trader.execution.gateway import open_entry_of
+from trader.execution.resolve import resolved_fill
 from trader.ledger import Ledger, ledger_path
-from trader.models import SOLANA_MINTS
-from trader.models.intent import IntentStatus
+from trader.models import SOLANA_MINTS, Order
+from trader.models.costs import PnLResult
+from trader.models.intent import IntentSide, IntentStatus
 from trader.models.mode import RunningMode
 from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
+from trader.wiring import build_provider
 
 ledger_app = typer.Typer(help="Consulta e manutenção do ledger de trades.")
 
@@ -58,35 +65,108 @@ def ledger_resolve(
     intent_id: str = typer.Argument(..., help="Id (completo) da intenção"),
     status: str = typer.Argument(..., help="executed ou failed"),
     note: str = typer.Option(..., help="Como foi verificado (ex: explorer)"),
+    signature: str | None = typer.Option(
+        None, help="Assinatura da transação, se a intenção não tem (ver o log)"
+    ),
 ):
     """Resolve manualmente uma intenção sem confirmação."""
     try:
         parsed = IntentStatus(status)
     except ValueError as ex:
         raise typer.BadParameter("status deve ser executed ou failed") from ex
+    _require_env(mode, parsed)
     with Ledger(ledger_path(mode)) as ledger:
-        ledger.resolve(intent_id, parsed, note)
-        if parsed == IntentStatus.FAILED and mode == RunningMode.REAL:
-            # transações que falham também pagam taxa
-            asyncio.run(_backfill_failed_fee(ledger, intent_id))
+        record = ledger.get(intent_id)
+        if record is None:
+            raise typer.BadParameter(f"intenção não encontrada: {intent_id}")
+        if signature:
+            record = replace(record, signature=signature)
+        # rede antes de gravar: se o RPC falhar, nada muda e dá para repetir
+        effects = asyncio.run(_prepare(ledger, mode, parsed, record))
+        ledger.resolve(intent_id, parsed, note, signature=signature)
+        _apply(ledger, intent_id, effects)
     typer.echo(f"Intenção {intent_id} resolvida como {parsed}.")
 
 
-async def _backfill_failed_fee(ledger: Ledger, intent_id: str) -> None:
-    record = ledger.get(intent_id)
-    if record is None or not record.signature:
+@dataclass(frozen=True)
+class _Effects:
+    """O que gravar depois da resolução, já lido da rede."""
+
+    order: Order | None = None
+    realized: Decimal | None = None
+    pnl: PnLResult | None = None
+    failed_fee: int | None = None
+
+
+def _require_env(mode: RunningMode, status: IntentStatus) -> None:
+    """Em modo real, a resolução lê a transação: confere o ambiente antes de gravar."""
+    if mode != RunningMode.REAL:
         return
+    needed = ["HELIUS_RPC_URL"]
+    if status == IntentStatus.EXECUTED:
+        needed.append("SOLANA_PRIVATE_KEY")
+    missing = [name for name in needed if not os.getenv(name)]
+    if missing:
+        raise typer.BadParameter(
+            f"defina {', '.join(missing)} (ex: uv run --env-file .env ...); "
+            "nada foi gravado"
+        )
+
+
+async def _prepare(ledger: Ledger, mode, status, record) -> _Effects:
+    if status == IntentStatus.EXECUTED:
+        # a entrada precisa ser lida antes: resolvida, a venda vira a última perna
+        entry = (
+            open_entry_of(ledger, record.intent.account)
+            if record.intent.side == IntentSide.SELL
+            else None
+        )
+        order, realized, pnl = await _resolved_order(mode, record, entry)
+        return _Effects(order, realized, pnl)
+    if mode == RunningMode.REAL:
+        # transações que falham também pagam taxa
+        return _Effects(failed_fee=await _failed_fee(record))
+    return _Effects()
+
+
+async def _resolved_order(mode, record, entry):
+    provider = build_provider(mode) if mode == RunningMode.REAL else None
+    try:
+        return await resolved_fill(
+            record,
+            entry,
+            datetime.now(),
+            provider.fetch_swap_costs if provider else None,
+        )
+    finally:
+        if provider is not None:
+            await provider.aclose()
+
+
+async def _failed_fee(record) -> int | None:
+    if not record.signature:
+        return None
     rpc = AsyncRPCClient()
     try:
         tx = await rpc.get_confirmed_transaction(record.signature)
     finally:
         await rpc.aclose()
     meta = getattr(tx, "meta", None) if tx else None
-    if meta is None:
-        typer.echo("Transação não encontrada: nenhuma taxa foi paga.")
-        return
-    ledger.record_failed_fee(intent_id, meta.fee)
-    typer.echo(f"Taxa da transação que falhou registrada: {meta.fee} lamports.")
+    return None if meta is None else meta.fee
+
+
+def _apply(ledger: Ledger, intent_id: str, effects: _Effects) -> None:
+    if effects.order is not None:
+        ledger.attach_order(intent_id, effects.order, effects.realized, effects.pnl)
+        source = "da transação" if effects.order.costs else "estimada pela intenção"
+        typer.echo(
+            f"Ordem {source}: {effects.order.quantity} a {effects.order.fill_price}."
+        )
+    if effects.failed_fee is not None:
+        ledger.record_failed_fee(intent_id, effects.failed_fee)
+        typer.echo(
+            f"Taxa da transação que falhou registrada: {effects.failed_fee} lamports."
+        )
 
 
 def _record_costs(record) -> str:

@@ -4,6 +4,7 @@ import os
 from decimal import Decimal
 
 import httpx
+import httpx2
 from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
@@ -19,9 +20,38 @@ from solders.solders import (
     VersionedTransaction,
 )
 from spl.token.constants import TOKEN_2022_PROGRAM_ID
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from trader.providers.jupiter.logging_utils import logger_wrapper
+
+TRANSPORT_ERRORS = (httpx.TransportError, httpx2.TransportError)
+
+
+def is_transient(ex: BaseException) -> bool:
+    """Falha passageira de leitura: rede, timeout, 429 ou 5xx.
+
+    O solana-py embrulha os erros do `httpx2` em `SolanaRpcException`, com o
+    original em `__cause__`.
+    """
+    cause = ex.__cause__ if isinstance(ex, SolanaRpcException) else ex
+    if isinstance(cause, TRANSPORT_ERRORS):
+        return True
+    status = getattr(getattr(cause, "response", None), "status_code", None)
+    return status == 429 or (status is not None and status >= 500)
+
+
+# só para leituras: um envio nunca é re-tentado (poderia duplicar o swap)
+_READ_RETRY = retry(
+    wait=wait_exponential(multiplier=0.5, max=4),
+    stop=stop_after_attempt(4),
+    retry=retry_if_exception(is_transient),
+    reraise=True,
+)
 
 
 class TransactionFailedError(Exception):
@@ -45,6 +75,7 @@ class AsyncRPCClient:
     async def aclose(self) -> None:
         await self.client.close()
 
+    @_READ_RETRY
     async def get_confirmed_transaction(
         self, signature: str, delays: tuple[float, ...] = (0.5, 1, 2, 4, 4)
     ):
@@ -144,12 +175,7 @@ class AsyncRPCClient:
         return resp
 
     @logger_wrapper
-    @retry(
-        wait=wait_fixed(2),
-        stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(httpx.ReadTimeout),
-        reraise=True,
-    )
+    @_READ_RETRY
     async def get_lamports(self, pubkey: Pubkey) -> Decimal:
         await self.is_connected()
         resp = await self.client.get_account_info(pubkey)
@@ -163,23 +189,21 @@ class AsyncRPCClient:
         )
 
     @logger_wrapper
+    @_READ_RETRY
     async def get_account_balance(self, owner: Pubkey) -> dict[Pubkey, Decimal]:
+        """Saldos raw por mint; uma leitura que falha levanta (nunca vira zero)."""
         await self.is_connected()
         balances: dict[Pubkey, Decimal] = {}
 
         for token in [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]:
-            try:
-                token_accounts = await self.client.get_token_accounts_by_owner(
-                    owner, TokenAccountOpts(program_id=token)
-                )
-
-                for token_acc in token_accounts.value:
-                    info = token_acc.account.data  # base64 data
-                    decoded = bytes(info)
-                    mint = Pubkey(decoded[0:32])
-                    amount = int.from_bytes(decoded[64:72], "little")
-                    balances[mint] = Decimal(amount)
-            except SolanaRpcException as ex:
-                self.logger.error(f"ERROR.get_account_balance: {str(ex)}")
+            token_accounts = await self.client.get_token_accounts_by_owner(
+                owner, TokenAccountOpts(program_id=token)
+            )
+            for token_acc in token_accounts.value:
+                decoded = bytes(token_acc.account.data)
+                mint = Pubkey(decoded[0:32])
+                amount = int.from_bytes(decoded[64:72], "little")
+                # a mesma mint pode estar em mais de uma conta de token
+                balances[mint] = balances.get(mint, Decimal(0)) + Decimal(amount)
 
         return balances

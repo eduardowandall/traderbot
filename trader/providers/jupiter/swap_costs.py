@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from solders.pubkey import Pubkey
 
 from trader.models.costs import BASE_FEE_LAMPORTS, ONCHAIN, TradeCosts
-from trader.models.mints import SOLANA_MINTS
+from trader.models.mints import SOL_MINT
 
-WSOL_MINT = SOLANA_MINTS.get_by_symbol("SOL").mint
+WSOL_MINT = SOL_MINT
 
 
 @dataclass(frozen=True)

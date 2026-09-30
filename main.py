@@ -7,4 +7,5 @@ __all__ = ["app"]
 
 if __name__ == "__main__":
     logging_config.setup_logging()
+    logging_config.install_excepthook()
     app()

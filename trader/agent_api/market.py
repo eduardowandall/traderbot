@@ -70,7 +70,12 @@ def summarize(closes: Sequence[Decimal]) -> dict:
     }
 
 
+# 5x a EMA50: o bastante para o resumo convergir como numa spec aquecida
+SUMMARY_MIN_BARS = 250
+
+
 async def summary(data: MarketData, symbol: str, interval: Interval, n: int) -> dict:
+    n = max(n, SUMMARY_MIN_BARS)
     bars = ind.BarSeries(interval, maxlen=n)
     bars.seed(await candles(data, symbol, interval, n))
     return {"symbol": symbol, "interval": str(interval), **summarize(bars.closes)}

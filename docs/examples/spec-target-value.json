@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "name": "target-value",
+  "agent_id": "example",
+  "rationale": "Antiga TargetValueStrategy: compra abaixo do preco alvo depois que o preco para de cair (0.1% acima da minima de 3 barras). Ao chegar a +5% arma um trailing de 1% a partir do pico. Stop de 10% abaixo da entrada (a legada nao tinha).",
+  "symbol": "SOL-USDC",
+  "timeframe": "1_MINUTE",
+  "entry": {
+    "mode": "all",
+    "conditions": [
+      {"type": "price_below", "value": 150},
+      {"type": "rebound_from_low", "window": 3, "pct": 0.1}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 10},
+    "mode": "any",
+    "conditions": [{"type": "trailing_take_profit", "pct": 5, "trail_pct": 1}]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 5},
+  "budget_usd": 20,
+  "max_loss_usd": 5,
+  "ttl_days": 30
+}

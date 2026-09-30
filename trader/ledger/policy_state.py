@@ -5,12 +5,14 @@ from decimal import Decimal
 
 from trader.ledger.store import LedgerStore, _in
 from trader.models.intent import (
-    ACTIVE_STATUSES,
     MOVED_FUNDS_STATUSES,
     IntentSide,
     IntentStatus,
 )
 from trader.policy import PolicyState
+
+# uma intenção executando há mais que isso provavelmente morreu no meio
+STALE_EXECUTING_SECONDS = 300
 
 
 class PolicyStateQueries(LedgerStore):
@@ -24,7 +26,7 @@ class PolicyStateQueries(LedgerStore):
             trades_last_hour=trades_last_hour,
             daily_realized_pnl_usd=self._realized_pnl_since(day_ago),
             consecutive_failures=self._consecutive_failures(),
-            unresolved_intent_ids=self._unresolved_ids(),
+            unresolved_intent_ids=self._unresolved_ids(now),
         )
 
     def _spending(self, day_ago: str, hour_ago: str) -> tuple[Decimal, int]:
@@ -64,11 +66,17 @@ class PolicyStateQueries(LedgerStore):
         ).fetchone()
         return row["n"]
 
-    def _unresolved_ids(self) -> tuple[str, ...]:
-        placeholders, statuses = _in(ACTIVE_STATUSES)
+    def _unresolved_ids(self, now: datetime) -> tuple[str, ...]:
+        """Sem confirmação, ou executando há tempo demais (processo morto?).
+
+        Uma intenção executando agora em outro processo (o swap da CLI, outro
+        runner) não bloqueia as vendas dos demais: só conta se passar de
+        `STALE_EXECUTING_SECONDS`.
+        """
+        stale = (now - timedelta(seconds=STALE_EXECUTING_SECONDS)).isoformat()
         rows = self.conn.execute(
-            f"SELECT intent_id FROM intents WHERE status IN ({placeholders}) "
-            "ORDER BY created_at",
-            statuses,
+            "SELECT intent_id FROM intents WHERE status = ? "
+            "OR (status = ? AND updated_at < ?) ORDER BY created_at",
+            (str(IntentStatus.UNCONFIRMED), str(IntentStatus.EXECUTING), stale),
         ).fetchall()
         return tuple(r["intent_id"] for r in rows)

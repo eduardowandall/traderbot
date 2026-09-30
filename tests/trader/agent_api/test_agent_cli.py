@@ -179,13 +179,13 @@ def test_market_unknown_symbol_is_a_json_error(fake_market):
     assert "NOPE" in body["errors"][0]["msg"]
 
 
-def test_run_rejects_a_spec_for_another_pair(tmp_path):
-    path = _spec_file(tmp_path)  # SOL-USDC
-    result = CliRunner().invoke(
-        main_module.app, ["run", "paper", "JUP-USDC", "spec", f"file={path}"]
-    )
-    assert result.exit_code != 0
-    assert "SOL-USDC" in result.output
+def test_run_rejects_an_unreadable_spec(tmp_path):
+    path = tmp_path / "broken.json"
+    path.write_text("{not json", encoding="utf-8")
+    missing = CliRunner().invoke(main_module.app, ["run", "paper", "nope.json"])
+    broken = CliRunner().invoke(main_module.app, ["run", "paper", str(path)])
+    assert missing.exit_code != 0 and "nope.json" in missing.output
+    assert broken.exit_code != 0 and "broken.json" in broken.output
 
 
 def test_decimals_are_printed_in_plain_notation():

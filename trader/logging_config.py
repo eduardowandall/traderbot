@@ -9,15 +9,24 @@ import logging
 import logging.config
 import os
 import re
+import sys
 import time
+import traceback
 from contextvars import ContextVar
+from logging.handlers import RotatingFileHandler
 
 from rich.console import Console
 from rich.logging import RichHandler
 
+from trader.paths import logs_dir
+
 botname: ContextVar[str | None] = ContextVar("botname", default=None)
 
-LOG_DIR = ".logs"
+# rotação por processo: 10 MB x 5 arquivos (antes crescia sem limite)
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUPS = 5
+# cada comando cria um arquivo: os mais velhos que isso são apagados
+LOG_RETENTION_DAYS = 14
 
 
 def stderr_rich_handler(**kwargs) -> RichHandler:
@@ -25,11 +34,34 @@ def stderr_rich_handler(**kwargs) -> RichHandler:
     return RichHandler(console=Console(stderr=True), **kwargs)
 
 
-def file_handler(**kwargs) -> logging.FileHandler:
-    """`.logs/trader-<timestamp>.log`, aberto só no primeiro registro."""
-    os.makedirs(LOG_DIR, exist_ok=True)
-    path = os.path.join(LOG_DIR, f"trader-{int(time.time())}.log")
-    return logging.FileHandler(path, encoding="utf-8", delay=True, **kwargs)
+def file_handler(**kwargs) -> logging.Handler:
+    """`logs_dir()/trader-<timestamp>.log` com rotação, aberto no 1º registro."""
+    folder = logs_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    prune_logs(folder)
+    return RotatingFileHandler(
+        # o pid evita dois processos do mesmo segundo no mesmo arquivo
+        folder / f"trader-{int(time.time())}-{os.getpid()}.log",
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUPS,
+        encoding="utf-8",
+        delay=True,
+        **kwargs,
+    )
+
+
+def prune_logs(folder, days: float = LOG_RETENTION_DAYS) -> int:
+    """Apaga `trader-*.log*` mais velhos que `days`; devolve quantos."""
+    cutoff = time.time() - days * 86400
+    removed = 0
+    for path in folder.glob("trader-*.log*"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            pass  # em uso por outro processo (Windows): fica para a próxima
+    return removed
 
 
 # segredos que podem aparecer em URLs: a api-key da HELIUS_RPC_URL e o token
@@ -65,10 +97,9 @@ class BotNameFilter(logging.Filter):
 
 
 class ConsoleFilter(logging.Filter):
-    # sinais das estratégias (legadas e specs) aparecem no console em DEBUG
+    # sinais das estratégias (specs) aparecem no console em DEBUG
     ALLOWED_LOGGERS = [
         "bot",
-        "trader.trading_strategy",
         "trader.strategy_spec.strategy",
     ]
 
@@ -132,3 +163,14 @@ LOGGING = {
 
 def setup_logging():
     logging.config.dictConfig(LOGGING)
+
+
+def redacted_excepthook(exc_type, exc, tb) -> None:
+    """Traceback de um erro que escapou, com os segredos mascarados."""
+    text = "".join(traceback.format_exception(exc_type, exc, tb))
+    sys.stderr.write(redact(text))
+
+
+def install_excepthook() -> None:
+    """Erros não tratados da CLI saem pelo `redact()`, como os logs."""
+    sys.excepthook = redacted_excepthook

@@ -6,16 +6,15 @@ touched. `real` mode is deliberately not accepted.
 
 Usage (from the project root):
     uv run --no-sync python .claude/scripts/smoke.py [--mode paper|dry]
-        [--seconds 40] [--symbol SOL-USDC] [--strategy random]
-        [--args "buy_chance=100 sell_chance=100 seed=1"] [--spec FILE]
+        [--seconds 40] [--spec docs/examples/spec-random.json] [--seed 1]
 
-`--spec FILE` runs a strategy spec (its symbol wins, and `expires_at` is
-moved to 3 days ahead so stale/example specs pass validation). `dry` loads `.env` and needs
+Runs a strategy spec (default: the random one) on the spec's own pair;
+`expires_at` is moved to 3 days ahead so stale/example specs pass validation.
+`--seed` fixes the `random_chance` draws. `dry` loads `.env` and needs
 SOLANA_PRIVATE_KEY + HELIUS_RPC_URL; it simulates the send, never trades.
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -35,17 +34,19 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--mode", choices=["paper", "dry"], default="paper")
     parser.add_argument("--seconds", type=int, default=40)
-    parser.add_argument("--symbol", default="SOL-USDC")
-    parser.add_argument("--strategy", default="random")
-    parser.add_argument("--args", default="buy_chance=100 sell_chance=100 seed=1")
-    parser.add_argument("--spec", type=Path, help="strategy spec JSON to run")
+    parser.add_argument(
+        "--spec",
+        type=Path,
+        default=ROOT / "docs" / "examples" / "spec-random.json",
+        help="strategy spec JSON to run",
+    )
+    parser.add_argument("--seed", default="1", help="seed for random_chance")
     return parser.parse_args()
 
 
 def _prepare_spec(args: argparse.Namespace, workdir: Path) -> None:
     path = refresh_expiry(args.spec, workdir)
-    symbol = json.loads(path.read_text(encoding="utf-8"))["symbol"]
-    args.symbol, args.strategy, args.args = symbol, "spec", f"file={path}"
+    args.spec_path = str(path)
 
 
 def _uv(mode: str, *cli: str) -> list[str]:
@@ -72,7 +73,7 @@ def _stop(proc: subprocess.Popen) -> None:
 
 
 def _run_bot(args: argparse.Namespace, workdir: Path, env: dict) -> str:
-    cmd = _uv(args.mode, "run", args.mode, args.symbol, args.strategy, args.args)
+    cmd = _uv(args.mode, "run", args.mode, args.spec_path, "--seed", args.seed)
     print("$", " ".join(cmd), flush=True)
     err_path = workdir / "err.txt"
     with open(workdir / "out.txt", "wb") as out, open(err_path, "wb") as err:
@@ -114,11 +115,11 @@ def main() -> int:
     env = os.environ | {
         "TRADER_DATA_DIR": str(workdir / "data"),
         "TRADER_POLICY_FILE": str(workdir / "policy.toml"),
+        "TRADER_LOG_DIR": str(workdir / "logs"),
         "PYTHONIOENCODING": "utf-8",
         "COLUMNS": "200",  # rich wraps the log at 80 columns otherwise
     }
-    if args.spec:
-        _prepare_spec(args, workdir)
+    _prepare_spec(args, workdir)
     _report_log(_run_bot(args, workdir, env))
     _report_ledger(args.mode, env)
     print(f"--- state kept in {workdir}")

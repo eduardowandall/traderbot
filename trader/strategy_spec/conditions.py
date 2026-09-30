@@ -7,8 +7,9 @@ nome e parâmetros), e posição/pico vêm do contexto. Indicador sem dados
 (`None`) torna a condição falsa.
 """
 
+import random
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -25,6 +26,7 @@ _INDICATORS: dict[str, Callable[..., Decimal | None]] = {
     "rsi": ind.rsi,
     "volatility": ind.volatility,
     "high": ind.rolling_high,
+    "low": ind.rolling_low,
 }
 
 
@@ -63,10 +65,15 @@ class TickContext:
     price: Decimal
     now: datetime  # UTC
     bank: IndicatorBank
+    # sorteios de `random_chance` (semente fixa no backtest)
+    rng: random.Random = field(default_factory=random.Random)
     # só com posição aberta
     entry_price: Decimal | None = None
     entry_time: datetime | None = None
     peak: Decimal | None = None
+    # última saída do bucket (None: nunca saiu, ou preço desconhecido)
+    last_exit_at: datetime | None = None
+    last_exit_price: Decimal | None = None
 
 
 def _lt(a: Decimal | None, b: Decimal | None) -> bool:
@@ -107,6 +114,15 @@ def _dip_from_high(c, ctx: TickContext) -> bool:
     return limit is not None and ctx.price <= limit
 
 
+def _rebound_from_low(c, ctx: TickContext) -> bool:
+    floor = _scaled(ctx.bank.get("low", c.window), c.pct)
+    return floor is not None and ctx.price >= floor
+
+
+def _random_chance(c, ctx: TickContext) -> bool:
+    return ctx.rng.randint(1, 100) <= c.pct
+
+
 def _price_below(c, ctx: TickContext) -> bool:
     return ctx.price < c.value
 
@@ -119,9 +135,26 @@ def _volatility_below(c, ctx: TickContext) -> bool:
     return _lt(ctx.bank.get("volatility", c.window), c.pct)
 
 
+def _below_last_exit(c, ctx: TickContext) -> bool:
+    limit = _scaled(ctx.last_exit_price, -c.pct)
+    return limit is not None and ctx.price <= limit
+
+
+def _no_last_exit(c, ctx: TickContext) -> bool:
+    return ctx.last_exit_at is None
+
+
 def _take_profit(c, ctx: TickContext) -> bool:
     target = _scaled(ctx.entry_price, c.pct)
     return target is not None and ctx.price >= target
+
+
+def _trailing_take_profit(c, ctx: TickContext) -> bool:
+    # arma quando o pico desde a entrada chega ao alvo; segue armado até vender
+    target = _scaled(ctx.entry_price, c.pct)
+    armed = target is not None and ctx.peak is not None and ctx.peak >= target
+    limit = _scaled(ctx.peak, -c.trail_pct)
+    return armed and limit is not None and ctx.price <= limit
 
 
 def _max_hold(c, ctx: TickContext) -> bool:
@@ -148,10 +181,15 @@ PREDICATES: dict[str, Callable[[Any, TickContext], bool]] = {
     "fast_ma_above_slow": _fast_ma_above_slow,
     "fast_ma_below_slow": _fast_ma_below_slow,
     "dip_from_high": _dip_from_high,
+    "rebound_from_low": _rebound_from_low,
+    "random_chance": _random_chance,
     "price_below": _price_below,
     "price_above": _price_above,
     "volatility_below": _volatility_below,
+    "below_last_exit": _below_last_exit,
+    "no_last_exit": _no_last_exit,
     "take_profit": _take_profit,
+    "trailing_take_profit": _trailing_take_profit,
     "max_hold": _max_hold,
     "stop_loss": _stop_loss,
     "trailing_stop": _trailing_stop,

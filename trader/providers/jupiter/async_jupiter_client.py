@@ -12,7 +12,13 @@ import httpx
 import websockets
 from solders.pubkey import Pubkey
 from solders.solders import VersionedTransaction
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 from websockets.asyncio.client import ClientConnection
 
 # `Interval` mora em models (camada core); reexportado por compatibilidade
@@ -26,6 +32,43 @@ from trader.providers.jupiter.logging_utils import logger_wrapper
 # /swap/v1/* segue com o mesmo formato de request/response de antes, só muda
 # o host. Ver docs/plan.md §7.2.
 DEFAULT_JUPITER_API_URL = "https://api.jup.ag"
+
+# teto do `Retry-After`: com as re-tentativas do provider por cima, um valor
+# alto seguraria uma ordem (e o lock) por minutos
+MAX_RETRY_AFTER_SECONDS = 10
+_backoff = wait_exponential(multiplier=0.5, max=8)
+
+
+def is_retryable(ex: BaseException) -> bool:
+    """Rede, timeout, 429 (limite da API sem chave) ou 5xx."""
+    if isinstance(ex, httpx.TransportError):
+        return True
+    if isinstance(ex, httpx.HTTPStatusError):
+        status = ex.response.status_code
+        return status == 429 or status >= 500
+    return False
+
+
+def _wait(state: RetryCallState) -> float:
+    """`Retry-After` quando a API manda (com teto); senão, backoff exponencial."""
+    ex = state.outcome.exception() if state.outcome else None
+    response = getattr(ex, "response", None)
+    header = response.headers.get("Retry-After") if response is not None else None
+    try:
+        return (
+            min(float(header), MAX_RETRY_AFTER_SECONDS) if header else _backoff(state)
+        )
+    except ValueError:
+        return _backoff(state)
+
+
+# só chamadas anteriores ao envio: re-tentar nunca duplica um swap
+_HTTP_RETRY = retry(
+    wait=_wait,
+    stop=stop_after_attempt(4),
+    retry=retry_if_exception(is_retryable),
+    reraise=True,
+)
 
 
 def _quote_params(
@@ -85,6 +128,7 @@ class AsyncJupiterClient:
             self.client.headers.update(headers)
 
     @logger_wrapper
+    @_HTTP_RETRY
     async def get_quote(
         self,
         input_mint: str,
@@ -108,18 +152,11 @@ class AsyncJupiterClient:
             response.raise_for_status()
             return JupiterQuoteResponse.from_dict(response.json())
         except Exception as ex:
-            if response.status_code == 429:
-                await asyncio.sleep(1.5)
             _add_response_notes(ex, url, response)
             raise ex
 
     @logger_wrapper
-    @retry(
-        wait=wait_fixed(2),
-        stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(httpx.ReadTimeout),
-        reraise=True,
-    )
+    @_HTTP_RETRY
     async def get_candles(
         self, mint: str, interval: Interval = Interval.SECOND_15, candle_qty: int = 100
     ) -> list[dict[str, Any]]:
@@ -151,6 +188,7 @@ class AsyncJupiterClient:
                 ex.add_note(f"Response: {response.text}")
             raise ex
 
+    @_HTTP_RETRY
     async def get_usd_prices(self, mints: list[str]) -> dict[str, Decimal]:
         """Preços USD da Price API V3 (documentada); mints sem preço ficam de fora.
 
@@ -227,6 +265,7 @@ class AsyncJupiterClient:
         await self.client.aclose()
 
     @logger_wrapper
+    @_HTTP_RETRY
     async def get_swap_transaction(
         self, quote: JupiterQuoteResponse, pubkey: Pubkey
     ) -> VersionedTransaction:

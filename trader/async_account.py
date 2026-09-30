@@ -8,18 +8,25 @@ conversão do fill em `Order`. A posição e o PnL ficam no `PositionBook`
 
 import logging
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from solders.pubkey import Pubkey
 
-from trader.execution import DuplicateIntentError, PolicyDeniedError, TradeGateway
+from trader.execution import (
+    AccountState,
+    DuplicateIntentError,
+    PolicyDeniedError,
+    TradeGateway,
+)
 from trader.execution.fills import Fill, execute_trade
+from trader.execution.orders import order_from_fill, priced_mints
 from trader.market.prices import PriceOracle, usd_snapshot
-from trader.models.book import PositionBook
-from trader.models.costs import trade_rates, with_sol_usd
+from trader.models.book import PositionBook, remainder_entry
 from trader.models.intent import IntentSide, TradeIntent, with_idempotency_key
+from trader.models.mints import SOL_MINT
+from trader.models.order import order_to_json
 from trader.models.position import Position
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
 
@@ -27,7 +34,7 @@ from .models import SOLANA_MINTS, Order, OrderSide
 
 # saldos lidos do provider valem por este tempo (invalidados a cada ordem)
 BALANCE_CACHE_TTL = timedelta(minutes=3)
-SOL = SOLANA_MINTS.get_by_symbol("SOL").pubkey
+SOL = SOLANA_MINTS[SOL_MINT].pubkey
 
 
 class AsyncAccount:
@@ -64,21 +71,19 @@ class AsyncAccount:
 
         # o feed de preços é em USD: fills e valores só batem com ele quando
         # o input_mint é uma stablecoin de dólar
-        quote = SOLANA_MINTS.get(input_mint)
-        self._quote_is_usd = quote is not None and quote.is_usd_stable
-        self._quote_is_sol = input_mint == SOL
-        self._token_is_sol = output_mint == SOL
-        self.book = PositionBook(SOLANA_MINTS.symbol_of(input_mint))
-        # o que o trade não precifica sozinho: o token gasto na compra (se não
-        # é stablecoin) e o SOL dos custos (se o par não tem SOL)
-        self._priced_mints: set[str] = set()
-        if not self._quote_is_usd:
-            self._priced_mints.add(str(input_mint))
-        if not (self._quote_is_sol or self._token_is_sol):
-            self._priced_mints.add(str(SOL))
+        self._quote = SOLANA_MINTS[input_mint]
+        self._token = SOLANA_MINTS[output_mint]
+        self._quote_is_usd = self._quote.is_usd_stable
+        self.book = PositionBook(self._quote.symbol)
+        # o que o trade não precifica sozinho (Price API, antes do trade)
+        self._priced_mints = priced_mints(self._quote, self._token)
 
         self.balances = None
         self.balances_last_update: datetime | None = None
+        # do ledger (restore): para a estratégia retomar depois de reiniciar
+        self.opened_at: datetime | None = None
+        self.last_exit_at: datetime | None = None
+        self.last_exit_price: Decimal | None = None
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.account_id}, {self.book.position})"
@@ -120,6 +125,15 @@ class AsyncAccount:
 
     def restore_from_ledger(self) -> None:
         """Reconstrói o livro (posição aberta e PnL) do ledger, após reinício."""
+        state = self._restore_quietly()
+        entry = state.open_entry
+        if entry is not None:
+            self.logger.warning(
+                f"Posição restaurada do ledger: {entry.quantity} @ {entry.price} "
+                f"(intenção {state.entry_intent_id})"
+            )
+
+    def _restore_quietly(self) -> AccountState:
         state = self.gateway.restore(self.account_id)
         totals = state.totals
         self.book = PositionBook.restored(
@@ -131,11 +145,19 @@ class AsyncAccount:
             incomplete=totals.incomplete,
             entry=state.open_entry,
         )
-        entry = state.open_entry
-        if entry is not None:
+        self.opened_at = state.opened_at
+        self.last_exit_at = state.last_exit_at
+        self.last_exit_price = state.last_exit_price
+        return state
+
+    def sync_with_ledger(self) -> None:
+        """Relê o livro do ledger; avisa só se a posição mudou por fora."""
+        before = self.book.position
+        self._restore_quietly()
+        after = self.book.position
+        if (before and before.entry_order) != (after and after.entry_order):
             self.logger.warning(
-                f"Posição restaurada do ledger: {entry.quantity} @ {entry.price} "
-                f"(intenção {state.entry_intent_id})"
+                f"{self.account_id}: posição mudou no ledger ({before} -> {after})"
             )
 
     async def reconcile_position(self) -> bool:
@@ -166,24 +188,6 @@ class AsyncAccount:
 
     # --- fill -> Order -----------------------------------------------------
 
-    def _fill_amounts(self, fill: Fill) -> tuple[Decimal, Decimal, Decimal]:
-        """(quantidade do token, preço em cotação por token, valor em cotação).
-
-        Usa os valores efetivamente movidos on-chain quando conhecidos; senão
-        os da quote.
-        """
-        in_raw, out_raw = fill.amounts()
-        token_raw, quote_raw = (
-            (out_raw, in_raw)
-            if fill.result.output_mint == str(self.output_mint)
-            else (in_raw, out_raw)
-        )
-        quantity = SOLANA_MINTS.raw_to_ui(str(self.output_mint), token_raw)
-        quote_amount = SOLANA_MINTS.raw_to_ui(str(self.input_mint), quote_raw)
-        if quantity <= 0:
-            raise ValueError(f"Swap sem quantidade executada: {fill.result}")
-        return quantity, quote_amount / quantity, quote_amount
-
     def _to_order(
         self,
         fill: Fill,
@@ -192,35 +196,37 @@ class AsyncAccount:
         price: Decimal,
         usd: dict[str, Decimal],
     ) -> Order:
-        filled_quantity, fill_price, quote_amount = self._fill_amounts(fill)
-        rates = trade_rates(
-            price,
-            fill_price,
-            self._quote_is_usd,
-            self._quote_is_sol,
-            self._token_is_sol,
-        )
-        rates = with_sol_usd(rates, usd.get(str(SOL)))
-        return Order(
-            order_id=fill.result.signature,
-            input_mint=str(self.input_mint),
-            output_mint=str(self.output_mint),
-            quantity=filled_quantity,
-            # preço na unidade do feed (USD): o fill só está em USD quando o
-            # input_mint é stablecoin; senão (ex: USDC-SOL) usa o preço do sinal,
-            # para o PnL não comparar SOL com USD
-            price=fill_price if self._quote_is_usd else price,
-            side=side,
-            timestamp=self.clock(),
+        # nunca levanta: o swap já está EXECUTED (ver `execution/orders.py`)
+        return order_from_fill(
+            fill,
+            self._quote,
+            self._token,
+            side,
+            self.clock(),
+            signal_price=price,
+            usd=usd,
             requested_quantity=requested_quantity,
-            requested_price=price,
-            fill_price=fill_price,
-            quote_amount=quote_amount,
-            quote_usd=rates.quote_usd,
-            sol_usd=rates.sol_usd,
-            sol_in_quote=rates.sol_in_quote,
-            costs=fill.costs,
         )
+
+    def _record_fill(
+        self,
+        intent: TradeIntent,
+        order: Order,
+        realized_usd: Decimal | None = None,
+        pnl=None,
+    ) -> None:
+        """Grava o fill; uma falha aqui não desfaz o que já foi executado.
+
+        A intenção já está EXECUTED (com assinatura e valores), e o restore
+        reconstrói a posição a partir dela mesmo sem a ordem gravada.
+        """
+        try:
+            self.gateway.record_fill(intent.intent_id, order, realized_usd, pnl)
+        except Exception as ex:
+            self.logger.error(
+                f"Fill executado mas não gravado ({intent.intent_id}): {ex}; "
+                f"ordem: {order_to_json(order)}"
+            )
 
     async def _execute_order(
         self,
@@ -409,8 +415,8 @@ class AsyncAccount:
             price,
             usd,
         )
-        self.logger.debug(f"ORDER PLACED: {asdict(order)}", extra=asdict(order))
-        self.gateway.record_fill(intent.intent_id, order)
+        self.logger.info(f"ORDER PLACED: {asdict(order)}", extra=asdict(order))
+        self._record_fill(intent, order)
         self.book.open(order)
         return order
 
@@ -418,6 +424,10 @@ class AsyncAccount:
         self, price: Decimal, quantity: Decimal, rationale: str | None = None
     ) -> Order:
         position = await self.can_sell()
+        entry = position.entry_order
+        # nunca mais do que a posição: o pedido vem do cliente, e vendas não
+        # passam pelas regras de orçamento
+        quantity = min(quantity, entry.quantity)
 
         # a quantidade recebida na compra pode ser menor que a pedida
         # (slippage/taxas); nunca tenta vender mais do que a carteira tem
@@ -426,7 +436,8 @@ class AsyncAccount:
             raise ValueError(
                 "Não é possível executar venda no momento. Saldo reservado para taxas"
             )
-        if quantity > available:
+        capped_by_wallet = quantity > available
+        if capped_by_wallet:
             self.logger.warning(
                 f"Quantidade de venda {quantity} maior que o saldo {available}; "
                 "vendendo o saldo disponível"
@@ -441,7 +452,9 @@ class AsyncAccount:
             quantity,
             usd,
             # uma venda por posição: evita vender duas vezes a mesma entrada
-            idempotency_key=f"{self.account_id}:sell:{position.entry_order.order_id}",
+            idempotency_key=(
+                f"{self.account_id}:sell:{entry.order_id}:{entry.quantity}"
+            ),
             rationale=rationale,
         )
         order = await self._execute_order(
@@ -461,8 +474,31 @@ class AsyncAccount:
             f"ORDER PLACED: order={asdict(order)} position={asdict(position)}",
             extra=asdict(order),
         )
-        closed = self.book.close(order)
-        self.gateway.record_fill(
-            intent.intent_id, order, closed.realized_usd, closed.pnl
-        )
+        keep_rest = not capped_by_wallet and remainder_entry(entry, order.quantity)
+        order = replace(order, closes_position=not keep_rest)
+        closed = self.book.reduce(order) if keep_rest else self.book.close(order)
+        self._record_fill(intent, order, closed.realized_usd, closed.pnl)
+        if not keep_rest:
+            self._record_leftover(entry, order)
         return order
+
+    def _record_leftover(self, entry: Order, exit_order: Order) -> None:
+        """Tokens que ficaram na carteira quando a posição fechou (ex: reserva)."""
+        rest = remainder_entry(entry, exit_order.quantity)
+        if rest is None:
+            return
+        self.logger.warning(
+            f"Posição fechada com {rest.quantity} {self._token.symbol} na carteira"
+        )
+        try:
+            self.gateway.add_event(
+                "position_leftover",
+                {
+                    "account": self.account_id,
+                    "mint": self._token.mint,
+                    "quantity": rest.quantity,
+                    "cost_quote": rest.quote_amount,
+                },
+            )
+        except Exception as ex:
+            self.logger.error(f"Sobra da posição não registrada: {ex}")

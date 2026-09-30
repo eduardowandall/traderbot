@@ -30,6 +30,7 @@ from trader.models import SOLANA_MINTS, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.costs import BASE_FEE_LAMPORTS, ESTIMATED, TradeCosts
 from trader.models.errors import TransactionSubmittedError
+from trader.models.mints import SOL_MINT
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.providers.jupiter.async_rpc_client import (
     AsyncRPCClient,
@@ -94,7 +95,7 @@ class OnChainExecutor:
         return f"{self.__class__.__name__}({self.pubkey}, dry={self.is_dryrun})"
 
     async def balances(self) -> list[MintBalance]:
-        sol = SOLANA_MINTS.get_by_symbol("SOL")
+        sol = SOLANA_MINTS[SOL_MINT]
         lamports = await self.rpc_client.get_lamports(self.pubkey)
         balances = [MintBalance(available=sol.raw_to_ui(lamports), mint=sol.pubkey)]
         tokens = await self.rpc_client.get_account_balance(self.pubkey)

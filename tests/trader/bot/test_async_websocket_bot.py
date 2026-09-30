@@ -50,7 +50,7 @@ class FakeStrategy(TradingStrategy):
         if current_position:
             return OrderSignal(OrderSide.SELL, current_position.entry_order.quantity)
         else:
-            return OrderSignal(OrderSide.BUY, self.calculate_quantity(balance, price))
+            return OrderSignal(OrderSide.BUY, balance * Decimal("0.5") / price)
 
 
 def _market_client():
@@ -343,3 +343,54 @@ async def test_warmup_and_tick_callback():
 
     market.get_candles.assert_awaited_once_with(BONK.mint, Interval.HOUR_1, 24)
     assert ticks == [Decimal("2")]
+
+
+async def test_a_failed_startup_backs_off_and_opens_the_bucket_once():
+    market = _market([Decimal("1"), KeyboardInterrupt()])
+    market.get_candles = AsyncMock(side_effect=[OSError("429 nos candles"), []])
+    trader = FakeTrader()
+    opens = []
+    trader.open = AsyncMock(side_effect=lambda: opens.append(1))
+    strategy = mock.Mock(spec=TradingStrategy)
+    strategy.on_market_refresh.return_value = None
+    bot = _bot(market, strategy, trader)
+
+    with mock.patch("asyncio.sleep") as sleep:
+        await bot.arun()  # antes: o erro de startup encerrava o bot
+
+    assert len(opens) == 1
+    assert market.get_candles.await_count == 2
+    assert [c.args[0] for c in sleep.await_args_list] == [1.0]
+    strategy.on_market_refresh.assert_called_once()
+
+
+async def test_startup_resumes_a_strategy_that_keeps_state():
+    class Resuming(FakeStrategy):
+        def resume(self, last_exit_at, opened_at, last_exit_price=None):
+            self.resumed = (last_exit_at, opened_at, last_exit_price)
+
+    strategy = Resuming()
+    bot = _bot(_market([KeyboardInterrupt()]), strategy)
+
+    await bot.arun()
+
+    assert strategy.resumed == (None, None, None)  # o FakeTrader não tem histórico
+
+
+async def test_repeated_startup_failures_alert_the_owner_once():
+    from trader.bot import async_websocket_bot as bot_module
+
+    market = _market([KeyboardInterrupt()])
+    failures = [OSError("datapi fora")] * (bot_module.STARTUP_ALERT_AFTER + 1)
+    market.get_candles = AsyncMock(side_effect=[*failures, []])
+    notifier = mock.Mock(spec=NullNotificationService)
+    bot = _bot(market, mock.Mock(spec=TradingStrategy))
+    bot.notification_service = notifier
+
+    with mock.patch("asyncio.sleep"):
+        await bot.arun()
+
+    alerts = [
+        c for c in notifier.send_message.call_args_list if "não consegue" in str(c)
+    ]
+    assert len(alerts) == 1

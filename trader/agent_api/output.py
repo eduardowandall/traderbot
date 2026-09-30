@@ -33,7 +33,7 @@ def emit(payload: dict) -> None:
     typer.echo(dumps({"ok": True, **payload}))
 
 
-def fail(errors: list) -> None:
-    """Imprime os erros e encerra com código 1."""
-    typer.echo(dumps({"ok": False, "errors": errors}))
+def fail(errors: list, **extra) -> None:
+    """Imprime os erros (e contexto, ex: `spec_id`) e encerra com código 1."""
+    typer.echo(dumps({**extra, "ok": False, "errors": errors}))
     raise typer.Exit(1)

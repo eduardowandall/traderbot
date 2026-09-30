@@ -54,7 +54,6 @@ def test_console_filter_allows_bot_logs_and_warnings_only():
         return logging.LogRecord(name, level, __file__, 1, "msg", None, None)
 
     assert f.filter(record("bot", logging.DEBUG))
-    assert f.filter(record("trader.trading_strategy", logging.DEBUG))
     assert f.filter(record("trader.strategy_spec.strategy", logging.DEBUG))
     assert not f.filter(record("trader.async_account", logging.INFO))
     assert f.filter(record("trader.async_account", logging.WARNING))
@@ -83,3 +82,38 @@ def test_file_lines_carry_the_bot_name(tmp_path):
     lines = log_file.read_text(encoding="utf-8").splitlines()
     assert "[-]" in lines[0]
     assert "[paper-run-random-SOL-USDC]" in lines[1]
+
+
+def test_uncaught_cli_errors_are_redacted(capsys):
+    from trader.cli import app
+
+    try:
+        raise RuntimeError("falhou em https://mainnet.helius-rpc.com/?api-key=SEGREDO")
+    except RuntimeError as ex:
+        logging_config.redacted_excepthook(type(ex), ex, ex.__traceback__)
+
+    err = capsys.readouterr().err
+    assert "SEGREDO" not in err and "api-key=***" in err
+    # o traceback "bonito" do Typer não passaria pela redação
+    assert app.pretty_exceptions_enable is False
+
+
+def test_old_log_files_are_pruned(tmp_path):
+    import os
+    import time
+
+    old = tmp_path / "trader-1-1.log"
+    old_rotated = tmp_path / "trader-1-1.log.3"
+    fresh = tmp_path / "trader-2-2.log"
+    other = tmp_path / "paper-run-x.log"  # não é nosso padrão: fica
+    for path in (old, old_rotated, fresh, other):
+        path.write_text("x", encoding="utf-8")
+    month_ago = time.time() - 30 * 86400
+    for path in (old, old_rotated, other):
+        os.utime(path, (month_ago, month_ago))
+
+    assert logging_config.prune_logs(tmp_path) == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "paper-run-x.log",
+        "trader-2-2.log",
+    ]

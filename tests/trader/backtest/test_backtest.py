@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from factories import memory_gateway
+from factories import make_spec, memory_gateway
 
 from trader.backtest import (
     Backtester,
@@ -15,15 +15,26 @@ from trader.backtest import (
 from trader.execution import KillSwitch, TradeGateway
 from trader.models import OrderSide, OrderSignal, TickerData
 from trader.models.intent import IntentStatus
-from trader.trading_strategy import (
-    RandomStrategy,
-    StrategyComposer,
-    TradingStrategy,
-    TrailingStopLossStrategy,
-    WeightedMovingAverageStrategy,
-)
+from trader.strategy_spec.models import StrategySpec
+from trader.strategy_spec.strategy import SpecStrategy
+from trader.trading_strategy import TradingStrategy
 
 START = datetime(2026, 9, 1, 12, 0)
+
+
+def _random_spec(buy: int, sell: int) -> SpecStrategy:
+    # a antiga RandomStrategy (docs/examples/spec-random.json)
+    return _spec(
+        entry={"conditions": [{"type": "random_chance", "pct": buy}]},
+        exit={
+            "stop": {"type": "stop_loss", "pct": 50},
+            "conditions": [{"type": "random_chance", "pct": sell}],
+        },
+    )
+
+
+def _spec(**overrides) -> SpecStrategy:
+    return SpecStrategy(StrategySpec.model_validate(make_spec(**overrides)))
 
 
 def _ticks(prices, step_seconds=60):
@@ -51,6 +62,8 @@ class BuyThenSell(TradingStrategy):
 
 
 async def _run(strategy, prices, **kwargs):
+    # contas exatas: sem slippage, salvo quando o teste pede
+    kwargs.setdefault("slippage_bps", Decimal("0"))
     return await Backtester(
         strategy, "SOL-USDC", _ticks(prices), Decimal("100"), **kwargs
     ).run()
@@ -104,7 +117,7 @@ class TestBacktester:
         prices = [100 + (i % 7) - (i % 3) for i in range(300)]
 
         def strategy():
-            return RandomStrategy(sell_chance=10, buy_chance=10)
+            return _random_spec(buy=10, sell=10)
 
         first = await _run(strategy(), prices, seed=42)
         second = await _run(strategy(), prices, seed=42)
@@ -114,17 +127,16 @@ class TestBacktester:
         assert first.trades != other_seed.trades
 
     async def test_time_based_strategies_use_tick_clock(self):
-        # WMA com período de 60s: com ticks de 60s cada tick entra no histórico.
+        # WMA em barras de 1 minuto: com ticks de 60s cada tick é uma barra.
         # Se usasse o relógio real, os ticks (reproduzidos em ms) cairiam todos
-        # no mesmo período e a estratégia nunca aqueceria.
+        # na mesma barra e a estratégia nunca aqueceria.
         prices = [100 - i for i in range(10)] + [90 + i for i in range(10)]
-        composer = StrategyComposer(
-            buy_strategies=[
-                WeightedMovingAverageStrategy(short_window=2, long_window=4, period=60)
-            ],
-            sell_strategies=[TrailingStopLossStrategy(stop_loss_percent="50")],
+        wma = {"type": "fast_ma_below_slow", "ma": "wma", "fast": 2, "slow": 4}
+        strategy = _spec(
+            entry={"conditions": [wma]},
+            exit={"stop": {"type": "trailing_stop", "pct": 50}},
         )
-        result = await _run(composer, prices)
+        result = await _run(strategy, prices)
         assert result.trades
         assert result.trades[0].side == OrderSide.BUY
 
@@ -204,7 +216,8 @@ class TestTicks:
 class TestStrategyDeterminism:
     def test_random_strategy_seed(self):
         def signals(seed):
-            strategy = RandomStrategy(sell_chance=50, buy_chance=50, seed=seed)
+            strategy = _random_spec(buy=50, sell=50)
+            strategy.seed(seed)
             return [
                 strategy.on_market_refresh(Decimal("1"), None, Decimal("1"), None)
                 for _ in range(50)
@@ -213,12 +226,27 @@ class TestStrategyDeterminism:
         assert signals(1) == signals(1)
         assert signals(1) != signals(2)
 
-    def test_composer_propagates_clock_and_seed(self):
-        child = RandomStrategy(sell_chance=1, buy_chance=1)
-        composer = StrategyComposer(buy_strategies=[child])
-        composer.set_clock(lambda: START)
-        composer.seed(3)
-        assert child.clock() == START
-        first = child.rng.random()
-        composer.seed(3)
-        assert child.rng.random() == first
+
+class Churn(TradingStrategy):
+    """Compra sem posição, vende com posição: um tick cada."""
+
+    def on_market_refresh(self, price, spread, balance, current_position):
+        if current_position:
+            return OrderSignal(OrderSide.SELL, current_position.entry_order.quantity)
+        return OrderSignal(OrderSide.BUY, Decimal("10") / price)
+
+
+async def test_a_retired_bucket_stops_the_replay():
+    prices = [100, 90, 90, 80, 80, 70, 70, 60, 60, 50]
+
+    result = await _run(
+        Churn(),
+        prices,
+        fee_bps=Decimal("0"),
+        budget_usd=Decimal("50"),
+        max_loss_usd=Decimal("1"),
+    )
+
+    # perde 1 USD na primeira volta: o bucket encerra e o replay para de operar
+    assert len(result.trades) == 2
+    assert result.rejected_signals == 0

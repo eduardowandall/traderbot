@@ -53,6 +53,8 @@ class _Bucket:
     account: AsyncAccount
     budget_usd: Decimal | None
     status: BucketStatus = BucketStatus.ACTIVE
+    # prejuízo realizado que encerra o bucket (o `max_loss_usd` da spec)
+    max_loss_usd: Decimal | None = None
 
 
 def remaining_budget(budget_usd: Decimal, realized_usd: Decimal) -> Decimal:
@@ -89,6 +91,7 @@ class TradeService:
         output_mint: str,
         budget_usd: Decimal | None = None,
         source: str = "strategy",
+        max_loss_usd: Decimal | None = None,
     ) -> None:
         """Cria o bucket e restaura sua posição/PnL do ledger.
 
@@ -106,7 +109,7 @@ class TradeService:
             clock=self.clock,
             prices=self.prices,
         )
-        bucket = _Bucket(account, budget_usd)
+        bucket = _Bucket(account, budget_usd, max_loss_usd=max_loss_usd)
         if budget_usd is not None:
             account.spend_cap = lambda: self._cap(bucket)
         account.restore_from_ledger()
@@ -114,6 +117,23 @@ class TradeService:
             # em dry run a carteira real não reflete as ordens simuladas
             await account.reconcile_position()
         self._buckets[name] = bucket
+        self._check_max_loss(name, bucket)  # já restaurado além do limite?
+
+    def _check_max_loss(self, name: str, bucket: _Bucket) -> None:
+        limit = bucket.max_loss_usd
+        realized = bucket.account.book.realized_usd
+        if limit is None or bucket.status != BucketStatus.ACTIVE or realized > -limit:
+            return
+        bucket.status = BucketStatus.RETIRING
+        logger.warning(f"Bucket {name}: prejuízo {realized} atingiu o limite {limit}")
+        self.gateway.add_event(
+            "bucket_max_loss",
+            {
+                "account": bucket.account.account_id,
+                "realized_usd": realized,
+                "limit": limit,
+            },
+        )
 
     def _bucket(self, name: str) -> _Bucket:
         try:
@@ -139,21 +159,45 @@ class TradeService:
             budget_usd=bucket.budget_usd,
             status=bucket.status,
             pnl_summary=account.book.summary(),
+            opened_at=account.opened_at,
+            last_exit_at=account.last_exit_at,
+            last_exit_price=account.last_exit_price,
         )
 
     async def submit_order(self, name: str, request: OrderRequest) -> OrderReply:
-        account = self._bucket(name).account
+        bucket = self._bucket(name)
+        if request.side == OrderSide.BUY and bucket.status != BucketStatus.ACTIVE:
+            return OrderReply.of_rejection(f"bucket {name} encerrado: sem compras")
         async with self._lock:
-            return await _reply(
-                account.account_id,
-                lambda: account.place_order(
-                    request.price,
-                    request.side,
-                    request.quantity,
-                    rationale=request.rationale,
-                    idempotency_key=request.idempotency_key,
-                ),
-            )
+            # o livro segue o ledger: uma intenção resolvida à mão (ou outro
+            # processo) muda a posição sem passar por esta conta
+            bucket.account.sync_with_ledger()
+            reply = await self._place(bucket, request)
+        self._check_max_loss(name, bucket)
+        await self._close_if_retiring(name, bucket, request.price)
+        return reply
+
+    async def _close_if_retiring(
+        self, name: str, bucket: _Bucket, price: Decimal
+    ) -> None:
+        """Um bucket encerrado com sobra aberta (venda parcial) vende o resto."""
+        if bucket.status == BucketStatus.ACTIVE or bucket.account.book.position is None:
+            return
+        logger.warning(f"Bucket {name} encerrado com posição aberta: vendendo o resto")
+        await self.close_bucket(name, price)
+
+    async def _place(self, bucket: _Bucket, request: OrderRequest) -> OrderReply:
+        account = bucket.account
+        return await _reply(
+            account.account_id,
+            lambda: account.place_order(
+                request.price,
+                request.side,
+                request.quantity,
+                rationale=request.rationale,
+                idempotency_key=request.idempotency_key,
+            ),
+        )
 
     async def swap(self, request: SwapRequest, source: str = "cli") -> OrderReply:
         """Swap manual no bucket `manual` (qualquer par, sem posição)."""

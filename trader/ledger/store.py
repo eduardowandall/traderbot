@@ -7,12 +7,15 @@ anterior + conteúdo), então edições manuais no banco são detectáveis com
 
 import hashlib
 import json
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 GENESIS_HASH = "0" * 64
 
@@ -85,7 +88,24 @@ _ADDED_COLUMNS = {
 }
 
 
+# uma chave de idempotência só pode estar em uma intenção que moveu fundos
+_UNIQUE_MOVED_KEY = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_intents_moved_key ON intents "
+    "(idempotency_key) WHERE status IN ('executing', 'executed', 'unconfirmed')"
+)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
+    _add_columns(conn)
+    try:
+        with conn:
+            conn.execute(_UNIQUE_MOVED_KEY)
+    except sqlite3.IntegrityError:
+        # ledger antigo já com chaves duplicadas: abrir continua possível
+        logger.warning("Chaves de idempotência duplicadas: índice único ignorado")
+
+
+def _add_columns(conn: sqlite3.Connection) -> None:
     existing = {r["name"] for r in conn.execute("PRAGMA table_info(intents)")}
     with conn:
         for name, kind in _ADDED_COLUMNS.items():

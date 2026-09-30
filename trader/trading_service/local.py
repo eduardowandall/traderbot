@@ -18,6 +18,7 @@ class LocalTradeClient:
         source: str = "strategy",
         # quem cria o serviço só para este cliente passa True: fecha junto
         owns_service: bool = False,
+        max_loss_usd: Decimal | None = None,
     ):
         self.service = service
         self.name = name
@@ -26,10 +27,16 @@ class LocalTradeClient:
         self.budget_usd = budget_usd
         self.source = source
         self.owns_service = owns_service
+        self.max_loss_usd = max_loss_usd
 
     async def open(self) -> None:
         await self.service.open_bucket(
-            self.name, self.input_mint, self.output_mint, self.budget_usd, self.source
+            self.name,
+            self.input_mint,
+            self.output_mint,
+            self.budget_usd,
+            self.source,
+            max_loss_usd=self.max_loss_usd,
         )
 
     async def bucket(self) -> BucketSnapshot:

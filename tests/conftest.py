@@ -81,4 +81,5 @@ def isolated_workdir(tmp_path, monkeypatch):
     # chdir só contém escritas relativas incidentais (logs, CSVs de ticks)
     monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path / ".data"))
     monkeypatch.setenv("TRADER_POLICY_FILE", str(tmp_path / "policy.toml"))
+    monkeypatch.setenv("TRADER_LOG_DIR", str(tmp_path / ".logs"))
     monkeypatch.chdir(tmp_path)

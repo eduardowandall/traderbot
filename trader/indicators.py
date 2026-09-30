@@ -34,10 +34,7 @@ def sma(values: Sequence[Decimal], window: int) -> Decimal | None:
 
 
 def wma(values: Sequence[Decimal], window: int) -> Decimal | None:
-    """Média ponderada linear: o preço mais recente pesa `window`.
-
-    Mesma conta de `WeightedMovingAverageStrategy.weighted_moving_average`.
-    """
+    """Média ponderada linear: o preço mais recente pesa `window`."""
     tail = _tail(values, window)
     if tail is None:
         return None
@@ -136,9 +133,8 @@ def to_utc(ts: datetime) -> datetime:
 class BarSeries:
     """Fechamentos por barra de `interval`, limitados a `maxlen` barras.
 
-    A barra em formação usa o último preço (mesma regra de
-    `WeightedMovingAverageStrategy.set_parameters`): a série sempre termina
-    no preço atual. Um tick de uma barra anterior à atual (fora de ordem)
+    A barra em formação usa o último preço: a série sempre termina no preço
+    atual. Um tick de uma barra anterior à atual (fora de ordem)
     também só atualiza a barra atual.
     """
 
@@ -154,6 +150,11 @@ class BarSeries:
         if self._bucket is not None and bucket <= self._bucket:
             self._closes[-1] = price
             return False
+        if self._bucket is not None:
+            # barras sem tick (feed quieto): repetem o fechamento anterior,
+            # como os candles, para os indicadores cobrirem o mesmo tempo
+            missing = min(bucket - self._bucket - 1, self._closes.maxlen or 0)
+            self._closes.extend([self._closes[-1]] * missing)
         self._closes.append(price)
         self._bucket = bucket
         return True

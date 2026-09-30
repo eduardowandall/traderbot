@@ -11,11 +11,18 @@ condição `expr` futura entra como mais um membro das uniões abaixo.
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    WithJsonSchema,
+    model_validator,
+)
 
 from trader.indicators import to_utc
 from trader.models.public_data import Interval
@@ -23,11 +30,48 @@ from trader.models.public_data import Interval
 SPEC_VERSION = 1
 
 Window = Annotated[int, Field(ge=2, le=500)]
-Pct = Annotated[Decimal, Field(gt=0, le=50)]
-Margin = Annotated[Decimal, Field(ge=0, le=50)]
-RsiLevel = Annotated[Decimal, Field(ge=1, le=99)]
-Usd = Annotated[Decimal, Field(gt=0)]
+# o schema publica número com limites e unidade (a validação ainda aceita
+# string, para decimais exatos): sem isso o ramo "string" não tinha limites
+Pct = Annotated[
+    Decimal,
+    Field(gt=0, le=50),
+    WithJsonSchema(
+        {"type": "number", "exclusiveMinimum": 0, "maximum": 50, "description": "%"}
+    ),
+]
+Margin = Annotated[
+    Decimal,
+    Field(ge=0, le=50),
+    WithJsonSchema({"type": "number", "minimum": 0, "maximum": 50, "description": "%"}),
+]
+RsiLevel = Annotated[
+    Decimal,
+    Field(ge=1, le=99),
+    WithJsonSchema(
+        {"type": "number", "minimum": 1, "maximum": 99, "description": "nível do RSI"}
+    ),
+]
+Usd = Annotated[
+    Decimal,
+    Field(gt=0),
+    WithJsonSchema({"type": "number", "exclusiveMinimum": 0, "description": "USD"}),
+]
+Chance = Annotated[
+    int,
+    Field(ge=1, le=100),
+    WithJsonSchema(
+        {"type": "integer", "minimum": 1, "maximum": 100, "description": "%"}
+    ),
+]
 MaKind = Literal["sma", "ema", "wma"]
+# EMA/RSI são recursivos: com 5x o período, o valor inicial já não pesa
+SEED_FACTOR = 5
+# campos que não mudam o comportamento: fora do id da spec
+METADATA_FIELDS = {"name", "agent_id", "rationale", "supersedes"}
+# limite prático da API de candles para o aquecimento
+MAX_HISTORY = 900  # abaixo do limite de candles (1000, menos a barra em formação)
+# o RSI de Wilder suaviza com 1/n: converge mais devagar que a EMA
+RSI_SEED_FACTOR = 10
 
 
 class _Block(BaseModel):
@@ -36,6 +80,10 @@ class _Block(BaseModel):
     def lookback(self) -> int:
         """Barras necessárias para a condição ter valor."""
         return 1
+
+    def history(self) -> int:
+        """Barras para o valor convergir (EMA/RSI precisam de bem mais)."""
+        return self.lookback()
 
     def label(self) -> str:
         return self.type  # type: ignore[attr-defined]
@@ -50,6 +98,9 @@ class _Rsi(_Block):
 
     def lookback(self) -> int:
         return self.period + 1
+
+    def history(self) -> int:
+        return self.period * RSI_SEED_FACTOR + 1  # Wilder: suavização 1/n
 
 
 class RsiBelow(_Rsi):
@@ -73,6 +124,9 @@ class _PriceVsMa(_Block):
 
     def lookback(self) -> int:
         return self.window
+
+    def history(self) -> int:
+        return self.window * (SEED_FACTOR if self.ma == "ema" else 1)
 
 
 class PriceBelowMa(_PriceVsMa):
@@ -103,6 +157,9 @@ class _MaVsMa(_Block):
     def lookback(self) -> int:
         return self.slow
 
+    def history(self) -> int:
+        return self.slow * (SEED_FACTOR if self.ma == "ema" else 1)
+
 
 class FastMaAboveSlow(_MaVsMa):
     type: Literal["fast_ma_above_slow"]
@@ -128,6 +185,30 @@ class DipFromHigh(_Block):
 
     def label(self) -> str:
         return f"dip{self.pct}%_from_high{self.window}"
+
+
+class ReboundFromLow(_Block):
+    """Preço ao menos `pct`% acima da mínima das últimas `window` barras."""
+
+    type: Literal["rebound_from_low"]
+    window: Window
+    pct: Pct
+
+    def lookback(self) -> int:
+        return self.window
+
+    def label(self) -> str:
+        return f"rebound{self.pct}%_from_low{self.window}"
+
+
+class RandomChance(_Block):
+    """Vale com `pct`% de chance a cada avaliação (usa o `rng` da estratégia)."""
+
+    type: Literal["random_chance"]
+    pct: Chance
+
+    def label(self) -> str:
+        return f"chance{self.pct}%"
 
 
 class PriceBelow(_Block):
@@ -177,6 +258,17 @@ class MaxHold(_Block):
         return f"max_hold{self.minutes}m"
 
 
+class TrailingTakeProfit(_Block):
+    """Arma quando o pico chega a +`pct`% da entrada; vende se cair `trail_pct`%."""
+
+    type: Literal["trailing_take_profit"]
+    pct: Pct
+    trail_pct: Pct
+
+    def label(self) -> str:
+        return f"trailing_take_profit{self.pct}%-{self.trail_pct}%"
+
+
 class StopLoss(_Block):
     type: Literal["stop_loss"]
     pct: Pct
@@ -201,19 +293,44 @@ _MARKET = (
     | FastMaAboveSlow
     | FastMaBelowSlow
     | DipFromHigh
+    | ReboundFromLow
     | PriceBelow
     | PriceAbove
     | VolatilityBelow
+    | RandomChance
 )
 MarketCondition = Annotated[_MARKET, Field(discriminator="type")]
-ExitCondition = Annotated[_MARKET | TakeProfit | MaxHold, Field(discriminator="type")]
+ExitCondition = Annotated[
+    _MARKET | TakeProfit | TrailingTakeProfit | MaxHold, Field(discriminator="type")
+]
 Stop = Annotated[StopLoss | TrailingStop, Field(discriminator="type")]
 Mode = Literal["all", "any"]
 
 
+class BelowLastExit(_Block):
+    """Preço `pct`% abaixo do da última saída; falso sem saída (veja `NoLastExit`)."""
+
+    type: Literal["below_last_exit"]
+    pct: Margin
+
+    def label(self) -> str:
+        return f"below_last_exit-{self.pct}%"
+
+
+class NoLastExit(_Block):
+    """Vale enquanto o bucket nunca saiu: a primeira compra, explícita na spec."""
+
+    type: Literal["no_last_exit"]
+
+
+EntryCondition = Annotated[
+    _MARKET | BelowLastExit | NoLastExit, Field(discriminator="type")
+]
+
+
 class Entry(_Block):
     mode: Mode = "all"
-    conditions: Annotated[list[MarketCondition], Field(min_length=1, max_length=8)]
+    conditions: Annotated[list[EntryCondition], Field(min_length=1, max_length=8)]
 
 
 class Exit(_Block):
@@ -232,21 +349,63 @@ class FixedUsd(_Block):
 
 
 class StrategySpec(_Block):
-    version: Literal[1]
-    name: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")]
-    agent_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]{1,64}$")]
-    rationale: Annotated[str, Field(max_length=2000)] = ""
+    version: Annotated[Literal[1], Field(description="Versão do formato: 1")]
+    name: Annotated[
+        str,
+        Field(
+            pattern=r"^[a-z0-9][a-z0-9-]{0,63}$",
+            description="Nome curto (minúsculas, dígitos, hífen); não muda o id",
+        ),
+    ]
+    agent_id: Annotated[
+        str,
+        Field(
+            pattern=r"^[A-Za-z0-9_.-]{1,64}$",
+            description="Quem escreveu a spec (agente ou dono); não muda o id",
+        ),
+    ]
+    rationale: Annotated[
+        str, Field(max_length=2000, description="Por que a estratégia deve funcionar")
+    ] = ""
     # OUTPUT-INPUT, como na CLI: SOL-USDC compra SOL gastando USDC
-    symbol: Annotated[str, Field(pattern=r"^[A-Z0-9]{1,16}-[A-Z0-9]{1,16}$")]
-    timeframe: Interval
-    entry: Entry
-    exit: Exit
-    sizing: FixedUsd
-    budget_usd: Usd
-    max_loss_usd: Usd
-    cooldown_minutes: Annotated[int, Field(ge=0, le=10080)] = 0
-    expires_at: AwareDatetime
-    supersedes: Annotated[str | None, Field(pattern=r"^[0-9a-f]{12}$")] = None
+    symbol: Annotated[
+        str,
+        Field(
+            pattern=r"^[A-Z0-9]{1,16}-[A-Z0-9]{1,16}$",
+            description="Par SAÍDA-ENTRADA: SOL-USDC compra SOL gastando USDC",
+        ),
+    ]
+    timeframe: Annotated[
+        Interval,
+        Field(description="Barras dos indicadores (15_SECOND, 1_MINUTE, 1_HOUR)"),
+    ]
+    entry: Annotated[Entry, Field(description="Condições de entrada (all/any)")]
+    exit: Annotated[
+        Exit, Field(description="Stop obrigatório (sempre OU) + condições de saída")
+    ]
+    sizing: Annotated[FixedUsd, Field(description="Quanto gastar por compra")]
+    budget_usd: Annotated[
+        Usd, Field(description="Teto do bucket em USD; prejuízo realizado reduz")
+    ]
+    max_loss_usd: Annotated[
+        Usd, Field(description="Prejuízo realizado (USD) que encerra o bucket")
+    ]
+    cooldown_minutes: Annotated[
+        int, Field(ge=0, le=10080, description="Minutos sem entrar após uma saída")
+    ] = 0
+    # exatamente um: data fixa, ou dias a partir do primeiro tick que roda
+    expires_at: Annotated[
+        AwareDatetime | None,
+        Field(description="Data fixa de expiração (UTC); ou use ttl_days"),
+    ] = None
+    ttl_days: Annotated[
+        int | None,
+        Field(ge=1, le=365, description="Dias de validade a partir do 1º tick"),
+    ] = None
+    supersedes: Annotated[
+        str | None,
+        Field(pattern=r"^[0-9a-f]{12}$", description="Id da spec que esta substitui"),
+    ] = None
 
     @model_validator(mode="after")
     def _loss_within_budget(self):
@@ -254,16 +413,37 @@ class StrategySpec(_Block):
             raise ValueError("max_loss_usd não pode passar de budget_usd")
         return self
 
+    @model_validator(mode="after")
+    def _one_expiry(self):
+        if (self.expires_at is None) == (self.ttl_days is None):
+            raise ValueError("informe expires_at ou ttl_days (exatamente um)")
+        return self
+
+    def expiry(self, start: datetime) -> datetime:
+        """Quando a spec expira, para uma execução que começou em `start`."""
+        if self.expires_at is not None:
+            return self.expires_at
+        return to_utc(start) + timedelta(days=self.ttl_days or 0)
+
     def conditions(self) -> list[_Block]:
         return [*self.entry.conditions, self.exit.stop, *self.exit.conditions]
 
     def lookback(self) -> int:
-        """Barras de aquecimento: o maior lookback entre as condições."""
+        """Barras mínimas para todas as condições terem valor."""
         return max(c.lookback() for c in self.conditions())
 
+    def history(self) -> int:
+        """Barras de aquecimento: o bastante para EMA/RSI convergirem."""
+        return min(max(c.history() for c in self.conditions()), MAX_HISTORY)
+
     def canonical_json(self) -> str:
-        """JSON canônico (chaves ordenadas, decimais normalizados, UTC)."""
-        data = _canonical(self.model_dump(mode="python"))
+        """JSON canônico do comportamento (chaves ordenadas, decimais normais, UTC).
+
+        Metadados (nome, autor, justificativa, `supersedes`) ficam de fora: duas
+        specs que operam igual têm o mesmo id, e reescrever a justificativa
+        não quebra o `supersedes`.
+        """
+        data = _canonical(self.model_dump(mode="python", exclude=METADATA_FIELDS))
         return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
     def spec_id(self) -> str:

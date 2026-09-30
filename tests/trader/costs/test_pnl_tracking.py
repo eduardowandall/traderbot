@@ -177,7 +177,8 @@ def test_pnl_command_without_trades():
     assert "Nenhum trade executado" in result.stdout
 
 
-def test_resolve_failed_backfills_fee():
+def test_resolve_failed_backfills_fee(monkeypatch):
+    monkeypatch.setenv("HELIUS_RPC_URL", "https://rpc.test")  # o RPC é mock
     with Ledger(ledger_path("real")) as ledger:
         intent = TradeIntent(
             "t", "real:SOL-USDC", IntentSide.BUY, USDC.mint, SOL.mint, Decimal("1")

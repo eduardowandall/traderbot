@@ -11,15 +11,18 @@ Fluxo de `submit`:
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 from trader.ledger import AccountPnL, Ledger, ledger_path
+from trader.models.book import remainder_entry
 from trader.models.costs import PnLResult
 from trader.models.errors import TransactionSubmittedError
 from trader.models.intent import IntentRecord, IntentSide, TradeIntent
+from trader.models.mints import SOLANA_MINTS
 from trader.models.mode import RunningMode
-from trader.models.order import Order, SwapResult, order_from_json
+from trader.models.order import Order, OrderSide, SwapResult, order_from_json
 from trader.paths import data_dir
 from trader.policy import Policy, evaluate, load_policy
 
@@ -77,11 +80,71 @@ class _NeverHalted(KillSwitch):
         return None
 
 
-def _open_entry(last: IntentRecord | None) -> Order | None:
-    """A compra da última perna executada, se a posição ainda está aberta."""
-    if last is None or last.intent.side != IntentSide.BUY or not last.order_json:
+def _open_entry(legs: list[IntentRecord]) -> Order | None:
+    """A entrada da posição aberta: a última compra menos as vendas depois dela.
+
+    Sem a ordem gravada (o `record_fill` falhou, ou a intenção foi resolvida
+    à mão), a entrada é reconstruída da própria linha: melhor uma posição com
+    valores aproximados do que comprar de novo ou nunca conseguir vender.
+    """
+    if not legs or legs[0].intent.side != IntentSide.BUY:
         return None
-    return order_from_json(last.order_json)
+    entry: Order | None = _order_of(legs[0])
+    for sell in legs[1:]:
+        if entry is None:
+            return None
+        entry = _after_sell(entry, sell)
+    return entry
+
+
+def _after_sell(entry: Order, sell: IntentRecord) -> Order | None:
+    """O que sobra depois da venda, como a memória faz (uma venda por vez)."""
+    if sell.order_json:
+        order = order_from_json(sell.order_json)
+        # ordens antigas (sem o campo) sempre fecharam a posição
+        return None if order.closes_position else remainder_entry(entry, order.quantity)
+    # `record_fill` falhou: a quantidade vendida é a da intenção
+    sold = sell.intent.quantity or sell.intent.spend_amount
+    return remainder_entry(entry, sold)
+
+
+def _order_of(record: IntentRecord) -> Order:
+    if record.order_json:
+        return order_from_json(record.order_json)
+    return _entry_from_record(record)
+
+
+def open_entry_of(ledger: Ledger, account: str) -> Order | None:
+    """A entrada da posição aberta da conta, segundo o ledger."""
+    return _open_entry(ledger.legs_since_last_buy(account))
+
+
+def _entry_from_record(record: IntentRecord) -> Order:
+    intent = record.intent
+    quote, token = SOLANA_MINTS[intent.spend_mint], SOLANA_MINTS[intent.receive_mint]
+    quantity = (
+        token.raw_to_ui(record.out_amount) if record.out_amount else intent.quantity
+    ) or Decimal("0")
+    spent = (
+        quote.raw_to_ui(record.in_amount) if record.in_amount else intent.spend_amount
+    )
+    fill_price = spent / quantity if quantity else Decimal("0")
+    logger.warning(
+        f"Entrada {intent.intent_id} sem ordem gravada: reconstruída da intenção"
+    )
+    return Order(
+        order_id=record.signature or intent.intent_id,
+        input_mint=quote.mint,
+        output_mint=token.mint,
+        quantity=quantity,
+        price=intent.price if intent.price is not None else fill_price,
+        side=OrderSide.BUY,
+        timestamp=record.updated_at,
+        requested_quantity=intent.quantity,
+        requested_price=intent.price,
+        fill_price=fill_price,
+        quote_amount=spent,
+    )
 
 
 @dataclass(frozen=True)
@@ -92,6 +155,10 @@ class AccountState:
     totals: AccountPnL
     open_entry: Order | None = None  # ordem de compra da posição aberta
     entry_intent_id: str | None = None
+    # para a estratégia retomar cooldown/rearme e a validade (`ttl_days`)
+    opened_at: datetime | None = None  # primeira intenção da conta
+    last_exit_at: datetime | None = None  # última venda executada
+    last_exit_price: Decimal | None = None  # preço dela (`below_last_exit`)
 
 
 class TradeGateway:
@@ -151,13 +218,17 @@ class TradeGateway:
 
     def restore(self, account_id: str) -> AccountState:
         """PnL e posição aberta da conta, para reconstruir após reinício."""
-        last = self.ledger.last_executed_trade(account_id)
-        entry = _open_entry(last)
+        legs = self.ledger.legs_since_last_buy(account_id)
+        entry = _open_entry(legs)
+        opened_at, last_exit_at = self.ledger.account_times(account_id)
         return AccountState(
             realized_usd=self.ledger.total_realized_pnl(account_id),
             totals=self.ledger.pnl_totals(account_id),
             open_entry=entry,
-            entry_intent_id=last.intent.intent_id if entry and last else None,
+            entry_intent_id=legs[0].intent.intent_id if entry else None,
+            opened_at=opened_at,
+            last_exit_at=None if entry else last_exit_at,
+            last_exit_price=None if entry else self.ledger.last_exit_price(account_id),
         )
 
     def record_fill(
@@ -184,23 +255,29 @@ class TradeGateway:
     ) -> SwapResult:
         self._authorize(intent)
         result = await self._execute(intent, execute)
-        self.ledger.mark_executed(intent.intent_id, result)
+        try:
+            self.ledger.mark_executed(intent.intent_id, result)
+        except Exception:
+            # o swap aconteceu: a assinatura e os valores precisam sobreviver
+            # (a intenção fica EXECUTING e bloqueia novos trades)
+            logger.error(
+                f"Swap executado mas não registrado ({intent.intent_id}): {result}"
+            )
+            raise
         return result
 
     def _authorize(self, intent: TradeIntent) -> None:
         """Idempotência + política; registra a intenção (ou a recusa)."""
-        existing = self.ledger.find_by_idempotency_key(intent.idempotency_key)
+        halted = self.kill_switch.is_active()
+        existing, decision = self.ledger.authorize(
+            intent,
+            lambda state: evaluate(
+                intent, self.policy, state, halted=halted, real_mode=self.real_mode
+            ),
+        )
         if existing is not None:
             raise DuplicateIntentError(existing)
-
-        decision = evaluate(
-            intent,
-            self.policy,
-            self.ledger.policy_state(),
-            halted=self.kill_switch.is_active(),
-            real_mode=self.real_mode,
-        )
-        self.ledger.record_intent(intent, decision)
+        assert decision is not None  # sem existente, sempre há decisão
         if not decision.allowed:
             logger.warning(f"Intenção {intent.intent_id} recusada: {decision.reasons}")
             raise PolicyDeniedError(intent, decision.reasons)

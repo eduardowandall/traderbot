@@ -19,8 +19,10 @@ state. Work through the checks in order and stop at the first real cause:
    - `erro:` lines are execution failures.
 2. **Halt:** check for a `HALT` file in the data dir (`$TRADER_DATA_DIR`, else
    `.data/`). A tripped circuit breaker needs `main.py resume <mode>`.
-3. **Logs:** read the newest `.logs/<mode>-run-*.log`
-   (`ls -t .logs | head -3`) and grep it for `ERROR|Traceback|denied|paus`.
+3. **Logs:** read the newest `.logs/trader-*.log` (the log dir is `TRADER_LOG_DIR`,
+   else `<project root>/.logs`; `ls -t .logs/trader-*.log | head -3`) and grep it
+   for `ERROR|Traceback|denied|paus`. Do not open the older `<mode>-run-*.log`
+   files: some predate the key redaction and may contain the Helius `api-key`.
    Remember that `denied`/`rejected` replies pause orders for 30s.
 4. **Integrity and PnL:** run `ledger verify <mode>` and `pnl <mode>`. For
    paper, also run `paper balance`. If a PnL looks absurd (for example

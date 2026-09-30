@@ -103,10 +103,12 @@ def _sizing(spec: StrategySpec, limits: SpecLimits, now: datetime):
 
 
 def _expiry(spec: StrategySpec, limits: SpecLimits, now: datetime):
-    if spec.expires_at <= now:
-        yield SpecError("expires_at", "já expirou")
-    if spec.expires_at > now + timedelta(days=limits.max_days):
-        yield SpecError("expires_at", f"mais de {limits.max_days} dias no futuro")
+    path = "expires_at" if spec.expires_at is not None else "ttl_days"
+    expiry = spec.expiry(now)
+    if expiry <= now:
+        yield SpecError(path, "já expirou")
+    if expiry > now + timedelta(days=limits.max_days):
+        yield SpecError(path, f"mais de {limits.max_days} dias no futuro")
 
 
 RULES: tuple[Rule, ...] = (_symbol, _sizing, _expiry)

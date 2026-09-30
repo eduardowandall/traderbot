@@ -77,11 +77,12 @@ class TestEntry:
     def test_waits_for_warm_up(self):
         rsi = {"type": "rsi_below", "period": 3, "value": 99}
         strategy, clock = _strategy(entry=_entry(BELOW_100, rsi, mode="any"))
-        assert strategy.warmup()[1] == 4
-        # price_below já é verdade, mas o rsi precisa de 4 barras
-        signals = [_tick(strategy, clock, 80) for _ in range(4)]
-        assert signals[:3] == [None, None, None]
-        assert signals[3] is not None and signals[3].side == OrderSide.BUY
+        # RSI de Wilder (suavização 1/n): aquece com 10x o período (+1)
+        assert strategy.warmup()[1] == 31
+        # price_below já é verdade, mas o rsi precisa de 31 barras
+        signals = [_tick(strategy, clock, 80) for _ in range(31)]
+        assert signals[:30] == [None] * 30
+        assert signals[30] is not None and signals[30].side == OrderSide.BUY
 
     @pytest.mark.parametrize(("mode", "fires"), [("all", False), ("any", True)])
     def test_all_vs_any(self, mode, fires):
@@ -110,7 +111,7 @@ class TestEntry:
         candles = [
             TickerData(
                 buy=Decimal(0),
-                timestamp=T0 - timedelta(minutes=5 - i),
+                timestamp=T0 - timedelta(minutes=32 - i),
                 high=Decimal(0),
                 last=Decimal(100 - i),
                 low=Decimal(0),
@@ -119,7 +120,7 @@ class TestEntry:
                 sell=Decimal(0),
                 vol=Decimal(0),
             )
-            for i in range(4)
+            for i in range(31)
         ]
         strategy.setup(candles)
         assert _tick(strategy, clock, 90) is not None
@@ -199,6 +200,16 @@ class TestCooldown:
         assert _tick(strategy, clock, 80) is None  # acabou de sair
         clock.advance(minutes=8)
         assert _tick(strategy, clock, 80) is None
+        # cooldown vencido, mas a entrada nunca deixou de valer: não rearmou
+        assert _tick(strategy, clock, 80) is None
+        assert _tick(strategy, clock, 120) is None  # entrada falsa: rearma
+        assert _tick(strategy, clock, 80) is not None
+
+    def test_an_exit_needs_the_entry_to_rearm(self):
+        strategy, clock = _strategy(cooldown_minutes=0)
+        _tick(strategy, clock, 99, _position(100))
+        assert _tick(strategy, clock, 80) is None  # recompra imediata: não
+        assert _tick(strategy, clock, 120) is None
         assert _tick(strategy, clock, 80) is not None
 
 

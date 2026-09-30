@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "name": "scalp-test",
+  "agent_id": "example",
+  "rationale": "Spec de teste: compra na hora enquanto nunca saiu (no_last_exit), vende com +0.12% (take_profit) ou -0.08% (stop_loss) e recompra quando o preco fica 0.05% abaixo do preco da ultima venda.",
+  "symbol": "SOL-USDC",
+  "timeframe": "15_SECOND",
+  "entry": {
+    "mode": "any",
+    "conditions": [
+      {"type": "no_last_exit"},
+      {"type": "below_last_exit", "pct": 0.10}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 0.08},
+    "mode": "any",
+    "conditions": [{"type": "take_profit", "pct": 0.15}]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 5},
+  "budget_usd": 20,
+  "max_loss_usd": 5,
+  "ttl_days": 7
+}

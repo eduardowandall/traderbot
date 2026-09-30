@@ -7,6 +7,7 @@ lado da estratégia nunca importa o gateway, a política ou o provider.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -36,6 +37,10 @@ class BucketSnapshot:
     budget_usd: Decimal | None = None  # None: sem teto (a carteira toda)
     status: BucketStatus = BucketStatus.ACTIVE
     pnl_summary: str = ""
+    # do ledger: quando o bucket começou e a última saída (restart)
+    opened_at: datetime | None = None
+    last_exit_at: datetime | None = None
+    last_exit_price: Decimal | None = None
 
 
 @dataclass(frozen=True)

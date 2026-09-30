@@ -15,7 +15,9 @@ from trader.cli.pnl import pnl
 from trader.cli.safety import halt, resume
 from trader.cli.swap import swap
 
-app = typer.Typer()
+# sem o traceback "bonito" do Typer: ele ignora a redação de segredos (a
+# URL do Helius com a api-key vem encadeada em erros do httpx2)
+app = typer.Typer(pretty_exceptions_enable=False)
 for command in (run, swap, halt, resume, backtest, pnl):
     app.command()(command)
 app.add_typer(ledger_app, name="ledger")

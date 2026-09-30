@@ -36,19 +36,18 @@ Fill in `.env`:
 ### Run the bot
 
 ```bash
-uv run --env-file .env main.py run <mode> <SYMBOL> <strategy> '<key=value args>'
+uv run --env-file .env main.py run <mode> <spec.json> [--seed N]
 ```
 
 - **Mode**: `dry` (default) fetches prices and simulates but never sends a real transaction. `paper` uses a simulated wallet (see below). `real` ⚠️ trades real money.
-- **Symbol**: format `OUTPUT-INPUT`. `SOL-USDC` buys SOL with USDC.
-- **Strategy**: `random`, `target_value`, or `composer`; args are passed as a `'key=value ...'` string.
+- **Spec**: the path to a JSON strategy spec, the only kind of strategy. Its `symbol` (`OUTPUT-INPUT`: `SOL-USDC` buys SOL with USDC) is the pair traded; `--seed` fixes its `random_chance` draws. The examples in `docs/examples/` include the old built-in strategies: `spec-random.json`, `spec-target-value.json` and `spec-wma-composer.json`. Combining conditions is done with the spec's `entry.mode` / `exit.mode` (`all`/`any`).
 
 ```bash
-# Dry run, random strategy
-uv run --env-file .env main.py run dry SOL-USDC random 'sell_chance=20 buy_chance=40'
+# Dry run, random spec
+uv run --env-file .env main.py run dry docs/examples/spec-random.json
 
-# Dry run, strategy composer
-uv run --env-file .env main.py run dry SOL-USDC composer 'buy_mode=all sell_mode=any'
+# Dry run, the old composer defaults (four WMA crossovers + 3.1% trailing stop)
+uv run --env-file .env main.py run dry docs/examples/spec-wma-composer.json
 ```
 
 ### Swap
@@ -81,7 +80,7 @@ and quotes. It needs no private key and no RPC, and both buys and sells work.
 
 ```bash
 uv run main.py paper reset "USDC=20 SOL=0.5"     # simulated balances (.data/paper-wallet.json)
-uv run main.py run paper SOL-USDC random 'sell_chance=5 buy_chance=5' --record-ticks .data/ticks/sol.csv
+uv run main.py run paper docs/examples/spec-random.json --record-ticks .data/ticks/sol.csv
 uv run main.py paper balance
 uv run main.py ledger list paper
 ```
@@ -90,8 +89,8 @@ Backtests replay recorded ticks, or Jupiter candles, through a strategy. They
 are deterministic: the same `--seed` always gives the same result.
 
 ```bash
-uv run main.py backtest SOL-USDC random 'sell_chance=5 buy_chance=5' --ticks .data/ticks/sol.csv --balance 20 --seed 1
-uv run main.py backtest SOL-USDC composer --candles 1000 --interval 1_MINUTE
+uv run main.py backtest docs/examples/spec-random.json --ticks .data/ticks/sol.csv --balance 20 --seed 1
+uv run main.py backtest docs/examples/spec-wma-composer.json --candles 1000
 ```
 
 The input token of the pair must be USDC or USDT, because prices are in USD.
@@ -175,8 +174,8 @@ CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every p
 
 - `main.py` — entry point; the commands live in `trader/cli/` (`run`, `swap`, `backtest`, `pnl`, `halt`/`resume`, `ledger`, `paper`) and `trader/agent_api/cli.py` (`market`, `strategy`, JSON output)
 - `trader/bot/` — main loop: fetch price → run strategy → submit the order to its bucket (`trader/trading_service/`)
-- `trader/strategy_spec/` — declarative JSON strategy specs (the way to write new strategies)
-- `trader/trading_strategy.py` — strategy base + legacy implementations (frozen) + `StrategyComposer`
+- `trader/strategy_spec/` — declarative JSON strategy specs (the only kind of strategy)
+- `trader/trading_strategy.py` — the `TradingStrategy` base the bot and backtester call
 - `trader/providers/jupiter/` — Jupiter HTTP client, Solana/Helius RPC, swap service
 - `trader/models/` — data models + `SOLANA_MINTS` (known tokens, symbol ↔ mint)
 - `trader/policy/` — risk policy (`evaluate()` is pure; loaded from `policy.toml`)
@@ -190,4 +189,4 @@ CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`) on every p
 ### Notes
 
 - New tokens must be added to `SOLANA_MINTS` in `trader/models/mints.py`.
-- New top-level strategies must be registered in `STRATEGIES` in `trader/strategies_registry.py` (`trader/__init__.py` must stay empty). Prefer writing a spec (`run paper SOL-USDC spec 'file=spec.json'`).
+- New strategies are specs (`run paper spec.json`); a missing building block becomes a new condition type in `trader/strategy_spec/`. `trader/__init__.py` must stay empty.

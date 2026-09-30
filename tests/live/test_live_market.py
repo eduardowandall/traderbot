@@ -1,14 +1,12 @@
 """Dados de mercado reais: preço, candles e resumo (comandos de agente)."""
 
 import asyncio
-import json
 import re
-from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 from live_helpers import invoke, invoke_json
 
+from trader.backtest.ticks import PATH_STEPS
 from trader.market import JupiterMarketData, JupiterPriceOracle
 from trader.models import SOLANA_MINTS
 from trader.paths import PROJECT_ROOT
@@ -16,6 +14,7 @@ from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 EXAMPLE_SPEC = str(PROJECT_ROOT / "docs" / "examples" / "spec-sol-dip.json")
+RANDOM_SPEC = str(PROJECT_ROOT / "docs" / "examples" / "spec-random.json")
 
 
 def test_price_candles_and_summary():
@@ -30,32 +29,29 @@ def test_price_candles_and_summary():
     assert 0 <= Decimal(summary["rsi14"]) <= 100
 
 
-def test_example_spec_validates_and_backtests_on_real_candles(tmp_path):
-    # o exemplo é um modelo (expira em 2099); a validação exige <= 30 dias
-    spec = json.loads(Path(EXAMPLE_SPEC).read_text(encoding="utf-8"))
-    spec["expires_at"] = (datetime.now(UTC) + timedelta(days=7)).isoformat()
-    spec_file = tmp_path / "spec.json"
-    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+def test_example_spec_validates_and_backtests_on_real_candles():
+    # o exemplo usa `ttl_days`: valida sem precisar de uma data nova
+    invoke_json("strategy", "validate", EXAMPLE_SPEC)
+    result = invoke_json("strategy", "backtest", EXAMPLE_SPEC, "--candles", "300")
 
-    invoke_json("strategy", "validate", str(spec_file))
-    result = invoke_json("strategy", "backtest", str(spec_file), "--candles", "300")
-
-    assert result["ticks"] == 300
+    # cada barra fechada vira um caminho interpolado abertura->mín->máx->fech
+    # (até 1 + 3 * PATH_STEPS ticks); a barra em formação fica de fora
+    assert result["bars"] in (299, 300)
+    assert result["bars"] <= result["ticks"] <= (1 + 3 * PATH_STEPS) * result["bars"]
     assert result["symbol"] == "SOL-USDC"
 
 
 def test_random_backtest_trades_on_real_candles():
     result = invoke(
         "backtest",
-        "SOL-USDC",
-        "random",
-        "buy_chance=50 sell_chance=50",
+        RANDOM_SPEC,
         "--candles",
-        "300",
+        "100",
     )
 
     assert result.exit_code == 0, result.output
-    assert "300 ticks" in result.stdout
+    ticks = re.search(r"(\d+) ticks", result.stdout)
+    assert ticks and 99 <= int(ticks.group(1)) <= (1 + 3 * PATH_STEPS) * 100
     trades = re.search(r"trades: (\d+)", result.stdout)
     assert trades and int(trades.group(1)) > 10
 

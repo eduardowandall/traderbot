@@ -200,9 +200,40 @@ class TestPolicyState:
         assert ledger.policy_state().consecutive_failures == 0
 
     def test_unresolved(self, ledger):
+        executing, pending = make_intent(), make_intent()
+        for intent in (executing, pending):
+            ledger.record_intent(intent, ALLOW)
+        ledger.mark_unconfirmed(pending.intent_id, "timeout")
+
+        # executando agora (outro processo) não bloqueia; sem confirmação, sim
+        assert ledger.policy_state().unresolved_intent_ids == (pending.intent_id,)
+        later = datetime.now(UTC) + timedelta(minutes=6)
+        state = ledger.policy_state(now=later)
+        assert set(state.unresolved_intent_ids) == {
+            executing.intent_id,
+            pending.intent_id,
+        }
+
+    def test_a_late_mark_never_overwrites_a_resolution(self, ledger, caplog):
         intent = make_intent()
         ledger.record_intent(intent, ALLOW)
-        assert ledger.policy_state().unresolved_intent_ids == (intent.intent_id,)
+        ledger.mark_unconfirmed(intent.intent_id, "timeout")
+        ledger.resolve(intent.intent_id, IntentStatus.FAILED, "não saiu")
+
+        ledger.mark_executed(intent.intent_id, SwapResult("sig", USDC, SOL, 1, 2))
+
+        record = ledger.get(intent.intent_id)
+        assert record and record.status == IntentStatus.FAILED
+        assert "já está failed" in caplog.text
+
+    def test_resolve_can_record_a_missing_signature(self, ledger):
+        intent = make_intent()
+        ledger.record_intent(intent, ALLOW)  # fica executando, sem assinatura
+
+        ledger.resolve(intent.intent_id, IntentStatus.EXECUTED, "log", signature="abc")
+
+        record = ledger.get(intent.intent_id)
+        assert record and record.signature == "abc"
 
 
 class TestResolve:

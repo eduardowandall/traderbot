@@ -10,6 +10,7 @@ from decimal import Decimal
 from trader.ledger import Ledger
 from trader.models import SOLANA_MINTS
 from trader.models.intent import IntentSide, TradeIntent
+from trader.paths import PROJECT_ROOT
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
@@ -59,6 +60,11 @@ def memory_gateway(policy=None):
 def close_open_ledgers() -> None:
     while _OPEN_LEDGERS:
         _OPEN_LEDGERS.pop().close()
+
+
+def example_spec(name: str) -> str:
+    """Caminho absoluto de `docs/examples/spec-<name>.json` (os testes mudam o cwd)."""
+    return str(PROJECT_ROOT / "docs" / "examples" / f"spec-{name}.json")
 
 
 def make_spec(**overrides) -> dict:
