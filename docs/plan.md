@@ -33,7 +33,7 @@ it before the code. Track progress in §5, record decisions in §9.
 ## 2. Where we are
 
 **Overall: about 90%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
-and goal 6 is scored on its own so a new goal doesn't hide progress). 771
+and goal 6 is scored on its own so a new goal doesn't hide progress). 780
 tests. Nothing has traded real money yet: the next stretch of work leads to a
 first tiny-budget real run.
 
@@ -41,7 +41,7 @@ first tiny-budget real run.
 |---|---|---|---|
 | 1. Specs as files | `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `backtest`, `/smoke`, `serve` + `connect` for any number of specs; the trade-runner checks each spec's terms against its own policy | No spec has traded real money (A6) | **90%** |
 | 2. Manual trades | Removed in stage U | Comes back with a wallet treasury | deferred |
-| 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up, re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | Warm-up collapses on thin tokens' candle gaps (A4); no crossovers | **87%** |
+| 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up (across candle gaps), re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | No crossovers | **90%** |
 | 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | One wallet only | **85%** |
 | 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included | Replays ignore rent | **96%** |
 | 6. Perps | Research, venue choice and design (§8) | Everything else (A7–A12) | **5%** |
@@ -75,14 +75,6 @@ first tiny-budget real run.
 
 In order. Each item ships on its own with the suite green (`/check`). Size:
 **S** under an hour, **M** several modules, **L** a design change.
-
-### A4. Warm-up across candle gaps — M
-Soak F1: Jupiter candles only exist for bars with trades, and
-`BarSeries.seed` treats every gap over `MAX_GAP_BARS` as an outage and clears
-the series, so a thin token warms up live (25 min for wma-composer) and its
-backtests reset all the time. A missing candle means "no trade": fill it
-forward when seeding and in replays; the reset stays for gaps in live ticks.
-The backtest headline of the liquid examples must not change.
 
 ### A5. One rule for when orders re-read the wallet — S
 Old B10 C3, waiting for a talk with the owner. It touches real sells, so it is
@@ -156,11 +148,11 @@ ledger schema, so it waits for the end of a paper soak.
 | A1 Soak quick fixes | done | 2026-10-05; in `history.md` |
 | A2 Owner: paper soak | done | 2026-10-05, ended early by the owner; in `history.md` (F9-F13 -> A13, A14) |
 | A3 Resolve UNCONFIRMED | done | 2026-10-05; in `history.md` |
-| A4 Warm-up across candle gaps | open | |
+| A4 Warm-up across candle gaps | done | 2026-10-05; in `history.md` |
 | A5 Wallet re-read rule | open | Owner discussion first |
 | A13 Soak II small fixes | done | 2026-10-05; in `history.md` |
 | A14 Replay fills like live fills | done | 2026-10-05; in `history.md` |
-| A6 First real run | open | After A4, A5 |
+| A6 First real run | open | After A5 |
 | A7 Perps: decoupling | open | |
 | A8 Perps: model, paper, spec | open | Schema bump; after a soak |
 | A9 Perps: backtest | open | |

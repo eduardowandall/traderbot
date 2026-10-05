@@ -91,7 +91,8 @@ class SpecStrategy:
         return self.spec.timeframe, self._history
 
     def setup(self, ticker_history: Sequence[TickerData]):
-        self.bank.seed(ticker_history)
+        # os candles acabam no último negócio, não agora (A4)
+        self.bank.seed(ticker_history, until=self.clock())
 
     def on_market_refresh(
         self,

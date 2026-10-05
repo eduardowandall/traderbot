@@ -18,16 +18,12 @@ from trader.backtest.ticks import Tick
 from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.execution.models.intent import IntentRecord
 from trader.execution.trade.ledger import Ledger
-from trader.shared.indicators import to_utc
+from trader.shared.indicators import bar_index, to_utc
 from trader.shared.market import MarketData
 from trader.shared.models import SOLANA_MINTS, OrderSide, TickerData
 from trader.shared.models.costs import BPS
 from trader.shared.models.order import order_from_json
 from trader.strategy.spec.models import StrategySpec
-
-
-def _bar(ts: datetime, seconds: int) -> int:
-    return int(to_utc(ts).timestamp()) // seconds
 
 
 async def fetch_warmup(
@@ -38,7 +34,7 @@ async def fetch_warmup(
     need = spec.history()
     if need <= 0:
         return []  # só condições de preço: nada a aquecer
-    since = _bar(now, seconds) - _bar(before, seconds) + 1
+    since = bar_index(now, seconds) - bar_index(before, seconds) + 1
     if need + since > MAX_CANDLES:
         raise ValueError(
             f"os ticks começam há {since} barras de {spec.timeframe}: a API não "
@@ -46,8 +42,8 @@ async def fetch_warmup(
         )
     token, _ = SOLANA_MINTS.get_pair(spec.symbol)
     candles = await data.get_candles(token.mint, spec.timeframe, need + since)
-    first = _bar(before, seconds)
-    closed = [c for c in candles if _bar(c.timestamp, seconds) < first]
+    first = bar_index(before, seconds)
+    closed = [c for c in candles if bar_index(c.timestamp, seconds) < first]
     return sorted(closed, key=lambda c: to_utc(c.timestamp))[-need:]
 
 

@@ -43,8 +43,10 @@ class IndicatorBank:
         self.bars.update(ts, price)
         self._refresh()
 
-    def seed(self, candles: Sequence[TickerData]) -> None:
-        self.bars.seed(candles)
+    def seed(
+        self, candles: Sequence[TickerData], until: datetime | None = None
+    ) -> None:
+        self.bars.seed(candles, until)
         self._refresh()
 
     def _refresh(self) -> None:

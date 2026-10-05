@@ -67,6 +67,28 @@ class TestCandlePaths:
         keys = [prices.index(Decimal(p)) for p in (100, 105, 95, 97)]
         assert keys == sorted(keys)
 
+    def test_a_bar_without_a_candle_is_one_tick_at_the_previous_close(self):
+        # A4: sem candle = sem negócio; o replay não pode ver um buraco
+        candles = [_candle(0, 100, 100, 100, 100), _candle(3, 100, 101, 99, 101)]
+        ticks = ticks_from_candles(candles, MINUTE, now=T0 + timedelta(minutes=10))
+
+        quiet = [t for t in ticks if T0 < t.timestamp < T0 + timedelta(minutes=3)]
+        assert [(t.timestamp, t.price) for t in quiet[-2:]] == [
+            (T0 + timedelta(minutes=1), 100),
+            (T0 + timedelta(minutes=2), 100),
+        ]
+        assert strategies.bars_in(ticks, MINUTE) == 4
+
+    def test_a_quiet_bar_keeps_the_quote_usd_of_the_previous_bar(self):
+        candles = [_candle(0, 1, 1, 1, 1), _candle(2, 1, 1, 1, 1)]
+        quote = [_candle(0, 150, 150, 150, 150), _candle(2, 160, 160, 160, 160)]
+        ticks = ticks_from_candles(
+            candles, MINUTE, now=T0 + timedelta(minutes=10), quote=quote
+        )
+        by_time = {t.timestamp: t.quote_usd for t in ticks}
+        assert by_time[T0 + timedelta(minutes=1)] == 150
+        assert by_time[T0 + timedelta(minutes=2)] == 160
+
 
 class TestIntrabarStops:
     async def test_a_stop_fires_on_the_bar_low_even_if_the_close_recovers(self):
@@ -236,3 +258,20 @@ class TestFeedGaps:
         assert signals[-1] and signals[-1].side == OrderSide.BUY  # aquecida
         gap = history + ind.MAX_GAP_BARS + 2
         assert tick(gap, 91) is None  # esfriou: a série recomeçou
+
+    def test_sparse_warmup_candles_leave_the_strategy_warm(self):
+        # A4 (soak F1): um token pouco negociado tem candles com buracos longos,
+        # e o primeiro tick ao vivo chega bem depois do último negócio
+        spec = make_spec(
+            entry={"conditions": [{"type": "price_above_ma", "ma": "sma", "window": 5}]}
+        )
+        strategy = SpecStrategy(StrategySpec.model_validate(spec))
+        _, count = strategy.warmup()
+        sparse = [_candle(10 * i, 90, 90, 90, 90) for i in range(count)]
+        now = T0 + timedelta(minutes=10 * count + 60)
+        strategy.set_clock(lambda: now)
+        strategy.setup(sparse)
+
+        signal = strategy.on_market_refresh(Decimal(95), Decimal(100), None, ONE)
+
+        assert signal and signal.side == OrderSide.BUY

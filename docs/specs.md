@@ -100,8 +100,10 @@ On every price tick:
 **Warm-up.** At startup the bot seeds the indicators from candles. The spec
 needs as many bars as its slowest condition: the `window` for SMA/WMA and
 highs/lows, 5x the window for EMA, 10x the period + 1 for RSI, capped at 900
-bars. A gap in the price feed longer than 5 bars restarts the series, and the
-spec warms up again before its next entry.
+bars. Candles only exist for bars with trades: a bar without one repeats the
+previous close, so a thinly traded token is warm at once. A gap in the live
+price feed longer than 5 bars restarts the series, and the spec warms up again
+before its next entry.
 
 **Id.** The spec id is a hash of everything except `name`, `agent_id`,
 `rationale` and `supersedes`: two specs that trade the same way share an id,

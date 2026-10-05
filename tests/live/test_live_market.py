@@ -20,6 +20,7 @@ from trader.execution.trade.venues.jupiter.tx_inspection import (
     check_programs,
     programs_of,
 )
+from trader.shared.indicators import BarSeries
 from trader.shared.market.pair import market_for
 from trader.shared.models import SOLANA_MINTS, Interval
 from trader.shared.paths import PROJECT_ROOT
@@ -75,10 +76,34 @@ def test_example_spec_backtests_on_real_candles():
     result = invoke_json("backtest", EXAMPLE_SPEC, "--candles", "300")
 
     # cada barra fechada vira um caminho interpolado abertura->mín->máx->fech
-    # (até 1 + 3 * PATH_STEPS ticks); a barra em formação fica de fora
-    assert result["bars"] in (299, 300)
+    # (até 1 + 3 * PATH_STEPS ticks); a barra em formação fica de fora, e uma
+    # barra sem candle (sem negócio) conta, com um tick plano (A4)
+    assert result["bars"] >= 299
     assert result["bars"] <= result["ticks"] <= (1 + 3 * PATH_STEPS) * result["bars"]
     assert result["symbol"] == "SOL-USDC"
+
+
+def test_a_thin_token_warms_up_from_its_sparse_candles():
+    # A4 (soak F1): os candles de 15 s do NOBODY só existem nas barras com
+    # negócio; antes, o seed zerava a série a cada buraco e sobrava ~1 barra
+    nobody = SOLANA_MINTS.get_by_symbol("NOBODY").mint
+    count = 100
+
+    async def read():
+        data = JupiterMarketData()
+        try:
+            return await data.get_candles(nobody, Interval.SECOND_15, count)
+        finally:
+            await data.aclose()
+
+    candles = asyncio.run(read())
+    bars = BarSeries(Interval.SECOND_15, maxlen=count)
+    now = datetime.now(UTC)
+    bars.seed(candles, until=now)
+    bars.update(now, candles[-1].last)
+
+    assert len(candles) > count // 2
+    assert len(bars) == count
 
 
 def test_random_backtest_trades_on_real_candles():

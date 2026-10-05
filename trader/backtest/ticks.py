@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from trader.shared.indicators import to_utc
+from trader.shared.indicators import bar_index, to_utc
 from trader.shared.models import TickerData
 from trader.shared.models.public_data import Interval
 
@@ -90,16 +90,39 @@ def ticks_from_candles(
     Num par sem stablecoin, `candles` já são do token em cotação
     (`ratio_candles`) e `quote` são os candles USD do token de cotação: cada
     tick leva o fechamento da barra dele como `quote_usd`.
+
+    Uma barra sem candle não teve negócio (A4): vira um tick no fechamento
+    anterior, na abertura dela, como o preço parado que o bot recebe ao vivo.
+    Sem isso, o `BarSeries` do replay trataria o buraco como queda do feed.
     """
     usd = {to_utc(c.timestamp): c.last for c in quote or ()}
-    ordered = sorted(candles, key=lambda c: c.timestamp)
     bar = timedelta(seconds=interval.seconds)
     cutoff = to_utc(now or datetime.now(UTC))
-    return [
-        tick
-        for c in ordered
+    closed = [
+        c
+        for c in sorted(candles, key=lambda c: to_utc(c.timestamp))
         if to_utc(c.timestamp) + bar <= cutoff
-        for tick in _bar_path(c, bar, usd.get(to_utc(c.timestamp)))
+    ]
+    ticks: list[Tick] = []
+    quote_usd: Decimal | None = None
+    prev: TickerData | None = None
+    for c in closed:
+        if prev is not None:
+            ticks.extend(_quiet_bars(prev, c, bar, quote_usd))
+        quote_usd = usd.get(to_utc(c.timestamp), quote_usd)
+        ticks.extend(_bar_path(c, bar, quote_usd))
+        prev = c
+    return ticks
+
+
+def _quiet_bars(
+    prev: TickerData, nxt: TickerData, bar: timedelta, quote_usd: Decimal | None
+) -> list[Tick]:
+    """Um tick no fechamento de `prev` em cada barra sem candle até `nxt`."""
+    seconds = int(bar.total_seconds())
+    missing = bar_index(nxt.timestamp, seconds) - bar_index(prev.timestamp, seconds)
+    return [
+        Tick(prev.timestamp + bar * i, prev.last, quote_usd) for i in range(1, missing)
     ]
 
 

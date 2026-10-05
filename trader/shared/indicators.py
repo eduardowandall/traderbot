@@ -135,6 +135,11 @@ def to_utc(ts: datetime) -> datetime:
     return ts.astimezone(UTC)
 
 
+def bar_index(ts: datetime, seconds: int) -> int:
+    """O número da barra de `seconds` segundos em que `ts` cai (em UTC)."""
+    return int(to_utc(ts).timestamp()) // seconds
+
+
 # barras sem tick que ainda são preenchidas com o fechamento anterior; um
 # buraco maior (notebook dormiu, backoff longo, emenda de arquivo de ticks)
 # zera a série, senão a janela vira barras planas (RSI 0/100, volatilidade ~0)
@@ -147,35 +152,49 @@ class BarSeries:
     A barra em formação usa o último preço: a série sempre termina no preço
     atual. Um tick de uma barra anterior à atual (fora de ordem)
     também só atualiza a barra atual. Um buraco de mais de `MAX_GAP_BARS`
-    recomeça a série do zero (a estratégia volta a aquecer).
+    entre ticks recomeça a série do zero (a estratégia volta a aquecer).
+
+    Candles só existem para barras com negócio (A4): no `seed`, uma barra sem
+    candle é "sem negócio", não "sem dados", e repete o fechamento anterior.
     """
 
     def __init__(self, interval: Interval, maxlen: int):
         self.interval = interval
         self._seconds = interval.seconds
+        self._maxlen = maxlen
         self._closes: deque[Decimal] = deque(maxlen=maxlen)
         self._bucket: int | None = None
 
     def update(self, ts: datetime, price: Decimal) -> bool:
         """Registra um preço; retorna True se abriu uma barra nova."""
-        bucket = int(to_utc(ts).timestamp()) // self._seconds
+        return self._add(ts, price, quiet=False)
+
+    def seed(
+        self, candles: Iterable[TickerData], until: datetime | None = None
+    ) -> None:
+        """`until` (agora): do último candle até lá também não houve negócio, e
+        a barra de `until` começa no último fechamento."""
+        for candle in sorted(candles, key=lambda c: to_utc(c.timestamp)):
+            self._add(candle.timestamp, candle.last, quiet=True)
+        if until is not None and self._closes:
+            self._add(until, self._closes[-1], quiet=True)
+
+    def _add(self, ts: datetime, price: Decimal, quiet: bool) -> bool:
+        """`quiet`: um buraco antes deste preço é falta de negócio, não do feed."""
+        bucket = bar_index(ts, self._seconds)
         if self._bucket is not None and bucket <= self._bucket:
             self._closes[-1] = price
             return False
         missing = 0 if self._bucket is None else bucket - self._bucket - 1
-        if missing > MAX_GAP_BARS:
+        if missing > MAX_GAP_BARS and not quiet:
             self._closes.clear()
         elif missing:
             # barras sem tick (feed quieto): repetem o fechamento anterior,
             # como os candles, para os indicadores cobrirem o mesmo tempo
-            self._closes.extend([self._closes[-1]] * missing)
+            self._closes.extend([self._closes[-1]] * min(missing, self._maxlen))
         self._closes.append(price)
         self._bucket = bucket
         return True
-
-    def seed(self, candles: Iterable[TickerData]) -> None:
-        for candle in sorted(candles, key=lambda c: to_utc(c.timestamp)):
-            self.update(candle.timestamp, candle.last)
 
     @property
     def closes(self) -> list[Decimal]:

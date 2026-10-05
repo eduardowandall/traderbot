@@ -112,15 +112,52 @@ class TestBarSeries:
         assert len(bars) == 2
 
     def test_seed_from_unsorted_candles(self):
-        def candle(minutes, price):
-            return TickerData(
-                timestamp=T0 + timedelta(minutes=minutes),
-                high=Decimal(0),
-                last=Decimal(price),
-                low=Decimal(0),
-                open=Decimal(0),
-            )
-
         bars = ind.BarSeries(Interval.MINUTE_1, maxlen=10)
-        bars.seed([candle(2, 30), candle(0, 10), candle(1, 20)])
+        bars.seed([_candle(2, 30), _candle(0, 10), _candle(1, 20)])
         assert bars.closes == D(10, 20, 30)
+
+
+class TestSeedAcrossQuietBars:
+    """A4: um candle só existe numa barra com negócio."""
+
+    def test_seed_fills_a_long_gap_with_the_previous_close(self):
+        bars = ind.BarSeries(Interval.MINUTE_1, maxlen=20)
+        bars.seed([_candle(0, 1), _candle(ind.MAX_GAP_BARS + 3, 2)])
+        assert bars.closes == D(*[1] * (ind.MAX_GAP_BARS + 3), 2)
+
+    def test_a_gap_longer_than_the_window_leaves_a_flat_window(self):
+        bars = ind.BarSeries(Interval.MINUTE_1, maxlen=4)
+        bars.seed([_candle(0, 7), _candle(10_000, 8)])
+        assert bars.closes == D(7, 7, 7, 8)
+
+    def test_seed_until_now_fills_from_the_last_trade(self):
+        # o último candle é o último negócio, talvez de horas atrás
+        bars = ind.BarSeries(Interval.MINUTE_1, maxlen=20)
+        now = T0 + timedelta(minutes=60)
+        bars.seed([_candle(0, 1), _candle(1, 2)], until=now)
+        assert bars.closes == D(*[2] * 20)  # a barra de agora começa em 2
+        assert not bars.update(now, Decimal(3))
+        assert bars.closes == D(*[2] * 19, 3)
+
+    def test_a_later_live_gap_still_restarts_the_series(self):
+        bars = ind.BarSeries(Interval.MINUTE_1, maxlen=20)
+        bars.seed([_candle(0, 1)], until=T0 + timedelta(minutes=30))
+        bars.update(T0 + timedelta(minutes=30), Decimal(2))
+        bars.update(T0 + timedelta(minutes=30 + ind.MAX_GAP_BARS + 2), Decimal(3))
+        assert bars.closes == D(3)
+
+    def test_without_until_the_gap_to_the_first_tick_is_a_live_gap(self):
+        bars = ind.BarSeries(Interval.MINUTE_1, maxlen=20)
+        bars.seed([_candle(0, 1)])
+        bars.update(T0 + timedelta(minutes=ind.MAX_GAP_BARS + 2), Decimal(2))
+        assert bars.closes == D(2)
+
+
+def _candle(minutes, price):
+    return TickerData(
+        timestamp=T0 + timedelta(minutes=minutes),
+        high=Decimal(0),
+        last=Decimal(price),
+        low=Decimal(0),
+        open=Decimal(0),
+    )

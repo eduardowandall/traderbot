@@ -2612,3 +2612,56 @@ is largest.
   stop at 16:14 and 17:02), and over the whole 4 h window 11 `max_hold` and
   1 `take_profit`, no trailing stop (the soak's pre-A14 run: 7 trailing stops
   of 15).
+
+#### A4. Warm-up across candle gaps — M (done 2026-10-05)
+Soak F1: Jupiter candles only exist for bars with trades, and
+`BarSeries.seed` treats every gap over `MAX_GAP_BARS` as an outage and clears
+the series, so a thin token warms up live (25 min for wma-composer) and its
+backtests reset all the time. A missing candle means "no trade": fill it
+forward when seeding and in replays; the reset stays for gaps in live ticks.
+The backtest headline of the liquid examples must not change.
+- **Design.**
+  - `BarSeries.seed` fills every gap between candles with the previous close
+    (at most `maxlen` bars: a longer gap is a flat window anyway) and never
+    clears. The **first `update` after a seed** fills the same way: the gap
+    from the last candle (the last trade) to the first live tick is also "no
+    trade", and for a thin token it is often hours. Every later `update` keeps
+    the `MAX_GAP_BARS` reset (a live tick gap is an outage).
+  - `ticks_from_candles` (the `--candles` replay) emits one flat tick at the
+    previous close at the start of every bar with no candle, carrying the
+    previous `quote_usd`, so the replay's `BarSeries` never sees a gap and the
+    strategy is asked once per quiet bar, as live (where the hub keeps
+    sending the unchanged price). `bars_in` then counts the quiet bars too, so
+    the warm-up + 20 bars check measures time, not trades. `--ticks` replays
+    are recorded live ticks: unchanged, their gaps still reset.
+  - Not changed: `ratio_candles` still keeps only the bars where both series
+    have a candle (a missing bar there is then filled forward like any other);
+    the live feed's reset.
+  - Checked by: `BarSeries` and `ticks_from_candles` unit tests (gap filled,
+    cap at `maxlen`, first live tick after a seed fills, the next gap resets,
+    `quote_usd` carried); a before/after replay of every `docs/examples/` spec
+    on one saved set of candles (liquid headlines identical; wma-composer warms
+    up and trades).
+- **Done.** In `trader/shared/indicators.py` (`BarSeries`, `bar_index`, now
+  also used by `bars_in` and `compare.py`) and `trader/backtest/ticks.py`
+  (`ticks_from_candles`, `_quiet_bars`). One change from the design (after
+  `/simplify`): instead of a one-shot "first `update` after a seed" flag,
+  `seed(candles, until=)` fills explicitly up to `until`, whose bar starts at
+  the last close; `SpecStrategy.setup` passes its clock (now live, the first
+  tick in a replay). Tests: `TestSeedAcrossQuietBars` (fill, cap at
+  `maxlen`, `until`, the later live reset, no `until` keeps the reset), quiet
+  bars and their `quote_usd`
+  in `TestCandlePaths`, and soak F1 itself (sparse candles plus a first tick
+  an hour later leave the spec warm); all fail on the old code. Old and new
+  code back to back on one saved set of 1,000 candles per example
+  (2026-10-05 ~22:30 UTC, `fee_bps` 30, slippage 10, network fee 0.002):
+
+  | Spec | Bars | Closed | Return |
+  |---|---|---|---|
+  | random, scalp-test, soak-metronome, soak-revert, sol-dip, target-value | unchanged | unchanged | unchanged |
+  | jup-sol-expr | 995 -> 1000 (5 quiet JUP bars) | 0 -> 0 | unchanged |
+  | wma-composer (NOBODY, 15 s) | 1000 -> 88,746 (14 days) | 0 -> 32 | 0% -> -0.63% |
+
+  The wma-composer replay takes ~15 s (99k ticks). `/smoke --spec
+  spec-wma-composer.json`: `aquecida` on the first tick (the soak: 25 min).
+  Left as is: `ratio_candles` keeps only bars with a candle in both series.

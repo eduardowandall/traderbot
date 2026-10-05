@@ -79,7 +79,8 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   (`{"ok": true, ...}` or `{"ok": false, "errors": [{"path","msg"}]}`, exit 1;
   decimals are strings); scripts and tests use that. It
   uses the spec's budget and max loss, replays each closed candle as an
-  interpolated open -> low -> high -> close path, and refuses fewer than
+  interpolated open -> low -> high -> close path (a bar with no candle is one
+  flat tick at the previous close: no trade, A4), and refuses fewer than
   warm-up + 20 bars. A non-stable input replays two candle series (the
   ratio, plus the quote's USD in `Tick.quote_usd`; a third column in tick
   CSVs) and measures equity in USD. Costs per leg: `fee_bps` +
@@ -121,7 +122,8 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
 - Sizing is `fixed_usd` or `pct_of_bucket` (of what the bucket may spend now).
 - Stops and exits never wait for the warm-up; only entries do. Warm-up is
   `spec.history()` (5x the period for EMA, 10x for RSI, capped at 900 bars).
-  After an exit, an entry must turn false once (re-arm) before firing again.
+  `BarSeries.seed(candles, until=clock())` fills candle gaps forward up to now;
+  only a gap of more than `MAX_GAP_BARS` between live ticks resets it (A4). After an exit, an entry must turn false once (re-arm) before firing again.
 - Strategies use `self.clock()` / `self.rng`, never `datetime.now()` / `random`,
   so backtests stay deterministic; predicates get the rng as `TickContext.rng`.
 

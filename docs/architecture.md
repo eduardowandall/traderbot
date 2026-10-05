@@ -144,7 +144,8 @@ Real mode is denied unless `real_trading_enabled = true`.
 `uv run main.py backtest spec.json` → `trader/backtest/spec.py:39`
 `backtest_spec`: candles (or a `--record-ticks` file) become ticks, each closed
 bar an interpolated path (rising bar open → low → high → close, falling bar
-open → high → low → close; `backtest/ticks.py`), and too few bars for the
+open → high → low → close; `backtest/ticks.py`); a bar with no candle (no
+trade) is one flat tick at the previous close (A4), and too few bars for the
 warm-up is an error. Result times are UTC like the ledger (candles are naive
 local time; `to_utc`). `Backtester` (`backtest/replay.py`) then runs hops 1–16
 with three substitutions:
@@ -190,7 +191,10 @@ loss, a cooldown, and `ttl_days` or `expires_at`. Prices are in the pair's
 quote token; money is in USD. `SpecStrategy` (`strategy_spec/strategy.py`):
 
 1. updates the bars once per tick (`IndicatorBank`; a gap of more than
-   `MAX_GAP_BARS` restarts the series and the spec warms up again);
+   `MAX_GAP_BARS` between live ticks restarts the series and the spec warms
+   up again; `setup` seeds the warm-up candles with `until=` the clock, so
+   the gaps between them and from the last one to now are filled forward
+   instead, since a missing candle means no trade, A4);
 2. with a position: the stop (always), then the exit conditions; exits never
    wait for the warm-up;
 3. without one: enters only when warm (`spec.history()` bars), not expired,
@@ -291,6 +295,6 @@ Any request that fails answers `{"ok": false, "error": "<Type>: <msg>", "kind": 
 ## 10. Where it's going
 
 The roadmap is [`plan.md`](plan.md): next, a first tiny-budget real run
-(warm-up across candle gaps and the wallet re-read rule first), then
+(the wallet re-read rule first), then
 perpetual futures. Specs stay
 files written from [`specs.md`](specs.md).

@@ -12,7 +12,7 @@ from decimal import Decimal
 from trader.backtest.replay import Backtester, BacktestResult
 from trader.backtest.ticks import Tick, ticks_from_candles
 from trader.execution.market.jupiter.candles import MAX_CANDLES
-from trader.shared.indicators import to_utc
+from trader.shared.indicators import bar_index
 from trader.shared.market import MarketData
 from trader.shared.market.pair import ratio_candles
 from trader.shared.models import SOLANA_MINTS, TickerData
@@ -47,9 +47,7 @@ async def fetch_ticks(data: MarketData, spec: StrategySpec, n: int) -> list[Tick
 
 def bars_in(ticks: list[Tick], interval: Interval) -> int:
     """Quantas barras do timeframe os ticks cobrem."""
-    return len(
-        {int(to_utc(t.timestamp).timestamp()) // interval.seconds for t in ticks}
-    )
+    return len({bar_index(t.timestamp, interval.seconds) for t in ticks})
 
 
 @dataclass(frozen=True)
