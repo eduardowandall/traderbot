@@ -2,7 +2,7 @@
   "version": 1,
   "name": "random",
   "agent_id": "example",
-  "rationale": "Antiga RandomStrategy, para testes: compra e vende quando dois sorteios (5% e 10%) acertam no mesmo tick, ou seja ~0.5% dos ticks. O stop de 50% e so o obrigatorio. Com --seed os sorteios se repetem.",
+  "rationale": "Antiga RandomStrategy, para testes: compra quando dois sorteios (5% e 20%) acertam no mesmo tick (~1% dos ticks) e vende quando 5% e 10% acertam (~0.5%). Um sorteio por tick: ao vivo um tick por segundo; no backtest de candles 4 a 25 por barra. O stop de 50% e so o obrigatorio. Com --seed os sorteios se repetem.",
   "symbol": "SOL-USDC",
   "timeframe": "15_SECOND",
   "entry": {

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime
 from decimal import Decimal
 from unittest import mock
@@ -28,7 +29,10 @@ from trader.shared.trading_service.protocol import (
     OrderReply,
     TradeServiceError,
 )
-from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
+from trader.strategy.bot.async_websocket_bot import (
+    AsyncWebsocketTradingBot,
+    format_price,
+)
 from trader.strategy.bot.config import BotConfig
 
 ONE = Decimal(1)
@@ -412,3 +416,26 @@ async def test_repeated_startup_failures_alert_the_owner_once():
         c for c in notifier.send_message.call_args_list if "não consegue" in str(c)
     ]
     assert len(alerts) == 1
+
+
+def test_prices_are_logged_with_significant_digits():
+    assert format_price(Decimal("121.48")) == "121.48000"
+    assert format_price(Decimal("0.000606123456")) == "0.00060612346"
+    assert format_price(Decimal("12345678.9")) == "12345679"
+    assert format_price(Decimal(0)) == "0.00000000"
+
+
+async def test_the_ticker_is_logged_once_per_bar(caplog):
+    # soak F3: uma linha por tick (1/s) enchia o arquivo; agora uma por barra
+    prices = [Decimal("1")] * 4
+    bot = _bot(_market(prices), StubStrategy())  # barras de 15s
+    clock = iter([100.0, 101.0, 114.9, 115.0])
+    bot.wall_clock = lambda: next(clock)
+    await bot._startup()
+
+    with caplog.at_level(logging.DEBUG, logger="bot"):
+        for _ in prices:
+            await bot._tick()
+
+    lines = [r for r in caplog.records if "BONK-USDC" in r.getMessage()]
+    assert len(lines) == 2  # barras 6 (100-114.9) e 7 (115)

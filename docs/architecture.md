@@ -112,7 +112,7 @@ whether it closes the position, budget rules don't apply, and
 | Signal state (entry price, peak, cooldown, re-arm, expiry) | `SpecStrategy` | Restored through `resume()` from the bucket snapshot. |
 | Paper balances | `data_dir()/paper-wallet.json` (`paper/wallet.py`) | Created with 100 USDC + 0.5 SOL; delete it to start over. |
 | Policy | `policy_file()` (`policy.toml`, untracked) | Model: `policy.example.toml`. Paper has roomy limits by default. |
-| Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. |
+| Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. `websockets` at INFO; the bot writes the ticker and open-position lines once per bar (`_log_bar`), prices with 8 significant digits (`format_price`). |
 
 `trader/shared/paths.py` resolves all of them from `TRADER_DATA_DIR` /
 `TRADER_POLICY_FILE` / `TRADER_LOG_DIR` (relative to the project root), never

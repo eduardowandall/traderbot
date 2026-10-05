@@ -130,7 +130,7 @@ take `"ma": "sma" | "ema" | "wma"` (default `sma`).
 | `price_below` | `value` (USD) | price < value |
 | `price_above` | `value` (USD) | price > value |
 | `volatility_below` | `window`, `pct` | std. dev. of the last `window` bar returns < pct% |
-| `random_chance` | `pct` (1–100, integer) | a random draw hits, `pct`% of the time (for tests; `--seed` makes it repeatable) |
+| `random_chance` | `pct` (1–100, integer) | a random draw hits, `pct`% of the draws; one draw **per tick**, not per unit of time: live, one tick per second for any token (the hub's pace); a candle backtest, 4 to 25 ticks per bar (for tests; `--seed` makes it repeatable) |
 | `expr` | `expr` (text, max 200 chars) | the expression holds; see below |
 
 ### `expr`: a restricted expression

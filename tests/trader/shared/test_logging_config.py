@@ -17,6 +17,12 @@ def test_http_loggers_do_not_log_urls_with_secrets():
         assert level >= logging.WARNING, name
 
 
+def test_websocket_frames_stay_out_of_the_log_file():
+    # soak F3: frames em DEBUG eram 35-50% das linhas
+    level = logging_config.LOGGING["loggers"]["websockets"]["level"]
+    assert logging.getLevelNamesMapping()[level] >= logging.INFO
+
+
 def test_secrets_are_redacted_even_in_tracebacks():
     url = "https://mainnet.helius-rpc.com/?api-key=abc-123"
     telegram = "https://api.telegram.org/bot123456:AA-secret_x/sendMessage"

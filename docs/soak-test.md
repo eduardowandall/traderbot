@@ -5,7 +5,8 @@ one-week paper soak" in the old plan, now in `history.md`), run with B3's split
 instead of `run`: one `serve paper` and one `connect` per spec. This file
 records what was checked, how, and what was found. Anything here that needs
 code becomes an item in `plan.md`. Open findings as of 2026-10-05: F1 is A4;
-F3, F5 and F8 are A1; F2, F4 and F7 are fixed; F6 is by design.
+F2, F4 and F7 are fixed, and F3, F5 and F8 too (A1, in `history.md`); F6 is by
+design. The F8 note on the local `policy.toml` comments is the owner's.
 
 - **Started:** 2026-10-03 23:30 local (UTC+1). **This report:** 2026-10-04,
   about 12.5 h in.

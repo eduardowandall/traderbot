@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "soak-metronome",
+  "agent_id": "claude",
+  "rationale": "Para o soak (A2), nao para lucro: um ritmo de trades quase fixo em SOL-USDC. Entra quando um sorteio de 1% acerta (um sorteio por tick, ao vivo um por segundo: ~100 s de espera), sai apos 5 min (max_hold) ou no stop de 2%, e espera 12 min (cooldown). Ciclo de ~19 min, ~3 round trips por hora de 5 USD; a ~0.035 USD de custo em paper por round trip, os 15 USD de perda maxima duram ~5 dias.",
+  "symbol": "SOL-USDC",
+  "timeframe": "1_MINUTE",
+  "entry": {
+    "mode": "all",
+    "conditions": [{"type": "random_chance", "pct": 1}]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 2},
+    "mode": "any",
+    "conditions": [{"type": "max_hold", "minutes": 5}]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 5},
+  "budget_usd": 15,
+  "max_loss_usd": 15,
+  "cooldown_minutes": 12,
+  "ttl_days": 7
+}

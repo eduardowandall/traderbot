@@ -33,7 +33,7 @@ it before the code. Track progress in §5, record decisions in §9.
 ## 2. Where we are
 
 **Overall: about 87%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
-and goal 6 is scored on its own so a new goal doesn't hide progress). 731
+and goal 6 is scored on its own so a new goal doesn't hide progress). 735
 tests. Nothing has traded real money yet: the next stretch of work leads to a
 first tiny-budget real run.
 
@@ -76,20 +76,12 @@ first tiny-budget real run.
 In order. Each item ships on its own with the suite green (`/check`). Size:
 **S** under an hour, **M** several modules, **L** a design change.
 
-### A1. Soak quick fixes — S
-From [`soak-test.md`](soak-test.md):
-- F5: `random_chance` fires per tick, not per unit of time (`specs.md`, and
-  live tick rates vary by token); fix the stale rationale of
-  `spec-random.json`.
-- F8: log sell fills at INFO like buys (`account.py`, `ORDER PLACED`); print
-  prices with significant digits instead of 9 decimals (`log_ticker`).
-- F3: keep `websockets.client` at INFO in the file handler and log the ticker
-  line once per bar, so a long run keeps more than a few hours of logs.
-
 ### A2. Owner: finish the paper soak — owner
 Running on the current build since 2026-10-05, ends about 2026-10-10. Connect
 two liquid specs that trade often (a new `spec_id` each), so two buckets
-compete for the order lock and the wallet; take the end-of-week memory
+compete for the order lock and the wallet: `docs/examples/spec-soak-metronome.json`
+and `spec-soak-revert.json` (SOL-USDC, 5 USD legs, about 3 round trips an
+hour each, budget and max loss 15 USD, which lasts about 5 days in paper); take the end-of-week memory
 sample. At the end, move `soak-test.md` into `history.md`; what goes wrong
 becomes an item here.
 
@@ -178,7 +170,7 @@ ledger schema, so it waits for the end of a paper soak.
 
 | Item | Status | Notes |
 |---|---|---|
-| A1 Soak quick fixes | open | |
+| A1 Soak quick fixes | done | 2026-10-05; in `history.md` |
 | A2 Owner: paper soak | in progress | Restarted on the current build 2026-10-05 |
 | A3 Resolve UNCONFIRMED | open | Required before A6 |
 | A4 Warm-up across candle gaps | open | |

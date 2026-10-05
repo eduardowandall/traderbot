@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -179,6 +180,17 @@ async def test_sell_records_fill_and_realized_pnl():
     assert acc.book.position is None
     assert entry and entry.exit_order == order
     assert acc.book.realized_usd == Decimal("5")
+
+
+async def test_buy_and_sell_fills_are_logged_at_info(caplog):
+    # soak F8: a venda saía em DEBUG, e o log do serve mostrava metade
+    acc = _usdc_sol_account(sol="1")
+    with caplog.at_level(logging.INFO, logger=acc.logger.name):
+        await acc.buy(Decimal("100"), Decimal("0.5"))
+        await acc.sell(Decimal("110"), Decimal("0.5"))
+
+    placed = [r for r in caplog.records if "ORDER PLACED" in r.getMessage()]
+    assert [r.levelno for r in placed] == [logging.INFO, logging.INFO]
 
 
 async def test_sell_is_capped_at_wallet_balance():

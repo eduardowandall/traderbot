@@ -1834,3 +1834,34 @@ Telegram approval and a service entrypoint stay open. No ledger schema change:
   chose Jupiter Perps, long and short, leverage set by the spec and capped by
   `max_leverage` (default 3), a venue-side stop on every real perp position,
   and B8 after B6. Its ledger schema bump waits for the end of the paper soak.
+
+## Renewed plan, items A (from 2026-10-05)
+
+#### A1. Soak quick fixes — S (done 2026-10-05)
+From [`soak-test.md`](soak-test.md):
+- F5: `random_chance` fires per tick, not per unit of time (`specs.md`, and
+  live tick rates vary by token); fix the stale rationale of
+  `spec-random.json`.
+- F8: log sell fills at INFO like buys (`account.py`, `ORDER PLACED`); print
+  prices with significant digits instead of 9 decimals (`log_ticker`).
+- F3: keep `websockets.client` at INFO in the file handler and log the ticker
+  line once per bar, so a long run keeps more than a few hours of logs.
+- **Design.** No behaviour, spec id or schema change.
+  - F5: since B7 the hub paces every bot at one tick per second whatever the
+    token, so live draws are per second; a candle replay makes 4 to 25 ticks
+    per bar (`PATH_STEPS`). `specs.md` says "per tick" and gives both rates;
+    `spec-random.json`'s rationale names its real draws (5%x20% entry,
+    5%x10% exit). The rationale is metadata, so the id stays.
+  - F8: the sell `ORDER PLACED` line in `account.py` moves to INFO.
+    `format_price` (in `async_websocket_bot.py`) prints 8 significant digits
+    without exponent (`121.48000`, `0.00060612300`); `log_ticker` and
+    `log_position` use it.
+  - F3: `LOGGING["loggers"]["websockets"]` at INFO (covers
+    `websockets.client`; the console already shows only WARNING up). The bot
+    keeps the bar of the last ticker line (`int(now / timeframe seconds)`,
+    the timeframe from `strategy.warmup()`) and writes the ticker and
+    open-position lines only on the first tick of a new bar; orders and
+    warnings are logged as before.
+- **Done.** As designed. Seen in an isolated `/smoke` of `spec-soak-metronome.json`
+  (7 min): the connect log had 24 lines (one ticker line a minute), the serve
+  log both fills at INFO and no websocket frames.

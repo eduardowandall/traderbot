@@ -60,6 +60,10 @@ class AsyncWebsocketTradingBot:
         self.denial_cooldown = 30.0
         self.monotonic = time.monotonic
         self._orders_paused_until = 0.0
+        # preço e posição vão ao log uma vez por barra (F3), não por tick
+        self.wall_clock = time.time
+        self._bar_seconds = 1
+        self._logged_bar: int | None = None
 
     async def process_market_data(
         self, current_price: Decimal, snapshot: BucketSnapshot
@@ -163,6 +167,7 @@ class AsyncWebsocketTradingBot:
             await self._resume_strategy()
             self._resumed = True
         interval, count = self.strategy.warmup()
+        self._bar_seconds = interval.seconds
         self.strategy.setup(
             await self.market.get_candles(self.output_mint, interval, count)
         )
@@ -184,13 +189,21 @@ class AsyncWebsocketTradingBot:
         if self.on_tick is not None:
             # o replay mede o patrimônio em USD com o USD da cotação
             self.on_tick(datetime.now(UTC), current_price, snapshot.quote_usd)
-        log_ticker(self.symbol, current_price, snapshot.pnl_summary)
+        self._log_bar(current_price, snapshot)
 
         order = await self.process_market_data(current_price, snapshot)
         if order:
             await self._report_order(order, current_price)
-        elif snapshot.position:
-            log_position(snapshot.position, current_price, snapshot.quote_usd)
+
+    def _log_bar(self, price: Decimal, snapshot: BucketSnapshot):
+        """Preço e posição no primeiro tick de cada barra do timeframe."""
+        bar = int(self.wall_clock() // self._bar_seconds)
+        if bar == self._logged_bar:
+            return
+        self._logged_bar = bar
+        log_ticker(self.symbol, price, snapshot.pnl_summary)
+        if snapshot.position:
+            log_position(snapshot.position, price, snapshot.quote_usd)
 
     async def _report_order(self, order: Order, current_price: Decimal):
         log_placed_order(order)
@@ -209,11 +222,20 @@ class AsyncWebsocketTradingBot:
         return min(backoff * 2, self.error_backoff_max)
 
 
+PRICE_DIGITS = 8  # algarismos significativos dos preços no log
+
+
+def format_price(price: Decimal, digits: int = PRICE_DIGITS) -> str:
+    """`digits` algarismos significativos, sem expoente (0.00060612300)."""
+    places = max(0, digits - 1 - price.adjusted()) if price else digits
+    return f"{price:.{places}f}"
+
+
 def log_ticker(symbol: str, price: Decimal, pnl_summary: str | None = None):
-    # o feed de preços da Jupiter cota em USD
+    # no token de cotação do par (USD em USDC/USDT)
     suffix = f" {pnl_summary}" if pnl_summary else ""
     bot_logger.debug(
-        f"[blue]{symbol}[/blue] @ USD {price:.9f}.{suffix}",
+        f"[blue]{symbol}[/blue] @ {format_price(price)}.{suffix}",
         extra={"markup": True},
     )
 
@@ -252,6 +274,6 @@ def log_position(position: Position, current_price: Decimal, quote_usd: Decimal 
     unrealized = "" if usd is None else f" (~${usd:+.4f})"
 
     bot_logger.debug(
-        f"LONG {position.entry_order.quantity:.8f} @ {position.entry_order.quote_price:.8f}. PNL: {pnl_str}{unrealized}",
+        f"LONG {position.entry_order.quantity:.8f} @ {format_price(position.entry_order.quote_price)}. PNL: {pnl_str}{unrealized}",
         extra={"markup": True},
     )

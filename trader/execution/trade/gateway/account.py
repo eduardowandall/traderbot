@@ -408,7 +408,7 @@ class AsyncAccount:
             price,
             usd,
         )
-        self.logger.debug(
+        self.logger.info(
             f"ORDER PLACED: order={asdict(order)} position={asdict(position)}",
             extra=asdict(order),
         )

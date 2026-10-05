@@ -157,6 +157,8 @@ LOGGING = {
         "httpx": {"level": "WARNING"},
         "httpx2": {"level": "WARNING"},
         "httpcore2": {"level": "ERROR"},
+        # cada frame do websocket em DEBUG era 35-50% do arquivo (soak F3)
+        "websockets": {"level": "INFO"},
     },
 }
 

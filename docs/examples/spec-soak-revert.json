@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "soak-revert",
+  "agent_id": "claude",
+  "rationale": "Para o soak (A2): uma segunda spec em SOL-USDC que dispara pelo mercado, para dois buckets disputarem a trava de ordens e a carteira. Compra quando o preco fica 0.05% abaixo da SMA de 40 barras de 15 s (10 min); vende com +0.15%, apos 8 min ou no trailing stop de 0.5%; 6 min de cooldown. ~3.5 round trips por hora de 5 USD no backtest; a ~0.036 USD de custo por round trip, os 15 USD de perda maxima duram ~4-5 dias.",
+  "symbol": "SOL-USDC",
+  "timeframe": "15_SECOND",
+  "entry": {
+    "mode": "all",
+    "conditions": [{"type": "expr", "expr": "price < sma(40) * 0.9995"}]
+  },
+  "exit": {
+    "stop": {"type": "trailing_stop", "pct": 0.5},
+    "mode": "any",
+    "conditions": [
+      {"type": "take_profit", "pct": 0.15},
+      {"type": "max_hold", "minutes": 8}
+    ]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 5},
+  "budget_usd": 15,
+  "max_loss_usd": 15,
+  "cooldown_minutes": 6,
+  "ttl_days": 7
+}
