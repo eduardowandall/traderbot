@@ -20,6 +20,7 @@ from trader.shared.models.position import Position
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
     OrderReply,
+    PriceUnavailableError,
     ReplyStatus,
     TradeServiceError,
 )
@@ -30,6 +31,8 @@ bot_logger = logging.getLogger("bot")
 
 # falhas seguidas de inicialização antes de avisar o dono
 STARTUP_ALERT_AFTER = 5
+# pausa depois de cada fill, já reportado (se ela fica é a A5)
+POST_FILL_PAUSE_SECONDS = 2.0
 
 
 class AsyncWebsocketTradingBot:
@@ -89,8 +92,6 @@ class AsyncWebsocketTradingBot:
             )
             self._orders_paused_until = self.monotonic() + self.denial_cooldown
             return None
-        # da tempo da wallet atualizar a operacao feita.
-        await asyncio.sleep(2.0)  # TODO: check if this is needed
         return reply.order
 
     def stop(self):
@@ -193,7 +194,10 @@ class AsyncWebsocketTradingBot:
 
         order = await self.process_market_data(current_price, snapshot)
         if order:
+            # reporta antes da pausa: um `connect` parado logo depois do fill
+            # ainda loga e notifica a ordem (F11)
             await self._report_order(order, current_price)
+            await asyncio.sleep(POST_FILL_PAUSE_SECONDS)
 
     def _log_bar(self, price: Decimal, snapshot: BucketSnapshot):
         """Preço e posição no primeiro tick de cada barra do timeframe."""
@@ -217,7 +221,13 @@ class AsyncWebsocketTradingBot:
 
     async def _on_error(self, ex: Exception, backoff: float) -> float:
         """Trata um erro do loop e retorna o próximo backoff."""
-        self.logger.error(f"ERROR: Erro no loop principal: {str(ex)}", exc_info=True)
+        if isinstance(ex, PriceUnavailableError):
+            # esperado (reinício do trade-runner, Price API fora): sem traceback
+            self.logger.warning(f"Sem preço agora: {ex}")
+        else:
+            self.logger.error(
+                f"ERROR: Erro no loop principal: {str(ex)}", exc_info=True
+            )
         await asyncio.sleep(backoff)
         return min(backoff * 2, self.error_backoff_max)
 

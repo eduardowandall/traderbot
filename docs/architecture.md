@@ -95,7 +95,7 @@ the ledger or the policy.
 | 13 | `account.py:174` `_to_order` → `trader/execution/trade/gateway/orders.py:33` `order_from_fill` | Real amounts, else the quote's; USD rates; never raises. | A trade that happened is never lost. |
 | 14 | `account.py:194` `_record_fill` → `gateway.py:197` `record_fill` → `intents.py:179` `attach_order` | Stores the order JSON, cost and PnL columns on the (EXECUTED) row; a failure is logged, not raised. `book.open(order)` (`models/book.py:99`) opens the position in memory. | The ledger is the truth; the book is its in-memory copy. |
 | 15 | `service.py:163` (after `_place`) | `_check_max_loss`: realized loss past `max_loss_usd` retires the bucket; `_close_if_retiring` (`:173`) sells a leftover once per order. | Exits don't depend on the strategy. |
-| 16 | `async_websocket_bot.py:78` `_handle_reply`, `:197` `_report_order` | Filled → log and Telegram, with the bucket after the fill (realized PnL; an open position marked to market, `Position.unrealized_usd`). Denied/rejected → pause orders 30s. Error → loop backoff. | The strategy keeps getting prices while orders pause. |
+| 16 | `async_websocket_bot.py:83` `_handle_reply`, `:212` `_report_order` | Filled → log and Telegram, with the bucket after the fill (realized PnL; an open position marked to market, `Position.unrealized_usd`), then a 2 s pause (`_tick`). Denied/rejected → pause orders 30s. Error → loop backoff; no price from the hub (`PriceUnavailableError`) is a WARNING, anything else an ERROR with its traceback (`:222` `_on_error`). | The strategy keeps getting prices while orders pause; a fill is reported even if the `connect` stops right after it. |
 
 A **sell** takes the same path with `account.sell` (`account.py:386`): the
 quantity is capped at the position and at the wallet, the idempotency key is
@@ -145,12 +145,17 @@ Real mode is denied unless `real_trading_enabled = true`.
 `backtest_spec`: candles (or a `--record-ticks` file) become ticks, each closed
 bar an interpolated path (rising bar open → low → high → close, falling bar
 open → high → low → close; `backtest/ticks.py`), and too few bars for the
-warm-up is an error. `Backtester` (`backtest/replay.py`) then runs hops 1–16
+warm-up is an error. Result times are UTC like the ledger (candles are naive
+local time; `to_utc`). `Backtester` (`backtest/replay.py`) then runs hops 1–16
 with three substitutions:
 
 - quotes come from `ReplayQuoteClient` (tick price minus `fee_bps +
-  slippage_bps`, and minus `network_fee_usd` per leg, since the replay wallet
-  holds no SOL for fees); the executor adds no slippage of its own. The CLI
+  slippage_bps`), so a fill is what it would be live. `ReplayExecutor` adds
+  no slippage of its own and reports `network_fee_usd` as each leg's
+  `fee_lamports` at the replay's SOL price (`ReplayPrices.sol_usd`: the tick
+  when a side is SOL, else the fixed `REPLAY_SOL_USD`), so the ledger books
+  it as a cost like live (A14); the wallet holds no SOL, so equity subtracts
+  the fees paid (`fees_usd`). The CLI
   measures `fee_bps` and `network_fee_usd` on Jupiter at the start
   (`backtest/costs.py`: a buy+sell quote at the spec's size, and the base fee
   plus the policy's priority-fee cap at the SOL price) unless both are given;
@@ -272,11 +277,16 @@ together.
 
 | Request | Reply | Notes |
 |---|---|---|
-| `{"op": "hello", "token", "terms"}` | `{"ok": true, "bucket"}` or `{"ok": false, "error"}` | `SpecTerms` (id, name, symbol, budget, max loss, largest buy, expiry; decimals as strings) checked against `serve`'s policy; opens or re-attaches to `strategy:<id>`; refuses a bad token or a second live connection for the same spec |
+| `{"op": "hello", "token", "terms"}` | `{"ok": true, "bucket"}` | `SpecTerms` (id, name, symbol, budget, max loss, largest buy, expiry; decimals as strings) checked against `serve`'s policy; opens or re-attaches to `strategy:<id>`; refuses a bad token or a second live connection for the same spec |
 | `{"op": "bucket"}` | `{"ok": true, "snapshot"}` | `BucketSnapshot` (position with its orders, PnL, status) |
 | `{"op": "submit", "request"}` | `{"ok": true, "reply"}` | `OrderReply` (filled / denied / rejected / error); the client always sends an idempotency key, so a resend after a reconnect executes once |
-| `{"op": "price", "mint"}` | `{"ok": true, "price", "age"}` | From the price hub; a price older than 30s is an error, never a value |
+| `{"op": "price", "mint"}` | `{"ok": true, "price", "age"}` | From the price hub; a price older than 30s is an error, never a value. Requests for a mint whose first poll is in flight wait for it |
 | `{"op": "candles", "mint", "interval", "qty"}` | `{"ok": true, "candles": [...]}` | Warm-up candles: `qty` 1–1000, `interval` an `Interval` value; each candle `{timestamp, open, high, low, last}`, decimals as strings |
+
+Any request that fails answers `{"ok": false, "error": "<Type>: <msg>", "kind": "<Type>"}`
+(`TradeRunner._answer`) and the connection stays open; `connect` turns kind
+`StalePriceError` into `PriceUnavailableError` and anything else into
+`TradeServiceError`.
 
 ## 10. Where it's going
 

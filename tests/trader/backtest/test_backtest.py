@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -15,6 +15,8 @@ from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 ONE = Decimal(1)
+# a taxa vira lamports ao SOL do tick: arredonda abaixo de 1e-6 USD
+LAMPORT_ROUNDING = Decimal("0.000001")
 
 START = datetime(2026, 9, 1, 12, 0)
 
@@ -69,6 +71,14 @@ async def _run(strategy, prices, **kwargs):
 
 
 class TestBacktester:
+    async def test_times_are_utc_like_the_ledger(self):
+        # soak F13: ticks de candles vêm em hora local sem fuso
+        result = await _run(BuyThenSell(sell_at=3), [100, 105, 110])
+
+        times = [result.start, result.end, *(t.timestamp for t in result.trades)]
+        assert all(ts.utcoffset() == timedelta(0) for ts in times)
+        assert result.start == START.astimezone(UTC)  # o mesmo instante
+
     async def test_round_trip_pnl_with_fees(self):
         result = await _run(
             BuyThenSell(sell_at=3), [100, 105, 110], fee_bps=Decimal("0")
@@ -86,9 +96,27 @@ class TestBacktester:
         result = await _run(
             BuyThenSell(3), [100, 105, 110], fee_bps=Decimal("0"), network_fee_usd=fee
         )
-        # compra: 100 USD -> 1 - 0.005 SOL; venda: 0.995 x 110 - 0.5 USD
-        assert result.final_equity == Decimal("0.995") * 110 - fee
-        assert result.trades[1].realized_pnl == result.final_equity - 100
+        # A14: a taxa fica fora do fill, como ao vivo: compra 1 SOL a 100 e
+        # vende a 110; as duas taxas saem do PnL e do patrimônio
+        assert result.trades[0].price == Decimal(100)
+        assert result.trades[0].quantity == ONE
+        assert abs(result.final_equity - (110 - 2 * fee)) < LAMPORT_ROUNDING
+        realized = result.trades[1].realized_pnl
+        assert realized is not None
+        assert abs(realized - (10 - 2 * fee)) < LAMPORT_ROUNDING
+        assert abs(result.round_trip_costs.cost_usd - 2 * fee) < LAMPORT_ROUNDING
+
+    async def test_stops_are_measured_from_a_fill_without_the_network_fee(self):
+        # soak F9: com a taxa no fill, a entrada ficava 0.5% acima do tick e
+        # um stop de 1% disparava num recuo de 0.5%
+        strategy = _spec(
+            entry={"conditions": [{"type": "random_chance", "pct": 100}]},
+            exit={"stop": {"type": "stop_loss", "pct": 1}, "conditions": []},
+        )
+        result = await _run(
+            strategy, [100, 99.4, 99.4], fee_bps=Decimal(0), network_fee_usd=Decimal(1)
+        )
+        assert [t.side for t in result.trades] == [OrderSide.BUY]
 
     async def test_negative_costs_are_refused(self):
         with pytest.raises(ValueError, match="negativos"):

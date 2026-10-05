@@ -23,7 +23,7 @@ from trader.shared.models.costs import SIMULATED
 
 def paper_provider(
     wallet: SimulatedWallet,
-    jupiter_client=None,  # AsyncJupiterClient ou substituto (replay)
+    jupiter_client=None,  # AsyncJupiterClient ou substituto (testes)
     max_price_impact_pct: Decimal | None = DEFAULT_MAX_PRICE_IMPACT_PCT,
     max_slippage_bps: int = DEFAULT_MAX_SLIPPAGE_BPS,
     fee_lamports: int = DEFAULT_FEE_LAMPORTS,

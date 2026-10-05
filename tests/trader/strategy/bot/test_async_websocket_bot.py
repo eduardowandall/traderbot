@@ -6,7 +6,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import StubStrategy, memory_gateway, served
+from factories import StubStrategy, make_order, memory_gateway, served
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
@@ -27,6 +27,7 @@ from trader.shared.trading_service.protocol import (
     BucketSnapshot,
     BucketStatus,
     OrderReply,
+    PriceUnavailableError,
     TradeServiceError,
 )
 from trader.strategy.bot.async_websocket_bot import (
@@ -213,6 +214,42 @@ async def test_errors_back_off_exponentially_and_reset():
         await bot.arun()
 
     assert [c.args[0] for c in sleep.await_args_list] == [1.0, 2.0, 4.0, 1.0]
+
+
+async def test_no_price_is_a_warning_without_traceback(caplog):
+    # soak F10: um trade-runner recém-iniciado sem preço não é defeito do loop
+    market = _market(
+        [PriceUnavailableError("StalePriceError: sem preço"), KeyboardInterrupt()]
+    )
+    bot = _bot(market, StubStrategy())
+
+    with mock.patch("asyncio.sleep") as sleep:
+        await bot.arun()
+
+    assert [c.args[0] for c in sleep.await_args_list] == [1.0]  # o backoff fica
+    warned = [r for r in caplog.records if "Sem preço agora" in r.getMessage()]
+    assert warned and warned[0].levelno == logging.WARNING
+    assert warned[0].exc_info is None
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_a_fill_is_reported_before_the_pause():
+    # soak F11: um `connect` parado nos 2 s depois do fill não o reportava
+    inbox = Inbox()
+    trader = FakeTrader([OrderReply.of_fill(make_order(output_mint=BONK.mint))])
+    strategy = mock.Mock(wraps=StubStrategy())
+    strategy.on_market_refresh.return_value = OrderSignal(OrderSide.BUY, ONE)
+    bot = _bot(_market([ONE, KeyboardInterrupt()]), strategy, trader)
+    bot.notification_service = inbox
+    seen_at_pause: list[list[str]] = []
+
+    async def pause(seconds):
+        seen_at_pause.append(list(inbox.messages))
+
+    with mock.patch("asyncio.sleep", side_effect=pause):
+        await bot.arun()
+
+    assert any(m.startswith("Ordem executada") for m in seen_at_pause[0])
 
 
 async def test_stop_ends_the_loop():

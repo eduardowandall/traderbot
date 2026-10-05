@@ -149,7 +149,8 @@ class TradeRunner:
         except Exception as ex:
             # recusas e erros viram resposta: a conexão continua
             logger.warning(f"Pedido recusado: {type(ex).__name__}: {ex}")
-            return {"ok": False, "error": f"{type(ex).__name__}: {ex}"}
+            kind = type(ex).__name__  # o lado da estratégia escolhe a exceção
+            return {"ok": False, "error": f"{kind}: {ex}", "kind": kind}
 
     async def _dispatch(self, session: _Session, message: dict) -> dict:
         op = message.get("op")

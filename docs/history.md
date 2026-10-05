@@ -2504,3 +2504,111 @@ intent without one stays blocking. Decide the paper behaviour in the design.
   resolved it at start, with the wallet's actual fill. The on-chain path is
   covered by unit tests only (no live RPC in agent sessions); its first real
   use is the owner's.
+
+#### A13. Soak II small fixes — S (done 2026-10-05)
+From the second soak run (A2 in `history.md`, F10-F13). No schema or spec id
+change.
+- F10: `PriceHub` keeps the first poll of a new mint in flight and every
+  `price` request for that mint awaits it, so `connect`s that say `hello`
+  together after a restart don't get `StalePriceError`. The bot logs a
+  stale-price reply as a WARNING without a traceback (it is not a bug in the
+  loop).
+- F11: the bot logs the fill and sends the Telegram message before the 2 s
+  pause, so a `connect` stopped right after a fill still reports it.
+- F12: a test where several buckets submit at once (`asyncio.gather`) on one
+  `TradeService`: orders run one at a time, every bucket stays within its
+  budget, and the wallet never goes negative.
+- F13: `backtest` prints `start`, `end` and trade times in UTC, like the
+  ledger.
+- **Design.**
+  - F10, hub: `PriceHub._watch` keeps one `asyncio.Task` per mint whose first
+    poll is in flight (`_first_polls`); a request for a mint that is watched
+    but still has no price awaits that task before reading. A failed first
+    poll still ends in `StalePriceError` (no price, no decision). The
+    `usd_prices` path goes through `_watch` too, so it gets the same fix.
+  - F10, bot: a refused answer carries the exception's name (`"kind"`,
+    added next to `"error"` in `TradeRunner._answer`; old clients ignore
+    it). `RemoteTradeClient._call` raises `PriceUnavailableError` (a
+    `TradeServiceError` in `shared/trading_service/protocol.py`) for kind
+    `StalePriceError`, and the bot's `_on_error` logs that one as a WARNING
+    without a traceback; the backoff stays.
+  - F11: the 2 s pause moves out of `_handle_reply` to `_tick`, after
+    `_report_order`: same pause, but the fill is logged and notified first.
+  - F12: `test_trade_service.py` gets a test where three buckets submit
+    buys and sells at once with `asyncio.gather`; the quote client yields
+    to the loop and counts calls in flight, which must never pass one, and
+    no bucket spends past its budget or the wallet.
+  - F13: `Backtester.run` stores `start`, `end` and trade times through
+    `to_utc` (candle ticks are naive local time, tick files are already
+    UTC), so `--json` prints `+00:00`; the readable summary says
+    `período (UTC)`.
+- **Done.** As designed. The hub test holds the first poll open and checks
+  that a second `price` and a `usd_prices` wait for it (one API call), and
+  that a waiter that gives up doesn't cancel it. The concurrency test fails
+  without the order lock (three quotes in flight at once). An isolated
+  `/smoke` of `spec-random.json` logged its buy in the same second as the
+  signal (2 s later before), with no ERROR.
+
+#### A14. Replay fills like live fills — M (done 2026-10-05)
+Soak F9: the replay takes `network_fee_usd` out of the swap output, so a
+replay fill is fee/size worse than a live one (25 bps at 5 USD), and every
+exit measured from `entry_price` (stops, targets, trailing peaks, `expr`)
+fires that much earlier than live. In paper and real the fee is paid in SOL,
+outside the fill. Charge the replay's network fee outside the fill as well
+(the leg's cost, off the bucket's PnL and equity), so a replay entry is the
+tick plus slippage and pool fee, as live. Done when `round_trip_costs` and
+the realized PnL of a spec without position-relative exits are unchanged,
+the revert soak spec's exits on the soak afternoon look like live (mostly
+`max_hold`), and the headline change of each `docs/examples/` spec is
+recorded here. Before A6: a first real run uses a tiny budget, where the gap
+is largest.
+- **Design.** Only `trader/backtest/` changes; live paths, the ledger schema
+  and spec ids stay.
+  - `ReplayQuoteClient` prices a leg at the tick minus `fee_bps +
+    slippage_bps` only: no network fee in the output, so the fill (and
+    `entry_price`) is the tick plus slippage and pool fee, as in paper.
+  - A `ReplayExecutor` (a `SimulatedExecutor` with no SOL fees, rent,
+    slippage or SOL reserve) reports each leg's network fee as
+    `fee_lamports`: `network_fee_usd` at the replay's SOL price. The
+    ledger then turns it into the leg's cost exactly as live (`costs_sol`,
+    `costs_usd`, net PnL, the bucket's realized PnL and max loss, round-trip
+    costs). The `Backtester` builds the provider with it directly instead of
+    `paper_provider`.
+  - The replay's SOL price comes from `ReplayPrices`, which now also answers
+    for SOL: the token's USD price when the token is SOL, the quote's when the
+    quote is SOL, and otherwise a fixed reference (`REPLAY_SOL_USD`); the fee
+    is a USD amount and the lamports only carry it, so the reference only
+    changes the SOL figure shown, never a USD value. On a SOL leg the ledger
+    converts at the fill price, so the USD cost differs from
+    `network_fee_usd` by the slippage share (0.1% of the fee).
+  - The replay wallet holds no SOL, so the fee isn't taken from it: the
+    executor adds each fee to `fees_usd`, and `_equity` subtracts it. What
+    the bucket may spend still shrinks with the fee, through the realized PnL
+    under the budget cap.
+  - Acceptance as above; "unchanged" is within the fee's share of the buy:
+    a buy no longer gives up the fee's worth of tokens, so the position is
+    that much bigger, as live.
+- **Done.** As designed, in `trader/backtest/replay.py` (no new module).
+  Tests: a 1% stop no longer fires on a 0.6% dip when the fee is 5% of the
+  leg (it did before), and the fee tests check the fill at the tick, the
+  equity and realized PnL net of both fees, and the round-trip cost.
+  Headlines of `docs/examples/` on the same frozen ticks (1000 candles taken
+  2026-10-05 ~19:20 UTC, `--fee-bps 0 --network-fee-usd 0.012579 --seed 1`),
+  before -> after:
+
+  | Spec | Closed | Return | Realized PnL | Exits |
+  |---|---|---|---|---|
+  | random | 83 -> 83 | -14.713% -> -14.718% | -2.9425 -> -2.9436 | chance 83 -> 83 |
+  | scalp-test | 3 -> 3 | -0.526% -> -0.526% | -0.1052 -> -0.1053 | stop_loss 3 -> 3 |
+  | soak-metronome | 49 -> 49 | -11.124% -> -11.127% | -1.6686 -> -1.6691 | max_hold 49 -> 49 |
+  | soak-revert | 13 -> 13 | -2.903% -> -2.902% | -0.4355 -> -0.4353 | trailing 2 -> 1, take_profit 0 -> 1, max_hold 11 -> 11 |
+  | jup-sol-expr, sol-dip, target-value, wma-composer | 0 -> 0 | unchanged | 0 | none |
+
+  Round-trip cost stays 70.3 bps everywhere. The specs without exits measured
+  from the entry move by the fee's share of the buy (the position is that
+  much bigger now, as live). On the part of the soak afternoon still in the
+  candles (16:14-17:10 UTC), revert's replay now exits like live
+  (`max_hold`, `take_profit`, `max_hold`, `max_hold`; before: a trailing
+  stop at 16:14 and 17:02), and over the whole 4 h window 11 `max_hold` and
+  1 `take_profit`, no trailing stop (the soak's pre-A14 run: 7 trailing stops
+  of 15).

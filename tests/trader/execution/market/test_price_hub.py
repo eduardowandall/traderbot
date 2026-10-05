@@ -9,6 +9,10 @@ from trader.execution.market.hub import PriceHub, StalePriceError
 from trader.execution.market.prices import usd_snapshot
 from trader.shared.market import HubMarketData
 from trader.shared.models import SOLANA_MINTS
+from trader.shared.trading_service.protocol import (
+    REMOTE_ERRORS,
+    PriceUnavailableError,
+)
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 JUP = SOLANA_MINTS.get_by_symbol("JUP").mint
@@ -119,6 +123,52 @@ async def test_an_old_or_missing_price_is_never_served():
         await hub.price(BONK)  # a API não conhece
 
 
+async def test_requests_during_the_first_poll_wait_for_it():
+    # soak F10: logo após um reinício, vários `connect`s pedem SOL juntos; o
+    # segundo pedido achava SOL acompanhado e ainda sem preço
+    api, release = PriceApi(), asyncio.Event()
+    answer = api.get_usd_prices
+
+    async def slow(mints):
+        await release.wait()
+        return await answer(mints)
+
+    api.get_usd_prices = slow  # type: ignore[method-assign]
+    hub = PriceHub(api, stream=None)  # type: ignore[arg-type]
+    first = asyncio.create_task(hub.price(SOL))
+    await _settle()
+    second = asyncio.create_task(hub.price(SOL))
+    third = asyncio.create_task(hub.usd_prices([SOL]))
+    await _settle()
+    assert not second.done()  # espera o poll em andamento
+    release.set()
+
+    assert (await first)[0] == (await second)[0] == Decimal(150)
+    assert await third == {SOL: Decimal(150)}
+    assert api.calls == [[SOL]]  # um poll só
+    assert not hub._first_polls
+
+
+async def test_a_waiter_giving_up_does_not_cancel_the_first_poll():
+    api, release = PriceApi(), asyncio.Event()
+    answer = api.get_usd_prices
+
+    async def slow(mints):
+        await release.wait()
+        return await answer(mints)
+
+    api.get_usd_prices = slow  # type: ignore[method-assign]
+    hub = PriceHub(api, stream=None)  # type: ignore[arg-type]
+    first = asyncio.create_task(hub.price(SOL))
+    await _settle()
+    second = asyncio.create_task(hub.price(SOL))
+    await _settle()
+    second.cancel()
+    await asyncio.gather(second, return_exceptions=True)
+    release.set()
+    assert (await first)[0] == Decimal(150)
+
+
 async def test_the_api_failing_only_warns(caplog):
     api = PriceApi()
 
@@ -211,3 +261,8 @@ class TestHubAsOracle:
 
         assert snapshot == {usdc: Decimal(1), SOL: Decimal(150)}
         assert api.calls == [[SOL]]
+
+
+def test_stale_price_kind_maps_to_price_unavailable():
+    # o runner manda `type(ex).__name__`: renomear a exceção quebraria o mapa
+    assert REMOTE_ERRORS[StalePriceError.__name__] is PriceUnavailableError

@@ -88,6 +88,9 @@ class PriceHub:
         self.max_age = max_age
         self._points: dict[str, _Point] = {}
         self._mints: set[str] = set()
+        # o 1º poll de cada mint novo, enquanto não volta: quem pede o mesmo
+        # mint nesse meio-tempo espera por ele (F10), em vez de achá-lo sem preço
+        self._first_polls: dict[str, asyncio.Task[None]] = {}
         self._changed = asyncio.Event()
 
     # --- quem pede preço ---------------------------------------------------------
@@ -118,13 +121,32 @@ class PriceHub:
         return {m: self._points[m].price for m in mints if self._age(m) <= self.max_age}
 
     async def _watch(self, mints: Collection[str]) -> set[str]:
-        """Passa a acompanhar os mints novos (o 1º preço vem já, pela API)."""
+        """Passa a acompanhar os mints novos (o 1º preço vem já, pela API).
+
+        Um mint já acompanhado cujo 1º poll ainda não voltou também espera
+        esse poll: dois `connect`s que pedem o mesmo preço juntos, logo depois
+        de um reinício, recebem os dois o preço.
+        """
         new = set(mints) - self._mints
         if new:
             self._mints |= new
             self._changed.set()  # o websocket reassina com a lista nova
-            await self.poll(new)
+            first = asyncio.ensure_future(self._first_poll(new))
+            for mint in new:
+                self._first_polls[mint] = first
+        pending = {self._first_polls[m] for m in mints if m in self._first_polls}
+        if pending:
+            # `wait`, não `gather`: quem desiste (cancelado) não cancela o poll
+            # que os outros esperam
+            await asyncio.wait(pending)
         return new
+
+    async def _first_poll(self, mints: Collection[str]) -> None:
+        try:
+            await self.poll(mints)
+        finally:
+            for mint in mints:
+                self._first_polls.pop(mint, None)
 
     # --- as fontes ------------------------------------------------------------------
 

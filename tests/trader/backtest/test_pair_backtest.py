@@ -76,10 +76,12 @@ async def test_the_network_fee_is_paid_in_usd_on_a_sol_quote():
         budget_usd=Decimal(100),
         network_fee_usd=fee,
     ).run()
-    # compra: 100 JUP - 2 JUP (2 USD a 1 USD/JUP); venda: 98 x 0.005 - 0.01 SOL
-    assert (
-        result.final_equity == (Decimal(98) * Decimal("0.005") - Decimal("0.01")) * 200
-    )
+    # A14: o fill não paga a taxa (compra 100 JUP, vende por 0.5 SOL); as duas
+    # taxas de 2 USD saem do patrimônio e do PnL realizado
+    buy, sell = result.trades
+    assert buy.quantity == Decimal(100)
+    assert result.final_equity == Decimal(100) - 2 * fee
+    assert sell.realized_pnl == -2 * fee
 
 
 class TwoSeries:

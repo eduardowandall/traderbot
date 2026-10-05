@@ -69,7 +69,7 @@ def backtest_summary(result: dict) -> str:
         f"Backtest {result['name']} ({result['spec_id']}) {result['symbol']} "
         f"{result['timeframe']}: {result['bars']} barras "
         f"(aquecimento {result['warmup_bars']}), {result['ticks']} ticks",
-        f"  período: {_when(result['start'])} -> {_when(result['end'])}",
+        f"  período (UTC): {_when(result['start'])} -> {_when(result['end'])}",
         f"  patrimônio: {result['initial_equity']:.2f} -> "
         f"{result['final_equity']:.2f} USD ({result['return_pct']:+.2f}%), "
         f"drawdown máximo {result['max_drawdown_pct']:.2f}%",

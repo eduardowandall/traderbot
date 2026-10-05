@@ -44,6 +44,7 @@ from trader.shared.trading_service.protocol import (
     BucketStatus,
     OrderReply,
     OrderRequest,
+    PriceUnavailableError,
     ReplyStatus,
     TradeServiceError,
 )
@@ -412,8 +413,9 @@ async def test_strategy_runners_share_the_trade_runners_price_hub():
         assert await client.price(SOL.mint) == Decimal(150)
         assert await client.price(SOL.mint) == Decimal(150)
         assert api.calls == 1  # o segundo pedido veio do hub, não da API
-        with pytest.raises(TradeServiceError, match="StalePriceError"):
-            await client.price(USDC.mint)  # sem preço: nenhuma decisão
+        # sem preço: nenhuma decisão, e o bot sabe que é só isso (F10)
+        with pytest.raises(PriceUnavailableError, match="StalePriceError"):
+            await client.price(USDC.mint)
         await client.aclose()
 
 

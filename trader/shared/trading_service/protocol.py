@@ -88,3 +88,17 @@ class OrderReply:
 
 class TradeServiceError(Exception):
     """Falha inesperada do serviço de trading, vista pelo lado da estratégia."""
+
+
+class PriceUnavailableError(TradeServiceError):
+    """O trade-runner não tem preço recente do mint: o bot não decide agora.
+
+    Esperado (um reinício, a Price API fora), não um defeito do loop (F10).
+    """
+
+
+# `kind` de uma resposta recusada (o nome da exceção no trade-runner) -> a
+# exceção do lado da estratégia; o que não está aqui vira `TradeServiceError`
+REMOTE_ERRORS: dict[str, type[TradeServiceError]] = {
+    "StalePriceError": PriceUnavailableError,  # `trader/execution/market/hub.py`
+}

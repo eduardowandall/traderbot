@@ -22,6 +22,7 @@ from decimal import Decimal
 from trader.shared.models.public_data import Interval, TickerData
 from trader.shared.spec.terms import SpecTerms
 from trader.shared.trading_service.protocol import (
+    REMOTE_ERRORS,
     BucketSnapshot,
     OrderReply,
     OrderRequest,
@@ -96,7 +97,7 @@ class RemoteTradeClient:
     async def price(self, mint: str) -> Decimal:
         """O preço USD do mint pelo hub do trade-runner (um feed para todos).
 
-        Preço velho ou ausente lá vira `TradeServiceError`: o bot não decide.
+        Preço velho ou ausente lá vira `PriceUnavailableError`: o bot não decide.
         """
         answer = await self._call({"op": "price", "mint": mint})
         return Decimal(answer["price"])
@@ -174,7 +175,8 @@ class RemoteTradeClient:
         else:
             raise TradeServiceError("trade-runner fora do ar")
         if not answer.get("ok"):
-            raise TradeServiceError(answer.get("error") or "erro no trade-runner")
+            error = answer.get("error") or "erro no trade-runner"
+            raise REMOTE_ERRORS.get(answer.get("kind", ""), TradeServiceError)(error)
         return answer
 
     async def _reconnect_quietly(self) -> None:

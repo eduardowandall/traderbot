@@ -1,3 +1,4 @@
+import asyncio
 import random
 from datetime import datetime
 from decimal import Decimal
@@ -21,6 +22,7 @@ from trader.shared.trading_service.protocol import OrderRequest, ReplyStatus
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 JUP = SOLANA_MINTS.get_by_symbol("JUP")
 BONK = SOLANA_MINTS.get_by_symbol("BONK")
+PUMP = SOLANA_MINTS.get_by_symbol("PUMP")
 T0 = datetime(2026, 9, 1, 12, 0)
 LOOSE = Policy(
     max_trade_usd=Decimal(1000),
@@ -163,6 +165,57 @@ class TestBudget:
                 qty = snapshot.position.entry_order.quantity
                 assert (await service.submit_order(name, _sell(market, qty))).filled
             assert wallet.balance(USDC.mint) >= 0
+
+    async def test_buckets_submitting_at_once_take_turns(self, tmp_path):
+        # soak F12: no paper uma ordem leva ~0.2 s e nenhuma se sobrepôs; aqui
+        # três buckets mandam compras e vendas juntos, e a quote cede o loop
+        market = Market("100")
+        quotes = YieldingQuotes(market)
+        wallet = _wallet("100")
+        service = _service(tmp_path, wallet, market)
+        tokens = {"jup": JUP, "bonk": BONK, "pump": PUMP}
+        for name, token in tokens.items():
+            await _open(service, name, token, Decimal(30))
+
+        for _ in range(3):
+            buys = [service.submit_order(n, _buy(market, "0.25")) for n in tokens]
+            assert all(r.filled for r in await asyncio.gather(*buys))
+            sells = [_sell_all(service, market, n) for n in tokens]
+            assert all(r.filled for r in await asyncio.gather(*sells))
+
+        assert quotes.peak == 1  # uma ordem por vez, entre todos os buckets
+        assert wallet.balance(USDC.mint) >= 0
+        for name in tokens:
+            snapshot = await service.get_bucket(name)
+            assert snapshot.position is None
+            assert snapshot.available <= Decimal(30)
+
+
+class YieldingQuotes:
+    """Quotes que cedem o loop e contam quantas estão em andamento."""
+
+    def __init__(self, market: Market):
+        self.quote = market.client.get_quote
+        self.in_flight = 0
+        self.peak = 0
+        market.client.get_quote = self  # type: ignore[method-assign]
+
+    async def __call__(self, *args, **kwargs):
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0)  # sem a trava, outra ordem entraria aqui
+            return await self.quote(*args, **kwargs)
+        finally:
+            self.in_flight -= 1
+
+
+async def _sell_all(service, market, name):
+    position = (await service.get_bucket(name)).position
+    assert position is not None
+    return await service.submit_order(
+        name, _sell(market, position.entry_order.quantity)
+    )
 
 
 class TestLifecycle:

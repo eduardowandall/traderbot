@@ -48,7 +48,8 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   every mint plus a batched Price API poll for quiet ones. `serve` runs it and
   answers `connect`s through the `price` op (warm-up candles through the
   `candles` op, B12). A price older
-  than 30s raises `StalePriceError` (no decisions on stale data), and
+  than 30s raises `StalePriceError` (no decisions on stale data; a refused
+  reply carries its `kind`, and `connect` raises `PriceUnavailableError`), and
   `HubMarketData` paces each bot at one price per second. The hub is also
   the process's `PriceOracle` (B10): `build_trade_service(prices=hub)` gives
   it to the service, the sweep, the daily report and the provider's quote
@@ -82,8 +83,9 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   warm-up + 20 bars. A non-stable input replays two candle series (the
   ratio, plus the quote's USD in `Tick.quote_usd`; a third column in tick
   CSVs) and measures equity in USD. Costs per leg: `fee_bps` +
-  `slippage_bps` and `network_fee_usd`, all taken from the replay quote's
-  output. Without `--fee-bps`/`--network-fee-usd` both are **measured on
+  `slippage_bps` from the replay quote's output, and `network_fee_usd` as the
+  leg's cost outside the fill, as live (A14: `ReplayExecutor` reports it as
+  `fee_lamports`, so stops are measured from a live-like entry). Without `--fee-bps`/`--network-fee-usd` both are **measured on
   Jupiter now** (`trader/backtest/costs.py`, B9): half the loss of a buy+sell
   quote at the spec's trade size, and (5000 + `max_priority_fee_lamports`)
   lamports at the SOL price; the result has `measured_costs`. Pass both flags
