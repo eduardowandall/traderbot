@@ -227,7 +227,7 @@ the tests run a bot against a local `TradeRunner` (`served` in
 
 - **`main.py serve <mode>`** (`trader/execution/runner.py`) holds the
   mode's lock, the key, the wallet, the ledger and one `TradeService`, and
-  serves JSON lines on `127.0.0.1` (`docs/plan.md` §3.3). `hello` validates
+  serves JSON lines on `127.0.0.1` (the protocol is below). `hello` validates
   the spec with this process's policy and opens its bucket; `bucket` and
   `submit` are hops 1 and 3–16. Every 30s it retires expired specs and sells
   what's left in retired buckets, so exits don't depend on the other process.
@@ -254,8 +254,26 @@ the tests run a bot against a local `TradeRunner` (`served` in
   has a `daily_report` event; if not, it sends fills, costs, realized PnL and
   open positions marked at the hub's price for every bucket of the mode.
 
+### The wire protocol
+
+JSON lines on `127.0.0.1`, one request and one reply per line, token auth
+(`trader/shared/trading_service/wire.py`). TCP because asyncio on Windows has
+no Unix sockets. `serve` writes `{host, port, token, pid}` to
+`data_dir()/trader-<mode>.json` (removed on exit); `connect` finds it with
+`--trader FILE` or, by default, the only `trader-*.json` in `data_dir()`. A
+`serve` and a `connect` from different versions may not talk: restart them
+together.
+
+| Request | Reply | Notes |
+|---|---|---|
+| `{"op": "hello", "token", "terms"}` | `{"ok": true, "bucket"}` or `{"ok": false, "error"}` | `SpecTerms` (id, name, symbol, budget, max loss, largest buy, expiry; decimals as strings) checked against `serve`'s policy; opens or re-attaches to `strategy:<id>`; refuses a bad token or a second live connection for the same spec |
+| `{"op": "bucket"}` | `{"ok": true, "snapshot"}` | `BucketSnapshot` (position with its orders, PnL, status) |
+| `{"op": "submit", "request"}` | `{"ok": true, "reply"}` | `OrderReply` (filled / denied / rejected / error); the client always sends an idempotency key, so a resend after a reconnect executes once |
+| `{"op": "price", "mint"}` | `{"ok": true, "price", "age"}` | From the price hub; a price older than 30s is an error, never a value |
+| `{"op": "candles", "mint", "interval", "qty"}` | `{"ok": true, "candles": [...]}` | Warm-up candles: `qty` 1–1000, `interval` an `Interval` value; each candle `{timestamp, open, high, low, last}`, decimals as strings |
+
 ## 10. Where it's going
 
-Details in [`plan.md`](plan.md) (stage B):
-transaction inspection and market-sanity checks (B7), and perps (B8). Specs
-stay files written from [`specs.md`](specs.md).
+The roadmap is [`plan.md`](plan.md): next, a first tiny-budget real run
+(recovering UNCONFIRMED intents first), then perpetual futures. Specs stay
+files written from [`specs.md`](specs.md).

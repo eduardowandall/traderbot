@@ -14,9 +14,12 @@ working-tree diff).
      Keep it terse; it is loaded into every session.
    - `docs/architecture.md`: the step-by-step tour, covering new or moved
      modules and changed call flows.
-   - `docs/plan.md`: the **progress table** (§6), the score (§2), known
-     issues (§7), and any new debt you noticed, added as an item in the stage
-     where it belongs.
+   - `docs/plan.md`: the **progress table** (§5), the goal scores (§2), known
+     issues (§6), and any new debt you noticed, added as the next free `A<n>`
+     item at its place in the §4 order (or to the backlog).
+   - **Keep the plan short:** when an item is done, move its section from
+     `docs/plan.md` §4 to the end of `docs/history.md` (text as written, with
+     the date) and leave only its row, marked done, in the progress table.
 3. Remove anything the code no longer supports, such as deleted modules,
    renamed functions or dead commands. Grep for them:
    `grep -rn "<old name>" --include=*.md .`

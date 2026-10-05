@@ -2,7 +2,9 @@
 
 Solana trading bot (Jupiter DEX). Python 3.14, `uv`-managed. How the code
 works, step by step: [`docs/architecture.md`](docs/architecture.md). The
-roadmap: [`docs/plan.md`](docs/plan.md) (plan there first, then implement).
+roadmap: [`docs/plan.md`](docs/plan.md) (items A1..., plan there first, then
+implement; finished items move to `docs/history.md`, whose stage labels such
+as B7 are what code comments cite).
 
 ## Commands
 - Setup: `uv sync --system-certs` (always pass `--system-certs`: this machine's
@@ -37,7 +39,7 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `connect` finds it (or `--trader FILE`), sends the spec's terms (B13:
   `SpecTerms`, from `spec.terms()`: id, symbol, budget, max loss, largest buy,
   expiry; the full spec stays in `connect`), and the trade-runner validates
-  them with its own policy. Protocol: `docs/plan.md` §3.3,
+  them with its own policy. Protocol: `docs/architecture.md` §9,
   `trader/shared/trading_service/wire.py`, `trader/strategy/trading_service/remote.py`,
   `trader/execution/runner.py`, `trader/strategy/runner.py`. A `serve`
   and a `connect` from different versions may not talk (B6 renamed snapshot

@@ -1,9 +1,11 @@
 # Paper soak test: one trade-runner, three specs
 
-The owner's paper soak from [`plan.md`](plan.md) ("Owner task: a one-week paper
-soak"), run with B3's split instead of `run`: one `serve paper` and one
-`connect` per spec. This file records what was checked, how, and what was
-found. Anything here that needs code becomes an item in `plan.md`.
+The owner's paper soak (item A2 in [`plan.md`](plan.md); "Owner task: a
+one-week paper soak" in the old plan, now in `history.md`), run with B3's split
+instead of `run`: one `serve paper` and one `connect` per spec. This file
+records what was checked, how, and what was found. Anything here that needs
+code becomes an item in `plan.md`. Open findings as of 2026-10-05: F1 is A4;
+F3, F5 and F8 are A1; F2, F4 and F7 are fixed; F6 is by design.
 
 - **Started:** 2026-10-03 23:30 local (UTC+1). **This report:** 2026-10-04,
   about 12.5 h in.
