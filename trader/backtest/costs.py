@@ -17,13 +17,13 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
 
+from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.models.mode import RunningMode
-from trader.execution.policy import load_policy
-from trader.shared.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.execution.trade.policy import load_policy
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import BASE_FEE_LAMPORTS, BPS, LAMPORTS_PER_SOL
 from trader.shared.models.mints import SOL_MINT
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 
 ZERO = Decimal("0")
 # precisão do que é medido: um centésimo de bp, um milionésimo de USD

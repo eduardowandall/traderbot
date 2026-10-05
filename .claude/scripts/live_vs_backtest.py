@@ -30,11 +30,11 @@ from trader.backtest import load_ticks
 from trader.backtest.compare import compare_live, fetch_warmup
 from trader.backtest.costs import resolve_costs
 from trader.backtest.spec import ReplayCosts
-from trader.execution.ledger import Ledger, ledger_path
-from trader.shared.market import JupiterMarketData
-from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market import JupiterMarketData
+from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.trade.ledger import Ledger, ledger_path
 from trader.shared.market.pair import market_for
-from trader.shared.spec.validate import parse_spec
+from trader.strategy.spec.parse import parse_spec
 
 
 def _parse_args() -> argparse.Namespace:

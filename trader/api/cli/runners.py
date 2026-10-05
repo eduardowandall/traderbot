@@ -6,20 +6,19 @@ chave nem de RPC (`docs/plan.md` B3).
 """
 
 import asyncio
-import json
 from pathlib import Path
 
 import typer
 
 from trader.api.cli.bot import MARKET_DATA, SPEC_HELP, limits_from_policy, mode_lock
+from trader.execution.market.hub import PriceHub
+from trader.execution.market.prices import price_fn
 from trader.execution.models.mode import RunningMode
 from trader.execution.notification.daily_report import DailyReporter
-from trader.execution.policy import load_policy
 from trader.execution.runner import TradeRunner
-from trader.execution.trading_service.service import TradeService
+from trader.execution.trade.policy import load_policy
+from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.wiring import build_trade_service
-from trader.shared.market.hub import PriceHub
-from trader.shared.market.prices import price_fn
 from trader.shared.notification import notifier_from_env
 from trader.strategy.runner import strategy_bot
 from trader.strategy.spec.strategy import SpecStrategy
@@ -47,6 +46,8 @@ def serve(mode: RunningMode = typer.Argument(..., help="real ou paper")):
             limits_from_policy(load_policy(mode=str(mode))),
             price_of=price_of,
             hub=hub,
+            # candles do aquecimento dos `connect` (só este processo lê a Jupiter)
+            candles=MARKET_DATA(),
             background=(hub.run, reporter.run_forever),
         )
         with service.gateway:
@@ -64,6 +65,8 @@ async def _serve(
     finally:
         await reporter.notifier.aclose()
         await service.aclose()
+        if runner.candles is not None:
+            await runner.candles.aclose()
 
 
 def connect(
@@ -78,15 +81,12 @@ def connect(
 
     O trade-runner valida a spec com a política dele e executa as ordens.
     """
-    text = spec_file.read_text(encoding="utf-8")
     strategy = SpecStrategy.from_file(str(spec_file))
     if seed is not None:
         strategy.seed(seed)
     bot = strategy_bot(
         strategy,
-        json.loads(text),
         trader,
-        MARKET_DATA,  # candles do aquecimento; os preços vêm do trade-runner
         notifier_from_env(),
     )
     try:

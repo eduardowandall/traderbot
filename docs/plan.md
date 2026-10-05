@@ -111,10 +111,11 @@ one.
 
 | Request | Reply | Notes |
 |---|---|---|
-| `{"op": "hello", "token", "spec"}` | `{"ok": true, "bucket"}` or `{"ok": false, "error"}` | Validates the spec against the trade-runner's policy and opens (or re-attaches to) bucket `strategy:<id>`; rejects a bad token or a second live connection for the same spec |
+| `{"op": "hello", "token", "terms"}` | `{"ok": true, "bucket"}` or `{"ok": false, "error"}` | Validates the spec's terms (`SpecTerms`, B13: id, name, symbol, budget, max loss, largest buy, expiry; decimals as strings) against the trade-runner's policy and opens (or re-attaches to) bucket `strategy:<id>`; rejects a bad token or a second live connection for the same spec |
 | `{"op": "bucket"}` | `{"ok": true, "snapshot"}` | `BucketSnapshot` (position with its orders, PnL, status) |
 | `{"op": "submit", "request"}` | `{"ok": true, "reply"}` | `OrderReply` (filled / denied / rejected / error); the client always sends an idempotency key, so a resend after a reconnect executes once |
 | `{"op": "price", "mint"}` | `{"ok": true, "price", "age"}` | The trade-runner's price hub (B7): USD price and its age in seconds; a price older than 30s is an error, never a value |
+| `{"op": "candles", "mint", "interval", "qty"}` | `{"ok": true, "candles": [...]}` | Warm-up candles read by the trade-runner (B12): `qty` 1–1000, `interval` an `Interval` value; each candle `{timestamp, open, high, low, last}`, decimals as strings |
 
 The strategy-runner finds the trade-runner with `--trader FILE` or, by
 default, the only `trader-*.json` in `data_dir()`. It has no mode argument.
@@ -354,7 +355,7 @@ and backtest exactly as before (same ids, same numbers):
 - **Percent sizing** (`models.py`): `sizing` is a union of `fixed_usd` and
   `{"type": "pct_of_bucket", "pct": 1-100}`, a percent of what the bucket may
   spend now. `validate` refuses `pct x budget_usd` above `max_trade_usd`.
-- **`expr`** (`trader/shared/spec/expr.py`, strategy layer):
+- **`expr`** (`trader/strategy/spec/expr.py`, strategy layer):
   `{"type": "expr", "expr": "rsi(14) < 30 and price < sma(20) * 0.98"}`. Python's
   `ast.parse` reads it and a whitelist walk (never `eval`) accepts only:
   numbers, `price`, `entry_price`, `peak`, `last_exit_price`, the indicator calls `sma/ema/wma/rsi/high/low/
@@ -523,6 +524,67 @@ neither (`tests/test_architecture.py`). Two definitions move so that holds:
 
 Tests mirror the new tree.
 
+#### B12. Only the trade-runner talks to Jupiter — S
+After B11, `connect` still downloaded its warm-up candles from Jupiter itself,
+so the market client had to live in `shared/`, and with it
+`get_swap_transaction`. Now the trade-runner reads all market data, and the
+strategy side gets prices and candles only from it (2026-10-05).
+- **New wire op `candles`.** `{"op": "candles", "mint", "interval", "qty"}`
+  answers `{"ok": true, "candles": [...]}` (decimals as strings, timestamps
+  ISO). `qty` is 1–1000; `interval` is an `Interval` value. `serve` answers it
+  from one `JupiterMarketData`. `RemoteTradeClient.candles` asks for them, and
+  `RemoteCandles` turns that into the candle half of a `MarketData`, so
+  `connect` builds `HubMarketData(trader.price, RemoteCandles(trader))`.
+  `strategy_bot` no longer takes a candle source. The client reads lines up to
+  4 MiB (900 bars are about 120 KB; asyncio's default limit is 64 KB). A
+  `connect` and a `serve` from before B12 don't talk: restart them together.
+- **`execution/market/`** (read-only, the market layer): `jupiter/` (the HTTP
+  and websocket client, quote models, candle parsing), `JupiterMarketData`,
+  `PriceHub` and `websocket_prices`, and the USD oracle, `usd_snapshot` and
+  `price_fn`.
+- **`execution/trade/`**: `gateway/`, `venues/`, `ledger/`, `policy/`,
+  `trading_service/`. `runner.py`, `wiring.py`, `models/` and
+  `notification/` stay at the root of `execution/`.
+- **`shared/market/`** keeps what doesn't touch the network: the `MarketData`
+  protocol and `HubMarketData` (`feed.py`), and `market_for` /
+  `ratio_candles` (`pair.py`).
+- `run` and `backtest` are unchanged: they live in `api/` and `backtest/` and
+  build their own feeds.
+
+Tests: the `candles` op (round trip through a real `TradeRunner`, a bad
+`qty`, a reply larger than 64 KB), `connect` built without a candle source,
+and the live `connect`-through-`serve` test warming up through the op.
+
+#### B13. The spec belongs to the strategy side — S
+After B11 and B12 the whole spec language sat in `shared/spec/`, because the
+trade-runner parsed the full spec at `hello`. It only uses the money and
+lifetime terms, so only those are shared now (2026-10-05).
+- **`SpecTerms`** (`shared/spec/terms.py`): `spec_id`, `name`, `symbol`,
+  `budget_usd`, `max_loss_usd`, `max_trade_usd` (the largest buy the sizing
+  allows), `sizing_field` (for error paths), and `expires_at` or `ttl_days`,
+  plus `expiry()`. `StrategySpec.terms()` builds it; the id is still the hash
+  of the whole spec, computed on the strategy side. The model checks the same
+  invariants as the spec (one expiry, max loss within budget), because it
+  arrives over the wire.
+- **`validate(terms, limits)`** (`shared/spec/validate.py`) keeps the policy
+  checks (symbol and allowed symbols, trade size vs the policy and the budget,
+  expiry window) with the same error paths and messages. `SpecError` and
+  `SpecLimits` stay with it.
+- **`strategy/spec/`** gets `models.py` (`StrategySpec`, every condition),
+  `expr.py`, and `parse.py` (`parse_spec`, `SpecParseError`), next to
+  `strategy.py` and `conditions.py`.
+- **Wire: `hello` sends `terms`** instead of the full spec:
+  `{"op": "hello", "token", "terms"}`, decimals as strings. The trade-runner
+  checks the terms against its own policy as before and keeps them for the
+  sweep. A `serve` and a `connect` from before B13 don't talk.
+- Nothing that protects funds changes: budget, max loss, symbol and expiry
+  come from the terms, and the gateway's policy re-checks each order. A wrong
+  condition only makes a worse strategy; the trade-runner never judged that.
+
+Tests: `StrategySpec.terms()` (fixed and pct sizing, both expiries), terms
+refused at `hello` (bad JSON shape, over the policy), the bucket opened from
+terms, and the live `connect`-through-`serve` test.
+
 #### B8. Perpetual futures — L (planned in [`perps.md`](perps.md))
 Long and short perp positions with leverage, on Jupiter Perps, through the
 same gateway, policy, ledger and buckets. The spec sets its leverage, capped
@@ -548,7 +610,7 @@ Design, coupling assessment and phases in [`perps.md`](perps.md).
 
 Design (2026-10-04). The owner chose the safety core and the price hub;
 Telegram approval and a service entrypoint stay open. No ledger schema change:
-- **Transaction inspection** (`trader/execution/venues/jupiter/tx_inspection.py`,
+- **Transaction inspection** (`trader/execution/trade/venues/jupiter/tx_inspection.py`,
   venue; called by `OnChainExecutor` after signing, before sending, in place of
   the plain simulation): (1) every top-level instruction's program is one of
   Jupiter v6, Token, Token-2022, ATA, ComputeBudget, System (checked live on
@@ -568,7 +630,7 @@ Telegram approval and a service entrypoint stay open. No ledger schema change:
 - **Stale market data**: a price older than 30s is never used. The hub
   (below) raises `StalePriceError` instead of returning one, so the bot's tick
   fails and backs off; orders don't go out on old data.
-- **Price hub** (`trader/shared/market/hub.py`, market layer): `PriceHub` keeps the
+- **Price hub** (`trader/execution/market/hub.py`, market layer): `PriceHub` keeps the
   latest `(price, received_at)` of every mint asked for, from one websocket
   subscription for all of them (reconnects with the new list when a mint is
   added) plus the Price API, polled every 2s in one batched call for mints the
@@ -604,8 +666,8 @@ Telegram approval and a service entrypoint stay open. No ledger schema change:
 | B2 Wallet allocation + reconcile | **done** (2026-09-30) | `WalletBalances` shared by the service's accounts; budgets must fit the wallet (positions at cost); startup reconcile of every bucket's positions blocks buys of a missing token; per-account `reconcile_position` removed; `ledger_dump.py` shows each bucket's position |
 | Gap review after B3/B2 | **done** (2026-09-30) | 575 tests. A transaction the chain confirmed as failed is retried with the slippage escalation and ends FAILED (was UNCONFIRMED: the mode was blocked); RPC reads at Confirmed (was Finalized: stale balances right after a swap) and sells re-read the wallet; provider rejections (`recusado: ...`) don't count toward the breaker; a balance read that overlaps a fill isn't cached; a leg without a SOL price uses the other leg's; sells keep a client-given idempotency key; `connect` re-reads the connection file after a trade-runner restart and gives up after 5 reconnects so the bot loop backs off |
 | B5 Accounting and performance | **done** (2026-10-03) | 603 tests (28 new) plus 2 live checks. `Position.unrealized_usd`, in fill notifications and the tick log; `trader/execution/notification/daily_report.py` (`DailyReporter`, run beside `run` via `BotConfig.background` and beside `serve`; a `daily_report` event per UTC day); paper fills `slippage_bps=10` below the quote, floored at `otherAmountThreshold`; `backtest --network-fee-usd` (0.002) taken from each replay leg; failed-on-chain attempts ride on `SwapResult.failed_signatures` / `SwapFailedError`, and `execute_trade` books their `meta.fee` (`failed_tx_fee` event, `PositionBook.charge`, subtracted by `pnl_totals`); `trader/backtest/compare.py` + `.claude/scripts/live_vs_backtest.py`. No ledger schema change. Checked live: the warm-up candles end right before the first tick; a real-quote paper fill lands below the quote |
-| B6 More expressive strategies | **done** (2026-10-04) | 663 tests (60 new) plus 2 live checks. `pct_of_bucket` sizing; `expr` (`trader/shared/spec/expr.py`: `ast` plus a whitelist, three-valued logic, normalized text); prices in the quote token everywhere on the strategy side (`Order.quote_price`, `BucketSnapshot.available` + `quote_usd`, `on_market_refresh(..., quote_usd)`); `trader/shared/market/pair.py` (`market_for`, `PairMarketData`, `ratio_candles`); `TradeService` converts USD caps with the quote's price (fail closed without it); replays with two series (`Tick.quote_usd`, a third CSV column, `ReplayPrices`, USD equity); `docs/examples/spec-jup-sol-expr.json`. No ledger schema change; USDC numbers unchanged. Checked live: a JUP-SOL backtest on two real candle series, the pair feed against the Price API, and a JUP-SOL paper smoke run |
-| B7 Later | **safety core and price hub done** (2026-10-04); owner approval and a service entrypoint open | 717 tests (34 new) plus 2 live checks. `trader/execution/venues/jupiter/tx_inspection.py` (program allow-list; simulated balances: only the input leaves, up to `inAmount`) in `OnChainExecutor` before sending; `AsyncJupiterProvider` quote check (2% vs the Price API, on in `wiring.py`; buys fail closed, sells warn); `trader/shared/market/hub.py` (`PriceHub`: one websocket for all mints + batched Price API for quiet ones, `StalePriceError` after 30s; `HubMarketData` paces the bot at 1 price/s) used by `run` in-process and by `serve`/`connect` through the new `price` op (fixes the soak's F2); policy `max_trades_per_hour_per_bucket` (6, paper 60); `Order.timestamp` in UTC. Checked live: one websocket subscription carries several mints; the hub keeps SOL and NOBODY fresh; real swap transactions use only allowed programs; the whole live suite (a `connect` trading through `serve paper`) passes. The B6/B7 wire changes mean a `serve` and a `connect` from before B6 can't talk to these: restart all of them together |
+| B6 More expressive strategies | **done** (2026-10-04) | 663 tests (60 new) plus 2 live checks. `pct_of_bucket` sizing; `expr` (`trader/strategy/spec/expr.py`: `ast` plus a whitelist, three-valued logic, normalized text); prices in the quote token everywhere on the strategy side (`Order.quote_price`, `BucketSnapshot.available` + `quote_usd`, `on_market_refresh(..., quote_usd)`); `trader/shared/market/pair.py` (`market_for`, `PairMarketData`, `ratio_candles`); `TradeService` converts USD caps with the quote's price (fail closed without it); replays with two series (`Tick.quote_usd`, a third CSV column, `ReplayPrices`, USD equity); `docs/examples/spec-jup-sol-expr.json`. No ledger schema change; USDC numbers unchanged. Checked live: a JUP-SOL backtest on two real candle series, the pair feed against the Price API, and a JUP-SOL paper smoke run |
+| B7 Later | **safety core and price hub done** (2026-10-04); owner approval and a service entrypoint open | 717 tests (34 new) plus 2 live checks. `trader/execution/trade/venues/jupiter/tx_inspection.py` (program allow-list; simulated balances: only the input leaves, up to `inAmount`) in `OnChainExecutor` before sending; `AsyncJupiterProvider` quote check (2% vs the Price API, on in `wiring.py`; buys fail closed, sells warn); `trader/execution/market/hub.py` (`PriceHub`: one websocket for all mints + batched Price API for quiet ones, `StalePriceError` after 30s; `HubMarketData` paces the bot at 1 price/s) used by `run` in-process and by `serve`/`connect` through the new `price` op (fixes the soak's F2); policy `max_trades_per_hour_per_bucket` (6, paper 60); `Order.timestamp` in UTC. Checked live: one websocket subscription carries several mints; the hub keeps SOL and NOBODY fresh; real swap transactions use only allowed programs; the whole live suite (a `connect` trading through `serve paper`) passes. The B6/B7 wire changes mean a `serve` and a `connect` from before B6 can't talk to these: restart all of them together |
 | B10 Review cleanup | **done** (2026-10-04) except C3 and C7 (wait for the owner) | 722 tests (4 new, 1 dropped with the mock guard it tested) plus the live suite. `PriceHub.usd_prices` (the process oracle in `run`/`serve`, `build_trade_service(prices=)`, `AsyncJupiterProvider.usd_prices`); stable = 1 in `usd_snapshot`/`price_fn` only (the backtest always uses `ReplayPrices`, identical output); `IntentStatus.REJECTED`; `SwapAttemptsError`; `swap_with_details` merged with the retry loop; priority-fee cap required below `Policy`; `TradeRunner.background`; one policy query; one `restore` per bucket in `ledger_dump.py`. No ledger schema change |
 | B8 Perps | planned (2026-10-03) | Phases P0–P5 and their progress in [`perps.md`](perps.md) |
 | B9 Costs across modes | **done** (2026-10-04) | `max_priority_fee_lamports` (policy, default 100,000): real's Jupiter `maxLamports` (`veryHigh`), charged by paper, in the backtest's network fee; `trader/backtest/costs.py` measures the pair fee and network fee on Jupiter unless `--fee-bps`/`--network-fee-usd` are given (`measured_costs`); `RoundTripCosts` + `Ledger.round_trip_costs` in the backtest, daily report, `live_vs_backtest.py`, `ledger_dump.py`. No ledger schema change. Checked live: Jupiter keeps a real swap's priority fee under the cap; SOL-USDC measures ~0 bps at 5 USD |

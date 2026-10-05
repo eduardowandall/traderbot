@@ -59,8 +59,8 @@ def test_console_filter_allows_bot_logs_and_warnings_only():
 
     assert f.filter(record("bot", logging.DEBUG))
     assert f.filter(record("trader.strategy.spec.strategy", logging.DEBUG))
-    assert not f.filter(record("trader.execution.gateway.account", logging.INFO))
-    assert f.filter(record("trader.execution.gateway.account", logging.WARNING))
+    assert not f.filter(record("trader.execution.trade.gateway.account", logging.INFO))
+    assert f.filter(record("trader.execution.trade.gateway.account", logging.WARNING))
 
 
 def test_file_lines_carry_the_bot_name(tmp_path):

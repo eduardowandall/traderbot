@@ -5,8 +5,8 @@ from decimal import Decimal
 
 from factories import make_spec
 
-from trader.shared.spec.models import StrategySpec
 from trader.shared.spec.validate import SpecLimits, validate
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
@@ -55,11 +55,11 @@ def test_the_worst_case_of_a_percent_must_fit_the_trade_limit():
             ttl_days=10,
         )
     )
-    errors = validate(spec, SpecLimits(max_trade_usd=Decimal(25)))
+    errors = validate(spec.terms(), SpecLimits(max_trade_usd=Decimal(25)))
     assert [(e.path, e.msg) for e in errors] == [
         ("sizing.pct", "50 USD acima do limite por trade 25")
     ]
-    assert validate(spec, SpecLimits(max_trade_usd=Decimal(50))) == []
+    assert validate(spec.terms(), SpecLimits(max_trade_usd=Decimal(50))) == []
 
 
 def test_percent_is_bounded():

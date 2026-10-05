@@ -5,13 +5,9 @@ from decimal import Decimal
 import pytest
 from factories import make_spec
 
-from trader.shared.spec.models import StrategySpec
-from trader.shared.spec.validate import (
-    SpecLimits,
-    SpecParseError,
-    parse_spec,
-    validate,
-)
+from trader.shared.spec.validate import SpecLimits, validate
+from trader.strategy.spec.models import StrategySpec
+from trader.strategy.spec.parse import SpecParseError, parse_spec
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 LIMITS = SpecLimits(max_trade_usd=Decimal(25))
@@ -20,7 +16,7 @@ LIMITS = SpecLimits(max_trade_usd=Decimal(25))
 def _errors(limits=LIMITS, **overrides):
     overrides.setdefault("expires_at", "2026-10-10T00:00:00Z")
     spec = StrategySpec.model_validate(make_spec(**overrides))
-    return [(e.path, e.msg) for e in validate(spec, limits, NOW)]
+    return [(e.path, e.msg) for e in validate(spec.terms(), limits, NOW)]
 
 
 def test_valid_spec_has_no_errors():

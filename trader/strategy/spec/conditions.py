@@ -16,7 +16,7 @@ from typing import Any
 
 from trader.shared import indicators as ind
 from trader.shared.models.public_data import Interval, TickerData
-from trader.shared.spec import expr as expr_lang
+from trader.strategy.spec import expr as expr_lang
 
 HUNDRED = Decimal(100)
 

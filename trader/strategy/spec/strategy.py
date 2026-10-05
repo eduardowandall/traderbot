@@ -20,9 +20,9 @@ from pathlib import Path
 from trader.shared.indicators import to_utc
 from trader.shared.models import OrderSide, OrderSignal, Position, TickerData
 from trader.shared.models.public_data import Interval
-from trader.shared.spec.models import StrategySpec
-from trader.shared.spec.validate import parse_spec
 from trader.strategy.spec.conditions import IndicatorBank, TickContext, fired, holds
+from trader.strategy.spec.models import StrategySpec
+from trader.strategy.spec.parse import parse_spec
 
 logger = logging.getLogger(__name__)
 

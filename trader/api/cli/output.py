@@ -15,7 +15,7 @@ from typing import Any
 import typer
 
 from trader.shared.models.costs import BASE_FEE_LAMPORTS, RoundTripCosts
-from trader.shared.spec.validate import SpecParseError
+from trader.strategy.spec.parse import SpecParseError
 
 # trades listados no resumo (o JSON traz todos)
 SHOWN_TRADES = 10

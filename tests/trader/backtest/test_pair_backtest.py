@@ -8,7 +8,7 @@ from factories import StubStrategy, make_spec
 from trader.backtest import Backtester, Tick, TickRecorder, load_ticks
 from trader.backtest.spec import backtest_spec, fetch_ticks
 from trader.shared.models import SOLANA_MINTS, OrderSide, OrderSignal, TickerData
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 JUP = SOLANA_MINTS.get_by_symbol("JUP").mint

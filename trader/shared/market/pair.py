@@ -12,7 +12,7 @@ from collections.abc import Callable
 from decimal import Decimal
 
 from trader.shared.indicators import to_utc
-from trader.shared.market.data import MarketData
+from trader.shared.market.feed import MarketData
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.public_data import Interval, TickerData
 

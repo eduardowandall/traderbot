@@ -9,7 +9,7 @@ from factories import executed_leg, make_spec, memory_gateway
 from trader.backtest import Tick
 from trader.backtest.compare import compare_live, fetch_warmup
 from trader.shared.models import OrderSide, TickerData
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 
 T0 = datetime(2026, 10, 2, 10, 0, tzinfo=UTC)
 ACCOUNT_PREFIX = "paper:strategy:"

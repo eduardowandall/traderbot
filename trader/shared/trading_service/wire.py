@@ -1,9 +1,10 @@
 """JSON do protocolo trade-runner <-> strategy-runner (camada core: só dados).
 
 Cada mensagem é um objeto JSON numa linha (ver `docs/plan.md` §3.3). Aqui
-ficam só as conversões de `BucketSnapshot`, `OrderRequest` e `OrderReply` para
-dicts JSON e de volta; decimais viajam como string, datas em ISO, e ordens pelo
-codec do `Order` (`order_to_json`).
+ficam só as conversões de `BucketSnapshot`, `OrderRequest`, `OrderReply` e
+candles (`TickerData`, op `candles`) para dicts JSON e de volta; decimais
+viajam como string, datas em ISO, e ordens pelo codec do `Order`
+(`order_to_json`).
 """
 
 import json
@@ -13,6 +14,7 @@ from typing import Any
 
 from trader.shared.models import Order, OrderSide, Position
 from trader.shared.models.order import order_from_json, order_to_json
+from trader.shared.models.public_data import TickerData
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
     BucketStatus,
@@ -128,6 +130,32 @@ def reply_from_dict(d: dict) -> OrderReply:
         reasons=tuple(d.get("reasons", ())),
         error=d.get("error"),
     )
+
+
+def candles_to_list(candles: list[TickerData]) -> list[dict]:
+    return [
+        {
+            "timestamp": c.timestamp.isoformat(),
+            "open": str(c.open),
+            "high": str(c.high),
+            "low": str(c.low),
+            "last": str(c.last),
+        }
+        for c in candles
+    ]
+
+
+def candles_from_list(items: list[dict]) -> list[TickerData]:
+    return [
+        TickerData(
+            timestamp=datetime.fromisoformat(d["timestamp"]),
+            open=Decimal(d["open"]),
+            high=Decimal(d["high"]),
+            low=Decimal(d["low"]),
+            last=Decimal(d["last"]),
+        )
+        for d in items
+    ]
 
 
 def encode(message: dict) -> bytes:

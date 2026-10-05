@@ -12,7 +12,7 @@ from trader.backtest import spec as strategies
 from trader.backtest.ticks import PATH_STEPS
 from trader.shared import indicators as ind
 from trader.shared.models import Interval, OrderSide, TickerData
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 ONE = Decimal(1)

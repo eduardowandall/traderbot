@@ -2,8 +2,12 @@
 
 Serve o `TradeService` do modo para strategy-runners (`main.py connect`) por
 JSON em linhas sobre `127.0.0.1` (`docs/plan.md` §3.3). Cada conexão fala por
-uma spec: `hello` valida a spec com a política **deste** processo e abre (ou
-reusa) o bucket `strategy:<id>`; depois `bucket` e `submit`. A cada
+uma spec: `hello` manda os termos dela (`SpecTerms`: par, orçamento, perda
+máxima, maior compra, prazo; a spec inteira fica no strategy-runner), que este
+processo confere com a política **dele** antes de abrir (ou reusar) o bucket
+`strategy:<id>`; depois `bucket` e `submit`, e os dados de
+mercado: `price` (do hub) e `candles` (da Jupiter, para o aquecimento). Só
+este processo fala com a Jupiter. A cada
 `sweep_seconds`, vende o que sobrou em buckets encerrados ou vencidos: as
 saídas não dependem do strategy-runner estar vivo.
 """
@@ -22,15 +26,18 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from trader.execution.trading_service.service import TradeService
-from trader.shared.market.hub import PriceHub
-from trader.shared.market.prices import PriceOf
+from trader.execution.market.hub import PriceHub
+from trader.execution.market.prices import PriceOf
+from trader.execution.trade.trading_service.service import TradeService
+from trader.shared.market import CandleSource
 from trader.shared.models import SOLANA_MINTS
+from trader.shared.models.public_data import Interval
 from trader.shared.paths import data_dir
-from trader.shared.spec.models import StrategySpec
+from trader.shared.spec.terms import SpecTerms
 from trader.shared.spec.validate import SpecLimits, validate
 from trader.shared.trading_service.protocol import BucketStatus
 from trader.shared.trading_service.wire import (
+    candles_to_list,
     decode,
     encode,
     reply_to_dict,
@@ -41,6 +48,8 @@ from trader.shared.trading_service.wire import (
 logger = logging.getLogger(__name__)
 
 SWEEP_SECONDS = 30
+# o máximo de candles por pedido (o mesmo teto do `backtest --candles`)
+MAX_CANDLES = 1000
 
 # preço USD de um mint (para vender sobras sem o strategy-runner); None: sem preço
 
@@ -70,10 +79,12 @@ class TradeRunner:
     token: str = field(default_factory=lambda: secrets.token_hex(16))
     price_of: PriceOf | None = None
     sweep_seconds: float = SWEEP_SECONDS
-    specs: dict[str, StrategySpec] = field(default_factory=dict)
+    specs: dict[str, SpecTerms] = field(default_factory=dict)
     live: set[str] = field(default_factory=set)
     # preços para os strategy-runners (op `price`): um feed para todos
     hub: PriceHub | None = None
+    # candles para os strategy-runners (op `candles`): o aquecimento deles
+    candles: CandleSource | None = None
     # o que roda junto do servidor até ele parar (o hub, o relatório diário)
     background: Sequence[Callable[[], Coroutine[Any, Any, None]]] = ()
 
@@ -141,7 +152,12 @@ class TradeRunner:
             return {"bucket": await self._hello(session, message)}
         if session.bucket is None:
             raise HelloError("mande `hello` primeiro")
-        ops = {"bucket": self._bucket, "submit": self._submit, "price": self._price}
+        ops = {
+            "bucket": self._bucket,
+            "submit": self._submit,
+            "price": self._price,
+            "candles": self._candles,
+        }
         if op not in ops:
             raise ValueError(f"operação desconhecida: {op!r}")
         return await ops[op](session.bucket, message)
@@ -162,37 +178,49 @@ class TradeRunner:
         price, age = await self.hub.price(str(message["mint"]))
         return {"price": str(price), "age": age}
 
+    async def _candles(self, bucket: str, message: dict) -> dict:
+        """Os candles do aquecimento de um strategy-runner, da Jupiter."""
+        if self.candles is None:
+            raise ValueError("este trade-runner não serve candles")
+        qty = int(message["qty"])
+        if not 1 <= qty <= MAX_CANDLES:
+            raise ValueError(f"qty deve estar entre 1 e {MAX_CANDLES}: {qty}")
+        candles = await self.candles.get_candles(
+            str(message["mint"]), Interval(message["interval"]), qty
+        )
+        return {"candles": candles_to_list(candles)}
+
     # --- hello -----------------------------------------------------------------
 
     async def _hello(self, session: _Session, message: dict) -> str:
         if not secrets.compare_digest(str(message.get("token", "")), self.token):
             raise HelloError("token inválido")
-        spec = self._valid_spec(message.get("spec"))
-        name = f"strategy:{spec.spec_id()}"
+        spec = self._valid_terms(message.get("terms"))
+        name = f"strategy:{spec.spec_id}"
         if name in self.live:
-            raise HelloError(f"a spec {spec.spec_id()} já está conectada")
+            raise HelloError(f"a spec {spec.spec_id} já está conectada")
         if name not in self.specs:
             await self._open(name, spec)
         self.live.add(name)
         session.bucket = name
-        session.label = f"{spec.name} ({spec.spec_id()})"
+        session.label = f"{spec.name} ({spec.spec_id})"
         logger.warning(
             f"Spec {session.label} conectada ao bucket {name} ({self._connected()})"
         )
         return name
 
-    def _valid_spec(self, raw) -> StrategySpec:
+    def _valid_terms(self, raw) -> SpecTerms:
         try:
-            spec = StrategySpec.model_validate(raw)
+            spec = SpecTerms.model_validate(raw)
         except ValidationError as ex:
-            raise HelloError(f"spec inválida: {ex.error_count()} erro(s)") from ex
+            raise HelloError(f"termos inválidos: {ex.error_count()} erro(s)") from ex
         errors = validate(spec, self.limits)
         if errors:
             details = "; ".join(f"{e.path}: {e.msg}" for e in errors)
             raise HelloError(f"spec inválida para {self.mode}: {details}")
         return spec
 
-    async def _open(self, name: str, spec: StrategySpec) -> None:
+    async def _open(self, name: str, spec: SpecTerms) -> None:
         token, quote = SOLANA_MINTS.get_pair(spec.symbol)
         await self.service.open_bucket(
             name,
@@ -225,7 +253,7 @@ class TradeRunner:
             except Exception as ex:
                 logger.error(f"Varredura de {name} falhou: {ex}")
 
-    async def _sweep_one(self, name: str, spec: StrategySpec, now: datetime) -> None:
+    async def _sweep_one(self, name: str, spec: SpecTerms, now: datetime) -> None:
         snapshot = await self.service.get_bucket(name)
         status = snapshot.status
         if (

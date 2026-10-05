@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from trader.execution.venues.paper import SimulatedWallet
+from trader.execution.trade.venues.paper import SimulatedWallet
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.paths import logs_dir
 
@@ -50,7 +50,7 @@ class TestPaperWallet:
         lock = path.with_name(path.name + ".lock")
         lock.write_text("", encoding="utf-8")
         monkeypatch.setattr(
-            "trader.execution.venues.paper.wallet.STALE_LOCK_SECONDS", -1
+            "trader.execution.trade.venues.paper.wallet.STALE_LOCK_SECONDS", -1
         )
 
         _swap(wallet)
@@ -67,9 +67,9 @@ def test_logs_follow_the_paths_rule(tmp_path, monkeypatch):
 async def test_no_new_swap_attempt_after_the_deadline(monkeypatch):
     from solders.keypair import Keypair
 
-    from trader.execution.venues.jupiter import async_jupiter_svc as svc
-    from trader.execution.venues.jupiter.async_rpc_client import AsyncRPCClient
-    from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+    from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+    from trader.execution.trade.venues.jupiter import async_jupiter_svc as svc
+    from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 
     provider = svc.AsyncJupiterProvider.on_chain(
         Keypair(),
@@ -94,7 +94,7 @@ def test_a_reset_waits_for_the_wallet_lock(tmp_path, monkeypatch):
     lock = path.with_name(path.name + ".lock")
     lock.write_text("", encoding="utf-8")  # outro processo gravando
     monkeypatch.setattr(
-        "trader.execution.venues.paper.wallet.LOCK_TIMEOUT_SECONDS", 0.1
+        "trader.execution.trade.venues.paper.wallet.LOCK_TIMEOUT_SECONDS", 0.1
     )
 
     with pytest.raises(TimeoutError):
@@ -120,9 +120,11 @@ def test_a_busy_destination_is_replaced_after_a_retry(tmp_path, monkeypatch):
             raise PermissionError("em uso por outro processo")
         real_replace(src, dst)
 
-    monkeypatch.setattr("trader.execution.venues.paper.wallet.os.replace", busy_once)
     monkeypatch.setattr(
-        "trader.execution.venues.paper.wallet.time.sleep", lambda s: None
+        "trader.execution.trade.venues.paper.wallet.os.replace", busy_once
+    )
+    monkeypatch.setattr(
+        "trader.execution.trade.venues.paper.wallet.time.sleep", lambda s: None
     )
     _swap(wallet)
 

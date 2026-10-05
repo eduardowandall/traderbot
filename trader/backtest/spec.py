@@ -16,7 +16,7 @@ from trader.shared.market import MarketData
 from trader.shared.market.pair import ratio_candles
 from trader.shared.models import SOLANA_MINTS, TickerData
 from trader.shared.models.public_data import Interval
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 DEFAULT_BACKTEST_CANDLES = 1000

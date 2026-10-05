@@ -11,7 +11,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import make_spec, open_ledger
+from factories import make_spec, open_ledger, terms_of
 from typer.testing import CliRunner
 
 import main as main_module
@@ -19,15 +19,17 @@ from trader.api.cli import runners as cli_runners
 from trader.api.cli.lock import ModeBusyError, ModeLock
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution.gateway import TradeGateway
+from trader.execution.market.hub import PriceHub
 from trader.execution.models.intent import IntentStatus
-from trader.execution.policy import Policy
 from trader.execution.runner import TradeRunner
-from trader.execution.trading_service.service import TradeService
-from trader.execution.venues.paper import SimulatedWallet, paper_provider
-from trader.shared.market.hub import PriceHub
+from trader.execution.trade.gateway import TradeGateway
+from trader.execution.trade.policy import Policy
+from trader.execution.trade.trading_service.service import TradeService
+from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.shared.market import HubMarketData
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.shared.models.costs import TradeCosts
+from trader.shared.models.public_data import Interval, TickerData
 from trader.shared.paths import PROJECT_ROOT, data_dir
 from trader.shared.spec.validate import SpecLimits
 from trader.shared.trading_service import wire
@@ -39,8 +41,14 @@ from trader.shared.trading_service.protocol import (
     ReplyStatus,
     TradeServiceError,
 )
-from trader.strategy.runner import find_connection
-from trader.strategy.trading_service.remote import HelloRefusedError, RemoteTradeClient
+from trader.strategy.runner import find_connection, strategy_bot
+from trader.strategy.spec.models import StrategySpec
+from trader.strategy.spec.strategy import SpecStrategy
+from trader.strategy.trading_service.remote import (
+    HelloRefusedError,
+    RemoteCandles,
+    RemoteTradeClient,
+)
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
@@ -120,7 +128,12 @@ def _runner(price="100", ledger=None, limits=None):
 async def _client(runner, server, spec=SPEC, token=None, **kwargs):
     port = server.sockets[0].getsockname()[1]
     client = RemoteTradeClient(
-        "127.0.0.1", port, token or runner.token, spec, backoff_initial=0.01, **kwargs
+        "127.0.0.1",
+        port,
+        token or runner.token,
+        terms_of(spec),
+        backoff_initial=0.01,
+        **kwargs,
     )
     await client.open()
     return client
@@ -157,8 +170,21 @@ async def test_hello_refusals():
             await _client(runner, server, token="errado")
         with pytest.raises(HelloRefusedError, match="sizing"):
             await _client(runner, server)
-        with pytest.raises(HelloRefusedError, match="spec inválida"):
-            await _client(runner, server, spec={"version": 1})
+        assert "termos inválidos" in await _raw_hello(runner, server, {"spec_id": 1})
+
+
+async def _raw_hello(runner, server, terms) -> str:
+    """Um `hello` cru (termos malformados não passam pelo `SpecTerms`)."""
+    port = server.sockets[0].getsockname()[1]
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        hello = {"op": "hello", "token": runner.token, "terms": terms}
+        writer.write(wire.encode(hello))
+        answer = wire.decode(await reader.readline())
+    finally:
+        writer.close()
+    assert not answer["ok"]
+    return answer["error"]
 
 
 async def test_one_live_connection_per_spec():
@@ -334,12 +360,14 @@ async def test_serve_runs_the_daily_report_beside_the_server_and_closes_all():
     reporter = mock.Mock()
     reporter.run_forever = lambda: asyncio.Event().wait()
     reporter.notifier.aclose = AsyncMock()
+    runner.candles.aclose = AsyncMock()
 
     await cli_runners._serve(runner, service, reporter)
 
     assert asyncio.all_tasks() == {asyncio.current_task()}  # relatório cancelado
     reporter.notifier.aclose.assert_awaited_once()
     service.aclose.assert_awaited_once()
+    runner.candles.aclose.assert_awaited_once()  # o cliente da Jupiter também
 
 
 class _PriceApi:
@@ -389,3 +417,82 @@ def test_connect_takes_prices_from_the_trade_runner(monkeypatch, tmp_path):
 
     config = bot.call_args.args[0]
     assert config.market.price_of == config.trader.price
+
+
+class _Candles:
+    """A Jupiter de mentira do trade-runner: `qty` candles, um por minuto."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def get_candles(self, mint, interval, candle_qty):
+        self.calls.append((mint, interval, candle_qty))
+        return [
+            TickerData(
+                timestamp=T0 + timedelta(minutes=i),
+                open=Decimal("150.1234567890"),
+                high=Decimal("151.5"),
+                low=Decimal("149.25"),
+                last=Decimal(150 + i),
+            )
+            for i in range(candle_qty)
+        ]
+
+    async def aclose(self):
+        return None
+
+
+async def test_candles_come_from_the_trade_runner():
+    # B12: o strategy-runner não fala com a Jupiter; o aquecimento vem do op
+    jupiter = _Candles()
+    runner = _runner()
+    runner.candles = jupiter
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        got = await RemoteCandles(client).get_candles(SOL.mint, Interval.MINUTE_1, 3)
+        await client.aclose()
+    assert jupiter.calls == [(SOL.mint, Interval.MINUTE_1, 3)]
+    assert got == await _Candles().get_candles(SOL.mint, Interval.MINUTE_1, 3)
+
+
+async def test_a_full_warm_up_fits_in_one_reply():
+    # 900 barras passam do limite de linha padrão do asyncio (64 KB)
+    runner = _runner()
+    runner.candles = _Candles()
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        got = await client.candles(SOL.mint, Interval.SECOND_15, 900)
+        await client.aclose()
+    assert len(got) == 900
+    assert len(wire.encode({"candles": wire.candles_to_list(got)})) > 64 * 1024
+
+
+@pytest.mark.parametrize("qty", [0, 1001])
+async def test_a_candle_count_out_of_range_is_refused(qty):
+    runner = _runner()
+    runner.candles = _Candles()
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        with pytest.raises(TradeServiceError, match="qty"):
+            await client.candles(SOL.mint, Interval.MINUTE_1, qty)
+        await client.aclose()
+
+
+async def test_a_trade_runner_without_candles_says_so():
+    runner = _runner()
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        with pytest.raises(TradeServiceError, match="não serve candles"):
+            await client.candles(SOL.mint, Interval.MINUTE_1, 10)
+        await client.aclose()
+
+
+def test_connect_takes_its_candles_from_the_trade_runner():
+    path = data_dir() / "trader-paper.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"host": "127.0.0.1", "port": 1, "token": "t"}))
+    strategy = SpecStrategy(StrategySpec.model_validate(SPEC))
+    bot = strategy_bot(strategy, path, mock.Mock())
+    assert isinstance(bot.market, HubMarketData)
+    assert isinstance(bot.market.candles, RemoteCandles)
+    assert bot.market.candles.trader is bot.trader

@@ -15,7 +15,7 @@ from trader.shared.models import (
     Position,
     TickerData,
 )
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)

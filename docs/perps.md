@@ -88,7 +88,7 @@ the provider all the way to the ledger columns.
 |---|---|---|
 | Strategy-side boundary | `trading_service/protocol.py` (`OrderRequest`, `OrderReply`, `BucketSnapshot`), `client.py` (`TradeClient`) | The bot, `connect` and the wire protocol don't know what executes the order. A perp bucket is just another bucket |
 | `Strategy` protocol and one decision | `bot/config.py`, `bot/decision.py` | Live and backtest share the tick decision; only the context changes |
-| The gateway flow | `execution/gateway.py` `submit` -> `_authorize` -> `_execute` | Idempotency, policy, ledger and execute are general; `execute` is already a callable |
+| The gateway flow | `execution/trade/gateway/gateway.py` `submit` -> `_authorize` -> `_execute` | Idempotency, policy, ledger and execute are general; `execute` is already a callable |
 | Pure policy | `policy/policy.py` `evaluate` | New rules are new functions in the tuple |
 | `Executor` protocol | `providers/jupiter/executor.py` | Paper vs real is already pluggable, for swaps |
 | Layer map | `tests/test_architecture.py` | New modules get a layer and stay out of strategy code |
@@ -232,7 +232,7 @@ on 2026-10-03; the rest are the design.
 
 ### 6.2 Paper and backtest engine
 
-`trader/execution/venues/paper/perps.py` (venue layer), shared by paper and backtest:
+`trader/execution/trade/venues/paper/perps.py` (venue layer), shared by paper and backtest:
 - positions kept in `paper-wallet.json` under a `perps` key, under the
   existing file lock;
 - open/close at the feed price plus the Jupiter fee model: 0.06% of size each

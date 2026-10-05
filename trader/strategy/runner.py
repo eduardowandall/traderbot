@@ -3,22 +3,21 @@
 Camada strategy-side: monta o bot de sempre (`AsyncWebsocketTradingBot`) com
 um `RemoteTradeClient` para o trade-runner (`main.py serve <modo>`). Não
 importa execução, venue nem risco (`tests/test_architecture.py`), então não
-alcança a chave, a carteira nem o ledger; nem sabe o modo.
+alcança a chave, a carteira nem o ledger; nem sabe o modo. Nem fala com a
+Jupiter: preços e candles vêm do trade-runner (ops `price` e `candles`).
 """
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 
-from trader.shared.market import MarketData
-from trader.shared.market.hub import HubMarketData
+from trader.shared.market import HubMarketData
 from trader.shared.market.pair import market_for
 from trader.shared.notification.notification_service import Notifier
 from trader.shared.paths import data_dir
 from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.strategy.bot.config import BotConfig
 from trader.strategy.spec.strategy import SpecStrategy
-from trader.strategy.trading_service.remote import RemoteTradeClient
+from trader.strategy.trading_service.remote import RemoteCandles, RemoteTradeClient
 
 
 def find_connection(path: Path | None = None) -> dict:
@@ -37,27 +36,26 @@ def find_connection(path: Path | None = None) -> dict:
 
 def strategy_bot(
     strategy: SpecStrategy,
-    spec_json: dict,
     connection_file: Path | None,
-    candles: Callable[[], MarketData],
     notifier: Notifier,
 ) -> AsyncWebsocketTradingBot:
-    """O bot da spec, com ordens e preços pelo trade-runner.
+    """O bot da spec, com ordens, preços e candles pelo trade-runner.
 
     Os preços vêm do hub do trade-runner (op `price`), um feed para todos os
-    strategy-runners; `candles` só serve o aquecimento.
+    strategy-runners; os candles do aquecimento, do op `candles`. O `hello`
+    leva só os termos da spec (`spec.terms()`), que o trade-runner confere.
     """
     connection = find_connection(connection_file)
     trader = RemoteTradeClient(
         connection["host"],
         int(connection["port"]),
         connection["token"],
-        spec_json,
+        strategy.spec.terms(),
         # reiniciado, o trade-runner escreve porta e token novos: relê
         resolve=lambda: find_connection(connection_file),
     )
     market = market_for(
-        strategy.spec.symbol, lambda: HubMarketData(trader.price, candles())
+        strategy.spec.symbol, lambda: HubMarketData(trader.price, RemoteCandles(trader))
     )
     config = BotConfig(
         name=f"connect-{strategy.spec.name}",

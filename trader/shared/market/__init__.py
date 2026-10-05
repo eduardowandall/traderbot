@@ -1,12 +1,5 @@
-"""Dados de mercado só de leitura (preço e candles): sem chave, sem RPC."""
+"""O feed da estratégia (sem rede): `MarketData`, `HubMarketData`, pares."""
 
-from .data import JupiterMarketData, MarketData
-from .prices import JupiterPriceOracle, PriceOracle, usd_snapshot
+from .feed import CandleSource, HubMarketData, MarketData
 
-__all__ = [
-    "JupiterMarketData",
-    "JupiterPriceOracle",
-    "MarketData",
-    "PriceOracle",
-    "usd_snapshot",
-]
+__all__ = ["CandleSource", "HubMarketData", "MarketData"]

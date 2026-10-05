@@ -3,7 +3,7 @@
 Every strategy is a JSON file, written by hand or by an agent from this
 guide. There is no command to create, submit or register one: you write the
 file, backtest it, run it in paper, and iterate. This page is the contract; the
-code that enforces it is `trader/shared/spec/models.py` (format) and
+code that enforces it is `trader/strategy/spec/models.py` (format) and
 `validate.py` (limits), and `tests/test_spec_docs.py` fails if a field or
 condition type is missing here.
 

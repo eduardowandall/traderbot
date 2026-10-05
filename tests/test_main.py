@@ -15,11 +15,11 @@ from typer.testing import CliRunner
 import main as main_module
 from trader.api.cli import bot as cli_bot
 from trader.api.cli.output import dumps
-from trader.execution.gateway import TradeGateway
+from trader.execution.market.hub import PriceHub
+from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.models.mode import RunningMode
-from trader.execution.venues.paper import SimulatedExecutor
-from trader.shared.market.hub import PriceHub
-from trader.shared.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.execution.trade.gateway import TradeGateway
+from trader.execution.trade.venues.paper import SimulatedExecutor
 from trader.shared.models import SOLANA_MINTS, TickerData
 from trader.shared.models.mints import SOL_MINT
 from trader.shared.notification import (

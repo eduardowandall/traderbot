@@ -11,7 +11,7 @@ from trader.backtest import (
     load_ticks,
 )
 from trader.shared.models import OrderSide, OrderSignal
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 ONE = Decimal(1)

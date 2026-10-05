@@ -23,21 +23,23 @@ from trader.backtest.spec import (
     backtest_spec,
     fetch_ticks,
 )
+from trader.execution.market import JupiterMarketData
+from trader.execution.market.hub import PriceHub
+from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.prices import price_fn
 from trader.execution.models.mode import RunningMode
 from trader.execution.notification.daily_report import DailyReporter
-from trader.execution.policy import Policy, load_policy
-from trader.execution.trading_service.local import LocalTradeClient
+from trader.execution.trade.policy import Policy, load_policy
+from trader.execution.trade.trading_service.local import LocalTradeClient
 from trader.execution.wiring import build_trade_service
-from trader.shared.market import JupiterMarketData, MarketData
-from trader.shared.market.hub import HubMarketData, PriceHub
-from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.shared.market import HubMarketData, MarketData
 from trader.shared.market.pair import market_for
-from trader.shared.market.prices import price_fn
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.notification import notifier_from_env
-from trader.shared.spec.validate import SpecLimits, parse_spec, validate
+from trader.shared.spec.validate import SpecLimits, validate
 from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.strategy.bot.config import BotConfig
+from trader.strategy.spec.parse import parse_spec
 from trader.strategy.spec.strategy import SpecStrategy
 
 SPEC_HELP = "Arquivo JSON da spec (o par vem dela), ex: docs/examples/spec-random.json"
@@ -238,7 +240,8 @@ def limits_from_policy(policy: Policy) -> SpecLimits:
 
 def _check_limits(strategy: SpecStrategy, mode: RunningMode) -> None:
     """A spec precisa caber na política do modo antes de rodar."""
-    errors = validate(strategy.spec, limits_from_policy(load_policy(mode=str(mode))))
+    limits = limits_from_policy(load_policy(mode=str(mode)))
+    errors = validate(strategy.spec.terms(), limits)
     if errors:
         details = "; ".join(f"{e.path}: {e.msg}" for e in errors)
         raise typer.BadParameter(f"spec inválida para {mode}: {details}")

@@ -35,21 +35,24 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `.data/trader-<mode>.lock`): `run` or `serve`, never both. One spec: `run`.
   Several specs at once: one `serve <mode>` plus one `connect spec.json` per
   spec. `serve` writes `{host, port, token, pid}` to `.data/trader-<mode>.json`;
-  `connect` finds it (or `--trader FILE`), sends the spec, and the trade-runner
-  validates it with its own policy. Protocol: `docs/plan.md` §3.3,
+  `connect` finds it (or `--trader FILE`), sends the spec's terms (B13:
+  `SpecTerms`, from `spec.terms()`: id, symbol, budget, max loss, largest buy,
+  expiry; the full spec stays in `connect`), and the trade-runner validates
+  them with its own policy. Protocol: `docs/plan.md` §3.3,
   `trader/shared/trading_service/wire.py`, `trader/strategy/trading_service/remote.py`,
   `trader/execution/runner.py`, `trader/strategy/runner.py`. A `serve`
   and a `connect` from different versions may not talk (B6 renamed snapshot
-  fields, B7 added the `price` op): restart them together.
-- **Prices come from a hub** (`trader/shared/market/hub.py`, B7): one websocket for
+  fields, B7 added the `price` op, B12 the `candles` op): restart them together.
+- **Prices come from a hub** (`trader/execution/market/hub.py`, B7): one websocket for
   every mint plus a batched Price API poll for quiet ones. `serve` runs it and
-  answers `connect`s through the `price` op; `run` runs its own. A price older
+  answers `connect`s through the `price` op (warm-up candles through the
+  `candles` op, B12); `run` runs its own. A price older
   than 30s raises `StalePriceError` (no decisions on stale data), and
   `HubMarketData` paces each bot at one price per second. The hub is also
   the process's `PriceOracle` (B10): `build_trade_service(prices=hub)` gives
   it to the service, the sweep, the daily report and the provider's quote
   check, so only the hub calls the Price API. USDC/USDT = 1 USD is decided
-  in one place, `usd_snapshot`/`price_fn` (`trader/shared/market/prices.py`).
+  in one place, `usd_snapshot`/`price_fn` (`trader/execution/market/prices.py`).
 - **Wallet checks** (`TradeService`): one balance cache for all buckets; a
   bucket whose budget doesn't fit the wallet (with the other open budgets) is
   refused; at the first open, the open positions of every bucket in the ledger
@@ -106,7 +109,7 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `lookback()`/`label()`), its union there (`EntryCondition` for entry-only
   blocks such as `below_last_exit`), a predicate in `conditions.PREDICATES`,
   and a row in `docs/specs.md`. Tests fail if any of them disagree. Most ideas
-  fit an `expr` instead (`trader/shared/spec/expr.py`: `ast.parse` plus a
+  fit an `expr` instead (`trader/strategy/spec/expr.py`: `ast.parse` plus a
   whitelist walk and its own evaluator, never `eval`; an indicator there is one
   entry in `FUNCTIONS`).
 - Sizing is `fixed_usd` or `pct_of_bucket` (of what the bucket may spend now).
@@ -129,13 +132,18 @@ command to run in a terminal. The rules are tested in
 `tests/test_guard_commands.py`; they are guardrails, not a sandbox.
 
 ## Rules that are easy to break
-- **Folders follow the processes** (B11): `trader/execution/` is the
-  trade-runner (key, wallet, ledger, policy, venues), `trader/strategy/` the
-  strategy-runner (bot, spec engine, remote client), `trader/shared/` what both
-  import (models, market, spec contract, wire protocol, paths),
-  `trader/api/cli/` the commands, `trader/backtest/` both in one process.
-  `execution` and `strategy` never import each other; `shared` imports
-  neither. A model used by one side lives in that side's `models/`.
+- **Folders follow the processes** (B11, B12): `trader/execution/` is the
+  trade-runner, split into `market/` (everything that reads Jupiter: client,
+  candles, `PriceHub`, USD oracle; never moves funds) and `trade/` (gateway,
+  venues, ledger, policy, trading service); `trader/strategy/` the
+  strategy-runner (bot, spec engine, remote client); `trader/shared/` what both
+  import (models, the network-free feed `MarketData`/`HubMarketData`/pairs,
+  the spec's terms and their policy checks, wire protocol, paths; the full
+  spec language is in `trader/strategy/spec/`, B13); `trader/api/cli/` the commands;
+  `trader/backtest/` both in one process. `execution` and `strategy` never
+  import each other; `shared` imports neither. A model used by one side lives
+  in that side's `models/`. Only the trade-runner talks to Jupiter: `connect`
+  gets prices (`price` op) and warm-up candles (`candles` op) from `serve`.
 - **Layering** (`tests/test_architecture.py`): every `trader/` module is mapped
   to a layer; a new module must be added to the map. Strategy code and the
   strategy side (`trader/strategy/`) never import execution, venue or risk.
@@ -143,7 +151,7 @@ command to run in a terminal. The rules are tested in
   (`trader/strategy/bot/config.py`), which `SpecStrategy` implements, and share one
   per-tick decision (`trader/strategy/bot/decision.py`).
 - **One path to a swap**: `TradeGateway.submit` (idempotency -> policy -> ledger
-  -> execute), called only by `trader/execution/gateway/fills.py::execute_trade`.
+  -> execute), called only by `trader/execution/trade/gateway/fills.py::execute_trade`.
 - **Before a real swap is sent** (B7): the quote must be within 2% of the Price
   API value (`max_quote_deviation_pct`, on in `trader/execution/wiring.py`; buys fail
   closed, sells only warn), and `OnChainExecutor` inspects the signed
@@ -178,7 +186,7 @@ command to run in a terminal. The rules are tested in
   beat the tick. Shown by the backtest, the daily report,
   `live_vs_backtest.py` and `ledger_dump.py`.
 - **Ledger schema** is one `_SCHEMA` with a `user_version` in
-  `trader/execution/ledger/store.py`. There are no migrations: an older file is refused
+  `trader/execution/trade/ledger/store.py`. There are no migrations: an older file is refused
   (`LedgerFormatError`); bump `SCHEMA_VERSION` when the schema changes.
 - **UNCONFIRMED** (process killed mid-swap) blocks all trading in that mode
   until the ledger file is moved or deleted. The circuit breaker counts

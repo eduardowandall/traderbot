@@ -8,10 +8,12 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from trader.execution.ledger import Ledger
 from trader.execution.models.intent import IntentSide, TradeIntent
+from trader.execution.trade.ledger import Ledger
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.paths import PROJECT_ROOT
+from trader.shared.spec.terms import SpecTerms
+from trader.strategy.spec.models import StrategySpec
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
@@ -113,7 +115,7 @@ def open_ledger() -> Ledger:
 
 def memory_gateway(policy=None):
     """`TradeGateway.in_memory()` com o ledger fechado ao fim do teste."""
-    from trader.execution.gateway import TradeGateway
+    from trader.execution.trade.gateway import TradeGateway
 
     gateway = TradeGateway.in_memory(policy)
     _OPEN_LEDGERS.append(gateway.ledger)
@@ -161,12 +163,17 @@ def make_spec(**overrides) -> dict:
     return spec
 
 
+def terms_of(spec: dict) -> SpecTerms:
+    """Os termos (o que o `hello` manda) de uma spec em dict JSON."""
+    return StrategySpec.model_validate(spec).terms()
+
+
 def bonk_quote():
     """A quote dos mocks da Jupiter: 50 USDC -> 50 BONK, impacto de 0.5%.
 
     `priceImpactPct` é fração (0.005 == 0.5%), não percentual.
     """
-    from trader.shared.market.jupiter.jupiter_data import JupiterQuoteResponse
+    from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 
     return JupiterQuoteResponse.single_route(
         USDC, 50_000_000, BONK, 5_000_000, price_impact_pct="0.005"
@@ -182,7 +189,9 @@ def mock_provider(**attrs):
     """
     from unittest.mock import AsyncMock
 
-    from trader.execution.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
+    from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
+        AsyncJupiterProvider,
+    )
     from trader.shared.models.costs import QUOTE, TradeCosts
 
     provider = AsyncMock(spec=AsyncJupiterProvider)
@@ -240,7 +249,7 @@ def inspection_passes(rpc, lamports: int = 10**9):
     """
     from unittest.mock import AsyncMock
 
-    from trader.execution.venues.jupiter.tx_inspection import WalletState
+    from trader.execution.trade.venues.jupiter.tx_inspection import WalletState
 
     rpc.wallet_state = AsyncMock(return_value=WalletState(lamports, {}))
     rpc.simulate_transaction = AsyncMock(return_value=simulation(lamports))

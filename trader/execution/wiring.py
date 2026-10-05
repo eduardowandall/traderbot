@@ -12,20 +12,20 @@ from collections.abc import Callable
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from trader.execution.gateway import TradeGateway
+from trader.execution.market.prices import JupiterPriceOracle, PriceOracle
 from trader.execution.models.mode import RunningMode
-from trader.execution.policy import load_policy
-from trader.execution.trading_service.service import TradeService
-from trader.execution.venues.jupiter.async_jupiter_svc import (
+from trader.execution.trade.gateway import TradeGateway
+from trader.execution.trade.policy import load_policy
+from trader.execution.trade.trading_service.service import TradeService
+from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
     DEFAULT_MAX_QUOTE_DEVIATION_PCT,
     AsyncJupiterProvider,
 )
-from trader.execution.venues.paper import (
+from trader.execution.trade.venues.paper import (
     DEFAULT_PAPER_BALANCES,
     SimulatedWallet,
     paper_provider,
 )
-from trader.shared.market.prices import JupiterPriceOracle, PriceOracle
 from trader.shared.paths import data_dir
 
 

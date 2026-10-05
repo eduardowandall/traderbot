@@ -9,12 +9,12 @@ from factories import StubStrategy, memory_gateway
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
+from trader.execution.market import JupiterMarketData
+from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.execution.models.intent import IntentSide, IntentStatus
-from trader.execution.trading_service.local import LocalTradeClient
-from trader.execution.trading_service.service import TradeService
-from trader.execution.venues.paper import SimulatedWallet, paper_provider
-from trader.shared.market import JupiterMarketData
-from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.trade.trading_service.local import LocalTradeClient
+from trader.execution.trade.trading_service.service import TradeService
+from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.shared.models import (
     SOLANA_MINTS,
     Interval,

@@ -7,12 +7,12 @@ from pathlib import Path
 
 from factories import example_spec, make_intent, make_spec, open_ledger
 
-from trader.execution.gateway import TradeGateway
 from trader.execution.models.intent import IntentSide, PolicyDecision
-from trader.execution.policy import Policy
+from trader.execution.trade.gateway import TradeGateway
+from trader.execution.trade.policy import Policy
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.shared.models.order import SwapResult
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)

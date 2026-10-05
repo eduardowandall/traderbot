@@ -8,8 +8,9 @@ import pytest
 from factories import example_spec, make_spec
 
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
-from trader.shared.spec.models import StrategySpec
-from trader.shared.spec.validate import SpecLimits, parse_spec, validate
+from trader.shared.spec.validate import SpecLimits, validate
+from trader.strategy.spec.models import StrategySpec
+from trader.strategy.spec.parse import parse_spec
 from trader.strategy.spec.strategy import SpecStrategy
 
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
@@ -43,7 +44,7 @@ def _signals(strategy, prices, position=None):
 def test_example_specs_validate_under_the_default_limits(name):
     with open(example_spec(name), encoding="utf-8") as f:
         spec = parse_spec(f.read())
-    assert validate(spec, SpecLimits(max_trade_usd=Decimal(25))) == []
+    assert validate(spec.terms(), SpecLimits(max_trade_usd=Decimal(25))) == []
 
 
 class TestRandomChance:

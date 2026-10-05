@@ -13,19 +13,19 @@ from typer.testing import CliRunner
 import main as main_module
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution.gateway import TradeGateway
-from trader.execution.policy import Policy
-from trader.execution.trading_service.service import TradeService
-from trader.execution.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.gateway import TradeGateway
+from trader.execution.trade.policy import Policy
+from trader.execution.trade.trading_service.service import TradeService
+from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.paths import PROJECT_ROOT
-from trader.shared.spec.models import StrategySpec
 from trader.shared.spec.validate import SpecLimits, validate
 from trader.shared.trading_service.protocol import (
     BucketStatus,
     OrderRequest,
     ReplyStatus,
 )
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 ONE = Decimal(1)
@@ -53,8 +53,8 @@ class TestRelativeExpiry:
             StrategySpec.model_validate(data)
 
     def test_ttl_is_checked_against_max_days(self):
-        assert validate(_ttl_spec(ttl_days=30), LIMITS, T0) == []
-        (error,) = validate(_ttl_spec(ttl_days=31), LIMITS, T0)
+        assert validate(_ttl_spec(ttl_days=30).terms(), LIMITS, T0) == []
+        (error,) = validate(_ttl_spec(ttl_days=31).terms(), LIMITS, T0)
         assert error.path == "ttl_days"
 
     def test_ttl_counts_from_the_first_tick(self):
@@ -73,7 +73,7 @@ class TestRelativeExpiry:
     def test_the_shipped_example_validates(self):
         example = PROJECT_ROOT / "docs" / "examples" / "spec-sol-dip.json"
         spec = StrategySpec.model_validate_json(example.read_text(encoding="utf-8"))
-        assert validate(spec, LIMITS) == []
+        assert validate(spec.terms(), LIMITS) == []
 
 
 def _service(tmp_path, price="100"):

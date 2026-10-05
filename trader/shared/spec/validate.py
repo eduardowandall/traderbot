@@ -1,9 +1,10 @@
-"""Leitura e validação de specs.
+"""Validação dos termos de uma spec contra os limites do dono.
 
-`parse_spec` transforma o texto JSON numa `StrategySpec` (erros de formato
-viram `SpecParseError` com um `SpecError` por campo). `validate` confere a
-spec contra os limites do dono (`SpecLimits`) e devolve a lista de problemas;
-lista vazia = válida.
+`validate` confere os `SpecTerms` (o par, o maior gasto por compra, o prazo)
+contra os `SpecLimits` e devolve a lista de problemas; lista vazia = válida.
+Quem tem a spec inteira passa `spec.terms()`; o trade-runner recebe os termos
+pelo `hello` e confere com a política dele. A leitura do JSON da spec fica do
+lado da estratégia (`trader.strategy.spec.parse`).
 
 `SpecLimits` é um dado simples, não a `Policy`: a camada de estratégia não
 importa a política (camada de risco). Quem monta os limites a partir da
@@ -16,10 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from pydantic import ValidationError
-
 from trader.shared.models import SOLANA_MINTS, Mint
-from trader.shared.spec.models import FixedUsd, StrategySpec
+from trader.shared.spec.terms import SpecTerms
 
 # prazo máximo de uma spec; vai para a seção [strategies] da política (B1)
 DEFAULT_MAX_DAYS = 30
@@ -31,12 +30,6 @@ class SpecError:
     msg: str
 
 
-class SpecParseError(ValueError):
-    def __init__(self, errors: list[SpecError]):
-        self.errors = errors
-        super().__init__("; ".join(f"{e.path}: {e.msg}" for e in errors))
-
-
 @dataclass(frozen=True)
 class SpecLimits:
     max_trade_usd: Decimal
@@ -44,24 +37,12 @@ class SpecLimits:
     max_days: int = DEFAULT_MAX_DAYS
 
 
-def parse_spec(text: str) -> StrategySpec:
+Rule = Callable[[SpecTerms, SpecLimits, datetime], Iterator[SpecError]]
+
+
+def _symbol(terms: SpecTerms, limits: SpecLimits, now: datetime):
     try:
-        return StrategySpec.model_validate_json(text)
-    except ValidationError as ex:
-        raise SpecParseError(
-            [
-                SpecError(".".join(str(p) for p in err["loc"]), err["msg"])
-                for err in ex.errors(include_url=False)
-            ]
-        ) from ex
-
-
-Rule = Callable[[StrategySpec, SpecLimits, datetime], Iterator[SpecError]]
-
-
-def _symbol(spec: StrategySpec, limits: SpecLimits, now: datetime):
-    try:
-        token, quote = SOLANA_MINTS.get_pair(spec.symbol)
+        token, quote = SOLANA_MINTS.get_pair(terms.symbol)
     except ValueError as ex:
         yield SpecError("symbol", str(ex))
         return
@@ -87,22 +68,20 @@ def _allowed(token: Mint, quote: Mint, limits: SpecLimits) -> Iterator[SpecError
             yield SpecError("symbol", f"símbolo não permitido: {mint.symbol}")
 
 
-def _sizing(spec: StrategySpec, limits: SpecLimits, now: datetime):
-    sizing = spec.sizing
-    path = "sizing.usd" if isinstance(sizing, FixedUsd) else "sizing.pct"
-    usd = sizing.max_usd(spec.budget_usd)
+def _sizing(terms: SpecTerms, limits: SpecLimits, now: datetime):
+    path, usd = terms.sizing_field, terms.max_trade_usd
     if usd > limits.max_trade_usd:
         # acima do limite por trade toda compra seria recusada pela política
         yield SpecError(
             path, f"{usd} USD acima do limite por trade {limits.max_trade_usd}"
         )
-    if usd > spec.budget_usd:
-        yield SpecError(path, f"{usd} USD acima do budget_usd {spec.budget_usd}")
+    if usd > terms.budget_usd:
+        yield SpecError(path, f"{usd} USD acima do budget_usd {terms.budget_usd}")
 
 
-def _expiry(spec: StrategySpec, limits: SpecLimits, now: datetime):
-    path = "expires_at" if spec.expires_at is not None else "ttl_days"
-    expiry = spec.expiry(now)
+def _expiry(terms: SpecTerms, limits: SpecLimits, now: datetime):
+    path = "expires_at" if terms.expires_at is not None else "ttl_days"
+    expiry = terms.expiry(now)
     if expiry <= now:
         yield SpecError(path, "já expirou")
     if expiry > now + timedelta(days=limits.max_days):
@@ -113,7 +92,7 @@ RULES: tuple[Rule, ...] = (_symbol, _sizing, _expiry)
 
 
 def validate(
-    spec: StrategySpec, limits: SpecLimits, now: datetime | None = None
+    terms: SpecTerms, limits: SpecLimits, now: datetime | None = None
 ) -> list[SpecError]:
     now = now or datetime.now(UTC)
-    return [error for rule in RULES for error in rule(spec, limits, now)]
+    return [error for rule in RULES for error in rule(terms, limits, now)]

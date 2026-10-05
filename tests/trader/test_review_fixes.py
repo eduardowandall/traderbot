@@ -6,22 +6,29 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import make_intent, make_spec, memory_gateway, mock_provider, open_ledger
+from factories import (
+    make_intent,
+    make_spec,
+    memory_gateway,
+    mock_provider,
+    open_ledger,
+    terms_of,
+)
 from solana.rpc.commitment import Confirmed
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution.gateway import TradeGateway
-from trader.execution.gateway.account import AsyncAccount
-from trader.execution.gateway.balances import WalletBalances
 from trader.execution.models.account_data import MintBalance
 from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.intent import IntentStatus
-from trader.execution.policy import Policy
 from trader.execution.runner import TradeRunner
-from trader.execution.trading_service.service import TradeService
-from trader.execution.venues.jupiter.async_rpc_client import AsyncRPCClient
-from trader.execution.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.gateway import TradeGateway
+from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.balances import WalletBalances
+from trader.execution.trade.policy import Policy
+from trader.execution.trade.trading_service.service import TradeService
+from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position, SwapResult
 from trader.shared.models.costs import TradeCosts
 from trader.shared.spec.validate import SpecLimits
@@ -173,7 +180,7 @@ async def test_a_restarted_trade_runner_is_found_again():
         current["host"],
         current["port"],
         current["token"],
-        spec,
+        terms_of(spec),
         backoff_initial=0.01,
         resolve=lambda: current,
     )
@@ -194,6 +201,8 @@ async def test_a_restarted_trade_runner_is_found_again():
 async def test_the_client_gives_up_so_the_bot_can_back_off(monkeypatch):
     # cada conexão recusada custa ~2s no Windows: uma tentativa basta aqui
     monkeypatch.setattr("trader.strategy.trading_service.remote.RECONNECT_ATTEMPTS", 1)
-    client = RemoteTradeClient("127.0.0.1", 9, "t", {}, backoff_initial=0.001)
+    client = RemoteTradeClient(
+        "127.0.0.1", 9, "t", terms_of(make_spec()), backoff_initial=0.001
+    )
     with pytest.raises(TradeServiceError, match="fora do ar"):
         await client.bucket()

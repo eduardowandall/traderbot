@@ -9,7 +9,7 @@ from trader.execution.models.intent import IntentSide, PolicyDecision
 from trader.shared.indicators import BarSeries
 from trader.shared.models import Interval
 from trader.shared.models.order import SwapResult
-from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)

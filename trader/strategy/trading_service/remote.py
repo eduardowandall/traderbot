@@ -1,11 +1,15 @@
 """`RemoteTradeClient`: o `TradeClient` de um strategy-runner (camada strategy-side).
 
 Fala com o trade-runner (`main.py serve`) por JSON em linhas sobre TCP local
-(`docs/plan.md` §3.3). Não tem chave, ledger nem modo. Toda ordem sai com
+(`docs/plan.md` §3.3). Não tem chave, ledger nem modo. O `hello` leva só os
+termos da spec (`SpecTerms`); a spec inteira fica neste processo. Toda ordem sai com
 chave de idempotência: se a conexão cai, o cliente reconecta (espera
 crescente), manda `hello` de novo e reenvia o pedido com a mesma chave, então
 uma ordem executa no máximo uma vez (o reenvio de uma que já executou volta
 recusado, e o próximo `bucket()` mostra a posição).
+
+Os dados de mercado também vêm do trade-runner: `price` (o hub dele) e
+`candles` (o aquecimento); o strategy-runner não fala com a Jupiter.
 """
 
 import asyncio
@@ -15,6 +19,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 
+from trader.shared.models.public_data import Interval, TickerData
+from trader.shared.spec.terms import SpecTerms
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
     OrderReply,
@@ -22,6 +28,7 @@ from trader.shared.trading_service.protocol import (
     TradeServiceError,
 )
 from trader.shared.trading_service.wire import (
+    candles_from_list,
     decode,
     encode,
     reply_from_dict,
@@ -36,6 +43,9 @@ BACKOFF_INITIAL = 1.0
 BACKOFF_MAX = 30.0
 # tentativas de reconexão por chamada (depois, o loop do bot assume)
 RECONNECT_ATTEMPTS = 5
+# maior linha aceita do trade-runner: 900 candles dão ~120 KB, e o padrão do
+# asyncio (64 KB) recusaria
+LINE_LIMIT = 4 * 1024 * 1024
 
 
 class HelloRefusedError(TradeServiceError):
@@ -48,7 +58,7 @@ class RemoteTradeClient:
         host: str,
         port: int,
         token: str,
-        spec: dict,
+        terms: SpecTerms,
         backoff_initial: float = BACKOFF_INITIAL,
         backoff_max: float = BACKOFF_MAX,
         # relê o endereço (host, port, token): um trade-runner reiniciado tem
@@ -59,7 +69,7 @@ class RemoteTradeClient:
         self.host = host
         self.port = port
         self.token = token
-        self.spec = spec
+        self.terms = terms
         self.backoff_initial = backoff_initial
         self.backoff_max = backoff_max
         self.bucket_name: str | None = None
@@ -90,6 +100,20 @@ class RemoteTradeClient:
         answer = await self._call({"op": "price", "mint": mint})
         return Decimal(answer["price"])
 
+    async def candles(
+        self, mint: str, interval: Interval, candle_qty: int
+    ) -> list[TickerData]:
+        """Os candles do mint pelo trade-runner (só no aquecimento)."""
+        answer = await self._call(
+            {
+                "op": "candles",
+                "mint": mint,
+                "interval": str(interval),
+                "qty": candle_qty,
+            }
+        )
+        return candles_from_list(answer["candles"])
+
     async def aclose(self) -> None:
         if self._writer is not None:
             self._writer.close()
@@ -98,9 +122,15 @@ class RemoteTradeClient:
     # --- conexão ---------------------------------------------------------------
 
     async def _connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+        self._reader, self._writer = await asyncio.open_connection(
+            self.host, self.port, limit=LINE_LIMIT
+        )
         answer = await self._exchange(
-            {"op": "hello", "token": self.token, "spec": self.spec}
+            {
+                "op": "hello",
+                "token": self.token,
+                "terms": self.terms.model_dump(mode="json"),
+            }
         )
         if not answer.get("ok"):
             await self.aclose()
@@ -159,3 +189,21 @@ class RemoteTradeClient:
             int(info["port"]),
             info["token"],
         )
+
+
+class RemoteCandles:
+    """A metade de candles de um `MarketData`, pelo trade-runner (op `candles`).
+
+    Fechar não fecha a conexão: ela é do `RemoteTradeClient`, que o bot fecha.
+    """
+
+    def __init__(self, trader: RemoteTradeClient):
+        self.trader = trader
+
+    async def get_candles(
+        self, mint: str, interval: Interval, candle_qty: int
+    ) -> list[TickerData]:
+        return await self.trader.candles(mint, interval, candle_qty)
+
+    async def aclose(self) -> None:
+        pass

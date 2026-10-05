@@ -39,15 +39,19 @@ PACKAGES: dict[str, str] = {
     "trader.shared.indicators": "core",
     "trader.shared.notification": "core",
     "trader.shared.trading_service": "core",
-    "trader.shared.spec": "strategy",
-    "trader.shared.market": "market",
+    "trader.shared.spec": "core",  # os termos da spec (B13), só dados
+    "trader.shared.market": "market",  # o feed, sem rede
     # execution: o trade-runner (chave, carteira, ledger, política)
     "trader.execution.models": "core",
-    "trader.execution.venues": "venue",
-    "trader.execution.policy": "risk",
-    "trader.execution.ledger": "risk",
-    "trader.execution.gateway": "execution",
-    "trader.execution.trading_service": "execution",
+    # só leitura da Jupiter: preços, candles, quotes (nunca move fundos)
+    "trader.execution.market": "market",
+    # o que move fundos e o que limita/registra
+    "trader.execution.trade": "execution",
+    "trader.execution.trade.venues": "venue",
+    "trader.execution.trade.policy": "risk",
+    "trader.execution.trade.ledger": "risk",
+    "trader.execution.trade.gateway": "execution",
+    "trader.execution.trade.trading_service": "execution",
     "trader.execution.runner": "app",
     "trader.execution.wiring": "app",
     "trader.execution.notification": "app",
@@ -196,16 +200,16 @@ def test_layer_checker_catches_a_forbidden_import():
     # inclusive importação relativa e dentro de função
     source = "\n".join(
         [
-            "from ...execution.ledger import Ledger",
+            "from ...execution.trade.ledger import Ledger",
             "def f():",
-            "    import trader.execution.venues.jupiter.async_jupiter_svc",
+            "    import trader.execution.trade.venues.jupiter.async_jupiter_svc",
             "from trader.shared.models import Order",
         ]
     )
     assert _forbidden("trader.strategy.spec.strategy", source) == {
-        "trader.execution.ledger",
-        "trader.execution.venues.jupiter.async_jupiter_svc",
+        "trader.execution.trade.ledger",
+        "trader.execution.trade.venues.jupiter.async_jupiter_svc",
     }
-    assert _forbidden("trader.execution.gateway.account", source) == set()
+    assert _forbidden("trader.execution.trade.gateway.account", source) == set()
     assert layer_of("trader.shared.trading_service.protocol") == "core"
-    assert layer_of("trader.execution.trading_service.service") == "execution"
+    assert layer_of("trader.execution.trade.trading_service.service") == "execution"

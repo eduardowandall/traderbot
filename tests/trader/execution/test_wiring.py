@@ -1,7 +1,7 @@
 """`trader/execution/wiring.py`: o modo vira componentes com a política do modo."""
 
 from trader.execution.models.mode import RunningMode
-from trader.execution.venues.paper.executor import SimulatedExecutor
+from trader.execution.trade.venues.paper.executor import SimulatedExecutor
 from trader.execution.wiring import build_trade_service
 from trader.shared.paths import policy_file
 

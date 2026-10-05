@@ -10,20 +10,20 @@ from live_helpers import LOOSE_PAPER_POLICY
 
 from trader.backtest import Backtester, TickRecorder, load_ticks
 from trader.backtest.spec import result_to_dict
-from trader.execution.ledger import Ledger, ledger_path
+from trader.execution.market import JupiterMarketData
 from trader.execution.models.intent import IntentStatus
 from trader.execution.models.mode import RunningMode
-from trader.execution.trading_service.local import LocalTradeClient
+from trader.execution.trade.ledger import Ledger, ledger_path
+from trader.execution.trade.trading_service.local import LocalTradeClient
 from trader.execution.wiring import build_trade_service
-from trader.shared.market import JupiterMarketData
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.models.order import order_from_json
 from trader.shared.notification import NotificationService
 from trader.shared.paths import policy_file
-from trader.shared.spec.models import StrategySpec
 from trader.shared.trading_service.protocol import OrderRequest, ReplyStatus
 from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.strategy.bot.config import BotConfig
+from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
 BOT_SECONDS = 30

@@ -8,7 +8,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 
-from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.paths import PROJECT_ROOT
 
