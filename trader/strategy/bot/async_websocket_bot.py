@@ -2,8 +2,8 @@
 
 Camada strategy-side: o bot lê preços de um `MarketData`, vê o próprio
 bucket e pede ordens por um `TradeClient`. Não importa execução, política,
-ledger nem provider, e não sabe em que modo roda — no mesmo processo
-(`LocalTradeClient`) ou, no futuro (B3), falando com um trade-runner.
+ledger nem provider, e não sabe em que modo roda: o `connect` lhe dá um
+`RemoteTradeClient` para o trade-runner.
 """
 
 import asyncio
@@ -42,7 +42,6 @@ class AsyncWebsocketTradingBot:
         self.trader = config.trader
         self.notification_service = config.notifier
         self.on_tick = config.on_tick
-        self.background = config.background
         self.is_running = False
         self._opened = False  # bucket aberto (uma vez só)
         self._resumed = False  # estado da estratégia restaurado (uma vez só)
@@ -100,7 +99,6 @@ class AsyncWebsocketTradingBot:
     async def arun(self):
         # por task: vários bots podem rodar no mesmo processo
         logging_config.botname.set(f"{self.name}-{self.symbol}")
-        tasks = [asyncio.create_task(start()) for start in self.background]
         try:
             await self._loop()
         except asyncio.CancelledError:
@@ -109,7 +107,6 @@ class AsyncWebsocketTradingBot:
             self.notification_service.send_message("Bot interrompido pelo usuário")
             raise
         finally:
-            await _cancel(tasks)
             await self._shutdown()
 
     async def _shutdown(self):
@@ -228,12 +225,6 @@ def log_placed_order(order: Order):
         extra={"markup": True},
     )
     bot_logger.debug(describe_costs(order.costs, order.sol_usd))
-
-
-async def _cancel(tasks: list[asyncio.Task]) -> None:
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def bucket_line(snapshot: BucketSnapshot, price: Decimal) -> str:

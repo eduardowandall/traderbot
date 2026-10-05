@@ -13,6 +13,7 @@ from factories import (
     mock_provider,
     open_ledger,
     terms_of,
+    trade_runner,
 )
 from solana.rpc.commitment import Confirmed
 
@@ -21,7 +22,6 @@ from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.models.account_data import MintBalance
 from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.intent import IntentStatus
-from trader.execution.runner import TradeRunner
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.gateway.account import AsyncAccount
 from trader.execution.trade.gateway.balances import WalletBalances
@@ -31,7 +31,6 @@ from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClien
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position, SwapResult
 from trader.shared.models.costs import TradeCosts
-from trader.shared.spec.validate import SpecLimits
 from trader.shared.trading_service.protocol import OrderRequest, TradeServiceError
 from trader.strategy.trading_service.remote import RemoteTradeClient
 
@@ -168,8 +167,7 @@ async def test_a_sell_keeps_the_key_it_was_sent_with():
 async def test_a_restarted_trade_runner_is_found_again():
     spec = make_spec(ttl_days=5, expires_at=None)
     ledger = open_ledger()
-    limits = SpecLimits(Decimal(1000))
-    first = TradeRunner(_paper_service(ledger), "paper", limits)
+    first = trade_runner(_paper_service(ledger))
     server = await first.start()
     current = {
         "host": "127.0.0.1",
@@ -190,7 +188,7 @@ async def test_a_restarted_trade_runner_is_found_again():
     await server.wait_closed()
 
     # reiniciado: outra porta, outro token, o mesmo ledger
-    second = TradeRunner(_paper_service(ledger), "paper", limits)
+    second = trade_runner(_paper_service(ledger))
     async with await second.start() as server2:
         current.update(port=server2.sockets[0].getsockname()[1], token=second.token)
         snapshot = await client.bucket()

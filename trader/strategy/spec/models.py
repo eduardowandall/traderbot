@@ -13,7 +13,7 @@ condição `expr` futura entra como mais um membro das uniões abaixo.
 import ast
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -30,7 +30,14 @@ from pydantic import (
 
 from trader.shared.indicators import RSI_SEED_FACTOR, SEED_FACTOR, to_utc
 from trader.shared.models.public_data import Interval
-from trader.shared.spec.terms import SpecTerms
+from trader.shared.spec.terms import (
+    NAME_PATTERN,
+    SPEC_ID_PATTERN,
+    SYMBOL_PATTERN,
+    SpecTerms,
+    check_money_and_expiry,
+    expiry,
+)
 from trader.strategy.spec import expr as expr_lang
 
 Window = Annotated[int, Field(ge=2, le=500)]
@@ -422,7 +429,7 @@ class StrategySpec(_Block):
     name: Annotated[
         str,
         Field(
-            pattern=r"^[a-z0-9][a-z0-9-]{0,63}$",
+            pattern=NAME_PATTERN,
             description="Nome curto (minúsculas, dígitos, hífen); não muda o id",
         ),
     ]
@@ -440,7 +447,7 @@ class StrategySpec(_Block):
     symbol: Annotated[
         str,
         Field(
-            pattern=r"^[A-Z0-9]{1,16}-[A-Z0-9]{1,16}$",
+            pattern=SYMBOL_PATTERN,
             description="Par SAÍDA-ENTRADA: SOL-USDC compra SOL gastando USDC",
         ),
     ]
@@ -476,26 +483,20 @@ class StrategySpec(_Block):
     ] = None
     supersedes: Annotated[
         str | None,
-        Field(pattern=r"^[0-9a-f]{12}$", description="Id da spec que esta substitui"),
+        Field(pattern=SPEC_ID_PATTERN, description="Id da spec que esta substitui"),
     ] = None
 
     @model_validator(mode="after")
-    def _loss_within_budget(self):
-        if self.max_loss_usd > self.budget_usd:
-            raise ValueError("max_loss_usd não pode passar de budget_usd")
-        return self
-
-    @model_validator(mode="after")
-    def _one_expiry(self):
-        if (self.expires_at is None) == (self.ttl_days is None):
-            raise ValueError("informe expires_at ou ttl_days (exatamente um)")
+    def _invariants(self):
+        # as mesmas regras dos termos (`trader.shared.spec.terms`)
+        check_money_and_expiry(
+            self.budget_usd, self.max_loss_usd, self.expires_at, self.ttl_days
+        )
         return self
 
     def expiry(self, start: datetime) -> datetime:
         """Quando a spec expira, para uma execução que começou em `start`."""
-        if self.expires_at is not None:
-            return self.expires_at
-        return to_utc(start) + timedelta(days=self.ttl_days or 0)
+        return expiry(self.expires_at, self.ttl_days, start)
 
     def conditions(self) -> list[_Block]:
         return [*self.entry.conditions, self.exit.stop, *self.exit.conditions]

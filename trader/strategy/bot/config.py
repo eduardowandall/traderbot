@@ -5,11 +5,11 @@ o `TradeClient` do bucket dele. Não recebe modo, chave, provider nem ledger:
 isso fica do lado da execução (`trader/execution/wiring.py` monta).
 """
 
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Protocol
 
 from trader.shared.market import MarketData
 from trader.shared.models import Interval, OrderSignal, Position, TickerData
@@ -64,6 +64,3 @@ class BotConfig:
     # chamado a cada preço recebido (ex: `TickRecorder.record`): horário,
     # preço em cotação e, num par sem stablecoin, o USD da cotação
     on_tick: OnTick | None = None
-    # tarefas que rodam junto com o loop e param com ele; o bot não sabe o
-    # que fazem
-    background: Sequence[Callable[[], Coroutine[Any, Any, None]]] = ()

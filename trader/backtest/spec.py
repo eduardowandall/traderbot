@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from trader.backtest.replay import Backtester, BacktestResult
 from trader.backtest.ticks import Tick, ticks_from_candles
+from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.shared.indicators import to_utc
 from trader.shared.market import MarketData
 from trader.shared.market.pair import ratio_candles
@@ -19,7 +20,7 @@ from trader.shared.models.public_data import Interval
 from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
-DEFAULT_BACKTEST_CANDLES = 1000
+DEFAULT_BACKTEST_CANDLES = MAX_CANDLES
 # barras avaliadas depois do aquecimento, no mínimo
 MIN_EVAL_BARS = 20
 # taxa de rede por perna (USD) de quem chama `backtest_spec` direto (testes,

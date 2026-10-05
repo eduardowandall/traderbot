@@ -5,19 +5,17 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import open_ledger
+from factories import open_ledger, trade_runner
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.market import JupiterPriceOracle
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.execution.runner import TradeRunner
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.shared.models import SOLANA_MINTS, OrderSide
-from trader.shared.spec.validate import SpecLimits
 from trader.shared.trading_service.protocol import OrderRequest, ReplyStatus
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
@@ -109,15 +107,10 @@ async def test_a_budgeted_bucket_offers_nothing_while_the_price_is_unknown():
 
 
 async def test_the_exit_sweep_prices_leftovers_in_the_quote_token():
-    prices = {JUP.mint: Decimal(1), SOL.mint: Decimal(200), USDC.mint: Decimal(1)}
-
-    async def price_of(mint):
-        return prices.get(mint)
-
-    runner = TradeRunner(
-        _service(prices), "paper", SpecLimits(Decimal(1000)), price_of=price_of
-    )
+    prices = {JUP.mint: Decimal(1), SOL.mint: Decimal(200)}
+    runner = trade_runner(_service(prices), prices=prices)
     assert await runner._pair_price(JUP.mint, SOL.mint) == Decimal("0.005")
     assert await runner._pair_price(JUP.mint, USDC.mint) == Decimal(1)
-    prices.pop(SOL.mint)
-    assert await runner._pair_price(JUP.mint, SOL.mint) is None
+    # sem o preço da cotação, nada a vender
+    priceless = trade_runner(_service(prices), prices={JUP.mint: Decimal(1)})
+    assert await priceless._pair_price(JUP.mint, SOL.mint) is None

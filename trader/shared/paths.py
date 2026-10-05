@@ -27,6 +27,16 @@ def data_dir() -> Path:
     return _resolve(os.getenv("TRADER_DATA_DIR") or ".data")
 
 
+def connection_path(mode: str) -> Path:
+    """O arquivo de conexão do trade-runner do modo (`serve` escreve, `connect` lê)."""
+    return data_dir() / f"trader-{mode}.json"
+
+
+def connection_files() -> list[Path]:
+    """Os arquivos de conexão de todos os modos, em ordem."""
+    return sorted(data_dir().glob(connection_path("*").name))
+
+
 def logs_dir() -> Path:
     """`TRADER_LOG_DIR`, ou `<raiz do projeto>/.logs`."""
     return _resolve(os.getenv("TRADER_LOG_DIR") or ".logs")

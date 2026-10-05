@@ -2,6 +2,6 @@
 
 O lado da estratégia só conhece `protocol.py` (dados) e `client.py` (a
 interface `TradeClient`); quem executa é o `TradeService` (`service.py`),
-acessado no mesmo processo por `LocalTradeClient` (`local.py`) ou, no item B3,
-por socket. Ver docs/plan.md §3.
+que o trade-runner serve por socket (`trader/execution/runner.py`) e o
+backtest chama direto. Ver docs/plan.md §3.
 """

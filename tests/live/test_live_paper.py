@@ -5,7 +5,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from factories import example_spec
+from factories import example_spec, served
 from live_helpers import LOOSE_PAPER_POLICY
 
 from trader.backtest import Backtester, TickRecorder, load_ticks
@@ -14,7 +14,6 @@ from trader.execution.market import JupiterMarketData
 from trader.execution.models.intent import IntentStatus
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.ledger import Ledger, ledger_path
-from trader.execution.trade.trading_service.local import LocalTradeClient
 from trader.execution.wiring import build_trade_service
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.models.order import order_from_json
@@ -97,7 +96,8 @@ def test_paper_bot_trades_on_the_live_feed(tmp_path):
     records = _records()
     executed = [r for r in records if r.status == IntentStatus.EXECUTED]
     assert executed, [(r.status, r.error, r.decision_reasons) for r in records]
-    assert all(r.intent.account == "paper:SOL-USDC" for r in executed)
+    bucket = f"strategy:{_busy_random().spec.spec_id()}"
+    assert all(r.intent.account == f"paper:{bucket}" for r in executed)
     assert not [r for r in records if r.status == IntentStatus.UNCONFIRMED]
 
     ticks = load_ticks(ticks_file)
@@ -107,32 +107,33 @@ def test_paper_bot_trades_on_the_live_feed(tmp_path):
 
 
 async def _run_bot(ticks_file):
-    """O bot e o serviço num processo só (`LocalTradeClient`), parando por `stop()`.
+    """O bot e um trade-runner num processo só, parando por `stop()`.
 
     Cancelar a task no meio de um swap deixaria a intenção UNCONFIRMED; o
     `stop()` só vale entre ticks.
     """
     strategy = _busy_random()
     service = build_trade_service(RunningMode.PAPER)
-    trader = LocalTradeClient(
-        service, "SOL-USDC", QUOTE.mint, TOKEN.mint, owns_service=True
-    )
     with service.gateway, TickRecorder(ticks_file) as recorder:
-        bot = AsyncWebsocketTradingBot(
-            BotConfig(
-                name="live-test",
-                symbol="SOL-USDC",
-                strategy=strategy,
-                market=JupiterMarketData(),
-                trader=trader,
-                notifier=NotificationService(),
-                on_tick=recorder.record,
-            )
-        )
-        task = asyncio.create_task(bot.arun())
-        await asyncio.sleep(BOT_SECONDS)
-        bot.stop()
-        await asyncio.wait_for(task, timeout=60)
+        try:
+            async with served(service, strategy.spec.terms()) as trader:
+                bot = AsyncWebsocketTradingBot(
+                    BotConfig(
+                        name="live-test",
+                        symbol="SOL-USDC",
+                        strategy=strategy,
+                        market=JupiterMarketData(),
+                        trader=trader,
+                        notifier=NotificationService(),
+                        on_tick=recorder.record,
+                    )
+                )
+                task = asyncio.create_task(bot.arun())
+                await asyncio.sleep(BOT_SECONDS)
+                bot.stop()
+                await asyncio.wait_for(task, timeout=60)
+        finally:
+            await service.aclose()
 
 
 async def _replay(ticks):

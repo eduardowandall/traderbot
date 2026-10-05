@@ -10,7 +10,6 @@ from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.models.intent import IntentSide
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import Policy
-from trader.execution.trade.trading_service.local import LocalTradeClient
 from trader.execution.trade.trading_service.service import (
     TradeService,
     remaining_budget,
@@ -266,18 +265,6 @@ class TestReplies:
         reply = await service.submit_order("a", _buy(market))
         assert reply.status == ReplyStatus.ERROR
         assert reply.error is not None and "jupiter fora do ar" in reply.error
-
-
-async def test_local_client_is_bound_to_one_bucket(tmp_path):
-    market = Market("100")
-    service = _service(tmp_path, _wallet(), market)
-    client = LocalTradeClient(
-        service, "a", USDC.mint, JUP.mint, Decimal(10), owns_service=True
-    )
-    await client.open()
-    assert (await client.bucket()).budget_usd == Decimal(10)
-    assert (await client.submit(_buy(market))).filled
-    await client.aclose()
 
 
 class TestReconcile:

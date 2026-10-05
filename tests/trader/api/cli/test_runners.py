@@ -11,7 +11,14 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import make_spec, open_ledger, terms_of
+from factories import (
+    NoCandles,
+    PriceTable,
+    make_spec,
+    open_ledger,
+    terms_of,
+    trade_runner,
+)
 from typer.testing import CliRunner
 
 import main as main_module
@@ -19,9 +26,7 @@ from trader.api.cli import runners as cli_runners
 from trader.api.cli.lock import ModeBusyError, ModeLock
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution.market.hub import PriceHub
 from trader.execution.models.intent import IntentStatus
-from trader.execution.runner import TradeRunner
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
@@ -30,7 +35,7 @@ from trader.shared.market import HubMarketData
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.shared.models.costs import TradeCosts
 from trader.shared.models.public_data import Interval, TickerData
-from trader.shared.paths import PROJECT_ROOT, data_dir
+from trader.shared.paths import PROJECT_ROOT, connection_path, data_dir
 from trader.shared.spec.validate import SpecLimits
 from trader.shared.trading_service import wire
 from trader.shared.trading_service.protocol import (
@@ -107,7 +112,7 @@ def test_the_wire_codec_round_trips():
 # --- trade-runner + cliente remoto --------------------------------------------------
 
 
-def _runner(price="100", ledger=None, limits=None):
+def _runner(price="100", ledger=None, limits=None, candles=None):
     quotes = ReplayQuoteClient(USDC, Decimal(0))
     quotes.tick = Tick(T0, Decimal(price))
     wallet = SimulatedWallet(initial={"USDC": Decimal(100), "SOL": Decimal(1)})
@@ -115,14 +120,8 @@ def _runner(price="100", ledger=None, limits=None):
     service = TradeService(
         paper_provider(wallet, jupiter_client=quotes), gateway, mode="paper"
     )
-    prices = {SOL.mint: Decimal(price), USDC.mint: Decimal(1)}  # como o oráculo
-
-    async def price_of(mint):
-        return prices.get(mint)
-
-    return TradeRunner(
-        service, "paper", limits or SpecLimits(Decimal(1000)), price_of=price_of
-    )
+    # o hub responde pela Price API falsa (USDC vale 1 sem perguntar)
+    return trade_runner(service, limits, {SOL.mint: Decimal(price)}, candles)
 
 
 async def _client(runner, server, spec=SPEC, token=None, **kwargs):
@@ -357,7 +356,7 @@ def test_connect_needs_no_key_and_finds_the_trade_runner(monkeypatch, tmp_path):
         find_connection()
     data_dir().mkdir(parents=True, exist_ok=True)
     info = {"host": "127.0.0.1", "port": 1, "token": "t", "pid": 1}
-    (data_dir() / "trader-paper.json").write_text(json.dumps(info), encoding="utf-8")
+    (connection_path("paper")).write_text(json.dumps(info), encoding="utf-8")
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(SPEC), encoding="utf-8")
 
@@ -379,32 +378,34 @@ async def test_serve_runs_the_daily_report_beside_the_server_and_closes_all():
     reporter = mock.Mock()
     reporter.run_forever = lambda: asyncio.Event().wait()
     reporter.notifier.aclose = AsyncMock()
-    runner.candles.aclose = AsyncMock()
 
     await cli_runners._serve(runner, service, reporter)
 
     assert asyncio.all_tasks() == {asyncio.current_task()}  # relatório cancelado
     reporter.notifier.aclose.assert_awaited_once()
     service.aclose.assert_awaited_once()
-    runner.candles.aclose.assert_awaited_once()  # o cliente da Jupiter também
 
 
-class _PriceApi:
-    def __init__(self):
-        self.calls = 0
-
-    async def get_usd_prices(self, mints):
-        self.calls += 1
-        return {m: Decimal(150) for m in mints if m == SOL.mint}
-
-    async def aclose(self):
-        return None
+async def test_the_trade_runner_runs_its_hub_and_closes_its_candles():
+    candles = NoCandles()
+    candles.aclose = AsyncMock()
+    runner = _runner(candles=candles)
+    runner.hub.run = AsyncMock()
+    task = asyncio.create_task(runner.serve())
+    while not connection_path("paper").exists():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    runner.hub.run.assert_awaited_once()
+    candles.aclose.assert_awaited_once()  # o cliente da Jupiter também
+    assert not connection_path("paper").exists()
 
 
 async def test_strategy_runners_share_the_trade_runners_price_hub():
-    api = _PriceApi()
-    runner = _runner()
-    runner.hub = PriceHub(api, stream=None)  # type: ignore[arg-type]
+    runner = _runner(price="150")
+    api = runner.hub.client
+    assert isinstance(api, PriceTable)  # a Price API falsa de `trade_runner`
     async with await runner.start() as server:
         client = await _client(runner, server)
         assert await client.price(SOL.mint) == Decimal(150)
@@ -415,19 +416,21 @@ async def test_strategy_runners_share_the_trade_runners_price_hub():
         await client.aclose()
 
 
-async def test_prices_need_hello_and_a_hub():
-    runner = _runner()
+async def test_concurrent_calls_on_one_connection_do_not_cross():
+    # um par sem stablecoin pede o preço do token e o da cotação juntos
+    runner = _runner(price="150")
     async with await runner.start() as server:
         client = await _client(runner, server)
-        with pytest.raises(TradeServiceError, match="não serve preços"):
-            await client.price(SOL.mint)
+        calls = asyncio.gather(*(client.price(SOL.mint) for _ in range(3)))
+        prices = await asyncio.wait_for(calls, 5)  # sem a trava, travava aqui
+        assert prices == [Decimal(150)] * 3
         await client.aclose()
 
 
 def test_connect_takes_prices_from_the_trade_runner(monkeypatch, tmp_path):
     data_dir().mkdir(parents=True, exist_ok=True)
     info = {"host": "127.0.0.1", "port": 1, "token": "t", "pid": 1}
-    (data_dir() / "trader-paper.json").write_text(json.dumps(info), encoding="utf-8")
+    (connection_path("paper")).write_text(json.dumps(info), encoding="utf-8")
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(SPEC), encoding="utf-8")
 
@@ -464,8 +467,7 @@ class _Candles:
 async def test_candles_come_from_the_trade_runner():
     # B12: o strategy-runner não fala com a Jupiter; o aquecimento vem do op
     jupiter = _Candles()
-    runner = _runner()
-    runner.candles = jupiter
+    runner = _runner(candles=jupiter)
     async with await runner.start() as server:
         client = await _client(runner, server)
         got = await RemoteCandles(client).get_candles(SOL.mint, Interval.MINUTE_1, 3)
@@ -476,8 +478,7 @@ async def test_candles_come_from_the_trade_runner():
 
 async def test_a_full_warm_up_fits_in_one_reply():
     # 900 barras passam do limite de linha padrão do asyncio (64 KB)
-    runner = _runner()
-    runner.candles = _Candles()
+    runner = _runner(candles=_Candles())
     async with await runner.start() as server:
         client = await _client(runner, server)
         got = await client.candles(SOL.mint, Interval.SECOND_15, 900)
@@ -488,8 +489,7 @@ async def test_a_full_warm_up_fits_in_one_reply():
 
 @pytest.mark.parametrize("qty", [0, 1001])
 async def test_a_candle_count_out_of_range_is_refused(qty):
-    runner = _runner()
-    runner.candles = _Candles()
+    runner = _runner(candles=_Candles())
     async with await runner.start() as server:
         client = await _client(runner, server)
         with pytest.raises(TradeServiceError, match="qty"):
@@ -497,17 +497,8 @@ async def test_a_candle_count_out_of_range_is_refused(qty):
         await client.aclose()
 
 
-async def test_a_trade_runner_without_candles_says_so():
-    runner = _runner()
-    async with await runner.start() as server:
-        client = await _client(runner, server)
-        with pytest.raises(TradeServiceError, match="não serve candles"):
-            await client.candles(SOL.mint, Interval.MINUTE_1, 10)
-        await client.aclose()
-
-
 def test_connect_takes_its_candles_from_the_trade_runner():
-    path = data_dir() / "trader-paper.json"
+    path = connection_path("paper")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"host": "127.0.0.1", "port": 1, "token": "t"}))
     strategy = SpecStrategy(StrategySpec.model_validate(SPEC))

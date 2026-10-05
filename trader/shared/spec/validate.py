@@ -30,6 +30,11 @@ class SpecError:
     msg: str
 
 
+def describe(errors: list[SpecError]) -> str:
+    """Os erros numa linha: `campo: mensagem; ...`."""
+    return "; ".join(f"{e.path}: {e.msg}" for e in errors)
+
+
 @dataclass(frozen=True)
 class SpecLimits:
     max_trade_usd: Decimal

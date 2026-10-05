@@ -103,9 +103,6 @@ class PriceHub:
             raise StalePriceError(f"preço de {mint} tem {age:.0f}s")
         return point.price, age
 
-    async def get(self, mint: str) -> Decimal:
-        return (await self.price(mint))[0]
-
     async def usd_prices(self, mints: Collection[str]) -> dict[str, Decimal]:
         """`PriceOracle`: os preços com menos de `max_age` segundos.
 

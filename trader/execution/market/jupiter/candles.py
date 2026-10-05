@@ -11,6 +11,8 @@ from typing import Any
 
 from trader.shared.models.public_data import TickerData
 
+MAX_CANDLES = 1000  # o que a API de candles devolve por pedido
+
 
 def _dec(value: Any) -> Decimal:
     # o JSON traz floats: Decimal(str(x)) dá a forma decimal curta (0.1), não a

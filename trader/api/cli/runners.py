@@ -12,15 +12,16 @@ from pathlib import Path
 
 import typer
 
-from trader.api.cli.backtest import MARKET_DATA, SPEC_HELP
+from trader.api.cli.backtest import SPEC_HELP
 from trader.api.cli.lock import ModeBusyError, ModeLock
 from trader.backtest import TickRecorder
+from trader.execution.market import JupiterMarketData
 from trader.execution.market.hub import PriceHub
 from trader.execution.market.prices import price_fn
 from trader.execution.models.mode import RunningMode
 from trader.execution.notification.daily_report import DailyReporter
 from trader.execution.runner import TradeRunner
-from trader.execution.trade.policy import Policy, load_policy
+from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.wiring import build_trade_service
 from trader.shared.notification import notifier_from_env
@@ -39,21 +40,21 @@ def serve(mode: RunningMode = typer.Argument(..., help="real ou paper")):
     with mode_lock(mode):
         # um feed de preços para todos os `connect` e para o próprio serviço
         hub = PriceHub()
-        service = build_trade_service(mode, prices=hub)
-        # vender sobras sem o strategy-runner, marcar posições
-        price_of = price_fn(hub)
+        service = build_trade_service(
+            mode, on_wallet_created=lambda m: typer.echo(m, err=True), prices=hub
+        )
+        # o relatório marca as posições a mercado pelo hub
         reporter = DailyReporter(
-            service.gateway, str(mode), notifier_from_env(), price_of
+            service.gateway, str(mode), notifier_from_env(), price_fn(hub)
         )
         runner = TradeRunner(
             service,
             str(mode),
-            limits_from_policy(load_policy(mode=str(mode))),
-            price_of=price_of,
+            limits_from_policy(service.gateway.policy),
             hub=hub,
             # candles do aquecimento dos `connect` (só este processo lê a Jupiter)
-            candles=MARKET_DATA(),
-            background=(hub.run, reporter.run_forever),
+            candles=JupiterMarketData(),
+            background=(reporter.run_forever,),
         )
         with service.gateway:
             try:
@@ -70,8 +71,6 @@ async def _serve(
     finally:
         await reporter.notifier.aclose()
         await service.aclose()
-        if runner.candles is not None:
-            await runner.candles.aclose()
 
 
 def connect(

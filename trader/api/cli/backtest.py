@@ -22,6 +22,7 @@ from trader.backtest.spec import (
 )
 from trader.execution.market import JupiterMarketData
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.shared.market import MarketData
 from trader.strategy.spec.parse import parse_spec
 
@@ -38,7 +39,7 @@ def backtest(
     candles: int = typer.Option(
         DEFAULT_BACKTEST_CANDLES,
         min=2,
-        max=1000,
+        max=MAX_CANDLES,
         help="Candles do timeframe da spec (sem --ticks)",
     ),
     ticks: Path | None = typer.Option(

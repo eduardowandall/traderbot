@@ -75,6 +75,7 @@ class RemoteTradeClient:
         self.bucket_name: str | None = None
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+        self._lock = asyncio.Lock()
 
     # --- TradeClient -----------------------------------------------------------
 
@@ -138,12 +139,17 @@ class RemoteTradeClient:
         self.bucket_name = answer["bucket"]
 
     async def _exchange(self, message: dict) -> dict:
-        """Um pedido e a resposta; conexão caída vira `ConnectionError`."""
-        if self._reader is None or self._writer is None:
-            raise ConnectionError("sem conexão com o trade-runner")
-        self._writer.write(encode(message))
-        await self._writer.drain()
-        line = await self._reader.readline()
+        """Um pedido e a resposta; conexão caída vira `ConnectionError`.
+
+        Um por vez: num par sem stablecoin, o bot pede o preço do token e o da
+        cotação juntos, e duas leituras na mesma conexão não podem se cruzar.
+        """
+        async with self._lock:
+            if self._reader is None or self._writer is None:
+                raise ConnectionError("sem conexão com o trade-runner")
+            self._writer.write(encode(message))
+            await self._writer.drain()
+            line = await self._reader.readline()
         if not line:
             raise ConnectionError("o trade-runner fechou a conexão")
         return decode(line)

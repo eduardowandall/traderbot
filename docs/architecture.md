@@ -220,8 +220,10 @@ same `TickContext` and `IndicatorBank` as the blocks.
 ## 9. Several specs: `serve` + `connect`
 
 Every spec trades this way (B14 removed `run`): the hops split across
-processes at the `TradeClient` seam (hop 3). `LocalTradeClient`, the
-in-process version, is left for the backtest and the tests.
+processes at the `TradeClient` seam (hop 3). The only `TradeClient` is the
+remote one; the backtest calls its in-memory `TradeService` directly, and
+the tests run a bot against a local `TradeRunner` (`served` in
+`tests/factories.py`).
 
 - **`main.py serve <mode>`** (`trader/execution/runner.py`) holds the
   mode's lock, the key, the wallet, the ledger and one `TradeService`, and
@@ -237,7 +239,7 @@ in-process version, is left for the backtest and the tests.
   daily report and the quote check), so nothing else polls the Price API.
 - **`main.py connect spec.json`** (`trader/strategy/runner.py`, the
   strategy side) runs the usual bot with a `RemoteTradeClient`
-  (`trading_service/remote.py`) instead of `LocalTradeClient`, and a
+  (`trading_service/remote.py`), and a
   `HubMarketData` over `RemoteTradeClient.price` and `RemoteCandles` (the
   warm-up). `--record-ticks FILE` writes every price it gets for `backtest
   --ticks`. It has no key,

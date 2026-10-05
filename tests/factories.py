@@ -5,6 +5,7 @@
 `-W error::ResourceWarning` continua limpo.
 """
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -166,6 +167,67 @@ def make_spec(**overrides) -> dict:
 def terms_of(spec: dict) -> SpecTerms:
     """Os termos (o que o `hello` manda) de uma spec em dict JSON."""
     return StrategySpec.model_validate(spec).terms()
+
+
+class PriceTable:
+    """Price API falsa: os preços USD de um dict (lido a cada pedido)."""
+
+    def __init__(self, prices: dict[str, Decimal] | None = None):
+        self.prices = prices if prices is not None else {}
+        self.calls = 0
+
+    async def get_usd_prices(self, mints):
+        self.calls += 1
+        return {m: self.prices[m] for m in mints if m in self.prices}
+
+    async def aclose(self):
+        return None
+
+
+class NoCandles:
+    """`CandleSource` vazio (o trade-runner exige um)."""
+
+    async def get_candles(self, mint, interval, candle_qty):
+        return []
+
+    async def aclose(self):
+        return None
+
+
+def trade_runner(service, limits=None, prices=None, candles=None, **kwargs):
+    """Um `TradeRunner` de paper com hub sobre `PriceTable(prices)`, sem rede."""
+    from trader.execution.market.hub import PriceHub
+    from trader.execution.runner import TradeRunner
+    from trader.shared.spec.validate import SpecLimits
+
+    return TradeRunner(
+        service,
+        "paper",
+        limits or SpecLimits(Decimal(1000)),
+        hub=PriceHub(PriceTable(prices), stream=None),  # type: ignore[arg-type]
+        candles=candles or NoCandles(),
+        **kwargs,
+    )
+
+
+@asynccontextmanager
+async def served(service, terms: SpecTerms | None = None, **spec_overrides):
+    """O serviço atrás de um `TradeRunner` local: o `RemoteTradeClient` da spec.
+
+    Sem `terms`, os de `make_spec(ttl_days=5, **spec_overrides)` (paper recusa
+    prazos de mais de 30 dias). O cliente sai fechado (o bot abre e fecha); o
+    serviço fica com quem o criou.
+    """
+    from trader.strategy.trading_service.remote import RemoteTradeClient
+
+    spec = make_spec(ttl_days=5, expires_at=None) | spec_overrides
+
+    runner = trade_runner(service)
+    async with await runner.start() as server:
+        port = server.sockets[0].getsockname()[1]
+        yield RemoteTradeClient(
+            "127.0.0.1", port, runner.token, terms or terms_of(spec)
+        )
 
 
 def bonk_quote():

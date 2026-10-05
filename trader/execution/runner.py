@@ -27,14 +27,15 @@ from typing import Any
 from pydantic import ValidationError
 
 from trader.execution.market.hub import PriceHub
-from trader.execution.market.prices import PriceOf
+from trader.execution.market.jupiter.candles import MAX_CANDLES
+from trader.execution.market.prices import PriceOf, price_fn
 from trader.execution.trade.trading_service.service import TradeService
 from trader.shared.market import CandleSource
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.public_data import Interval
-from trader.shared.paths import data_dir
+from trader.shared.paths import connection_path
 from trader.shared.spec.terms import SpecTerms
-from trader.shared.spec.validate import SpecLimits, validate
+from trader.shared.spec.validate import SpecLimits, describe, validate
 from trader.shared.trading_service.protocol import BucketStatus
 from trader.shared.trading_service.wire import (
     candles_to_list,
@@ -48,14 +49,6 @@ from trader.shared.trading_service.wire import (
 logger = logging.getLogger(__name__)
 
 SWEEP_SECONDS = 30
-# o máximo de candles por pedido (o mesmo teto do `backtest --candles`)
-MAX_CANDLES = 1000
-
-# preço USD de um mint (para vender sobras sem o strategy-runner); None: sem preço
-
-
-def connection_path(mode: str) -> Path:
-    return data_dir() / f"trader-{mode}.json"
 
 
 class HelloError(ValueError):
@@ -76,17 +69,23 @@ class TradeRunner:
     service: TradeService
     mode: str
     limits: SpecLimits
+    # preços para os strategy-runners (op `price`) e para a varredura: um feed
+    # para todos; roda junto do servidor
+    hub: PriceHub
+    # candles para os strategy-runners (op `candles`): o aquecimento deles;
+    # fecha quando o servidor para
+    candles: CandleSource
     token: str = field(default_factory=lambda: secrets.token_hex(16))
-    price_of: PriceOf | None = None
     sweep_seconds: float = SWEEP_SECONDS
     specs: dict[str, SpecTerms] = field(default_factory=dict)
     live: set[str] = field(default_factory=set)
-    # preços para os strategy-runners (op `price`): um feed para todos
-    hub: PriceHub | None = None
-    # candles para os strategy-runners (op `candles`): o aquecimento deles
-    candles: CandleSource | None = None
-    # o que roda junto do servidor até ele parar (o hub, o relatório diário)
+    # preço USD de um mint (stablecoins a 1), do hub: vender sobras
+    price_of: PriceOf = field(init=False)
+    # o que mais roda junto do servidor até ele parar (o relatório diário)
     background: Sequence[Callable[[], Coroutine[Any, Any, None]]] = ()
+
+    def __post_init__(self) -> None:
+        self.price_of = price_fn(self.hub)
 
     # --- servidor ------------------------------------------------------------
 
@@ -106,10 +105,12 @@ class TradeRunner:
                 await asyncio.gather(
                     server.serve_forever(),
                     self._sweep_forever(),
+                    self.hub.run(),
                     *(start() for start in self.background),
                 )
         finally:
             path.unlink(missing_ok=True)
+            await self.candles.aclose()
 
     def _write_connection(self, path: Path, port: int) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,15 +174,11 @@ class TradeRunner:
 
     async def _price(self, bucket: str, message: dict) -> dict:
         """O preço USD de um mint, do hub (`StalePriceError` se velho)."""
-        if self.hub is None:
-            raise ValueError("este trade-runner não serve preços")
         price, age = await self.hub.price(str(message["mint"]))
         return {"price": str(price), "age": age}
 
     async def _candles(self, bucket: str, message: dict) -> dict:
         """Os candles do aquecimento de um strategy-runner, da Jupiter."""
-        if self.candles is None:
-            raise ValueError("este trade-runner não serve candles")
         qty = int(message["qty"])
         if not 1 <= qty <= MAX_CANDLES:
             raise ValueError(f"qty deve estar entre 1 e {MAX_CANDLES}: {qty}")
@@ -216,8 +213,7 @@ class TradeRunner:
             raise HelloError(f"termos inválidos: {ex.error_count()} erro(s)") from ex
         errors = validate(spec, self.limits)
         if errors:
-            details = "; ".join(f"{e.path}: {e.msg}" for e in errors)
-            raise HelloError(f"spec inválida para {self.mode}: {details}")
+            raise HelloError(f"spec inválida para {self.mode}: {describe(errors)}")
         return spec
 
     async def _open(self, name: str, spec: SpecTerms) -> None:
@@ -264,8 +260,6 @@ class TradeRunner:
             status = BucketStatus.RETIRING
         if status != BucketStatus.RETIRING or snapshot.position is None:
             return
-        if self.price_of is None:
-            return
         entry = snapshot.position.entry_order
         price = await self._pair_price(entry.output_mint, entry.input_mint)
         if price is not None:
@@ -273,7 +267,6 @@ class TradeRunner:
 
     async def _pair_price(self, token: str, quote: str) -> Decimal | None:
         """O preço do token no token de cotação (como a estratégia o vê)."""
-        assert self.price_of is not None
         token_usd, quote_usd = await asyncio.gather(
             self.price_of(token), self.price_of(quote)
         )

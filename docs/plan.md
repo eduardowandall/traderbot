@@ -605,7 +605,10 @@ trades through a trade-runner (2026-10-05).
   then reports both logs and the ledger.
 - The guard hook still blocks `run real` (an old habit) and blocks `serve
   real`; its message points to `serve real`.
-- `LocalTradeClient` stays: the backtest and the tests use it.
+- `LocalTradeClient` stays: the backtest and the tests use it. (Removed
+  later: the backtest calls its `TradeService` directly, and the tests run
+  the bot against a local `TradeRunner`, which now requires its `hub` and
+  `candles`.)
 
 Tests: the CLI has `backtest`, `connect` and `serve`; `connect --seed` and
 `--record-ticks` reach the bot; an unreadable spec fails before connecting;

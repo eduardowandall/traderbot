@@ -25,7 +25,6 @@ from decimal import ROUND_CEILING, Decimal
 from trader.backtest.ticks import Tick
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.trading_service.local import LocalTradeClient
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper.provider import paper_provider
 from trader.execution.trade.venues.paper.wallet import SimulatedWallet
@@ -237,9 +236,16 @@ class Backtester:
             return await self._replay_on(gateway)
 
     async def _replay_on(self, gateway: TradeGateway) -> BacktestResult:
-        client, wallet, trader = self._venue(gateway)
+        client, wallet, service = self._venue(gateway)
         client.tick = self.ticks[0]  # abrir o bucket já lê saldo no relógio do replay
-        await trader.open()
+        await service.open_bucket(
+            self.symbol,
+            self.quote.mint,
+            self.token.mint,
+            budget_usd=self.budget_usd,
+            source="backtest",
+            max_loss_usd=self.max_loss_usd,
+        )
         self.strategy.set_clock(lambda: client.now)
         self.strategy.seed(self.seed)
         if self.warmup:
@@ -248,11 +254,11 @@ class Backtester:
         run = _Run()
         for tick in self.ticks:
             client.tick = tick
-            if not await self._step(trader, tick, run):
+            if not await self._step(service, tick, run):
                 break  # bucket encerrado e sem posição: ao vivo, o bot pararia
             run.track(self._equity(wallet, tick))
 
-        final = await trader.bucket()
+        final = await service.get_bucket(self.symbol)
         return BacktestResult(
             symbol=self.symbol,
             start=self.ticks[0].timestamp,
@@ -271,7 +277,7 @@ class Backtester:
 
     def _venue(
         self, gateway: TradeGateway
-    ) -> tuple[ReplayQuoteClient, SimulatedWallet, LocalTradeClient]:
+    ) -> tuple[ReplayQuoteClient, SimulatedWallet, TradeService]:
         """Mesmo caminho do paper trading: TradeService -> gateway -> carteira."""
         client = ReplayQuoteClient(
             self.quote, self.fee_bps + self.slippage_bps, self.network_fee_usd
@@ -295,26 +301,17 @@ class Backtester:
         service = TradeService(
             provider, gateway, clock=lambda: client.now, prices=prices
         )
-        trader = LocalTradeClient(
-            service,
-            self.symbol,
-            self.quote.mint,
-            self.token.mint,
-            budget_usd=self.budget_usd,
-            max_loss_usd=self.max_loss_usd,
-            source="backtest",
-        )
-        return client, wallet, trader
+        return client, wallet, service
 
-    async def _step(self, trader: LocalTradeClient, tick: Tick, run: _Run) -> bool:
+    async def _step(self, service: TradeService, tick: Tick, run: _Run) -> bool:
         """Um tick, com a mesma decisão do bot ao vivo; False: o replay acabou."""
-        snapshot = await trader.bucket()
+        snapshot = await service.get_bucket(self.symbol)
         if bucket_done(snapshot):
             return False
         request = order_for(self.strategy, tick.price, snapshot)
         if request is None:
             return True
-        reply = await trader.submit(request)
+        reply = await service.submit_order(self.symbol, request)
         order = reply.order
         if order is None:
             run.rejected += 1
@@ -322,7 +319,8 @@ class Backtester:
             return True
         realized = None
         if order.side == OrderSide.SELL:
-            realized = (await trader.bucket()).realized_usd - snapshot.realized_usd
+            after = await service.get_bucket(self.symbol)
+            realized = after.realized_usd - snapshot.realized_usd
         run.trades.append(
             BacktestTrade(
                 tick.timestamp, order.side, order.quantity, order.price, realized

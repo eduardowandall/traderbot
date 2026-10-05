@@ -6,14 +6,14 @@ formato dos erros de `validate`, em `trader.shared.spec.validate`).
 
 from pydantic import ValidationError
 
-from trader.shared.spec.validate import SpecError
+from trader.shared.spec.validate import SpecError, describe
 from trader.strategy.spec.models import StrategySpec
 
 
 class SpecParseError(ValueError):
     def __init__(self, errors: list[SpecError]):
         self.errors = errors
-        super().__init__("; ".join(f"{e.path}: {e.msg}" for e in errors))
+        super().__init__(describe(errors))
 
 
 def parse_spec(text: str) -> StrategySpec:

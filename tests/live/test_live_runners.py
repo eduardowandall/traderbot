@@ -14,7 +14,7 @@ from trader.execution.models.intent import IntentStatus
 from trader.execution.trade.ledger import Ledger, ledger_path
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.public_data import Interval
-from trader.shared.paths import PROJECT_ROOT, data_dir, policy_file
+from trader.shared.paths import PROJECT_ROOT, connection_path, policy_file
 from trader.strategy.runner import find_connection
 from trader.strategy.trading_service.remote import RemoteTradeClient
 
@@ -61,7 +61,7 @@ def test_a_strategy_runner_trades_through_a_paper_trade_runner(tmp_path):
     policy_file().write_text(POLICY, encoding="utf-8")
     server = _start("serve", "paper")
     try:
-        _wait_for(data_dir() / "trader-paper.json")
+        _wait_for(connection_path("paper"))
         client = _start("connect", str(_busy_spec(tmp_path)), "--seed", "1")
         time.sleep(RUN_SECONDS)
         _stop(client)
@@ -83,7 +83,7 @@ def test_a_full_warm_up_comes_through_a_paper_trade_runner(tmp_path):
     spec = json.loads(_busy_spec(tmp_path).read_text(encoding="utf-8"))
     server = _start("serve", "paper")
     try:
-        _wait_for(data_dir() / "trader-paper.json")
+        _wait_for(connection_path("paper"))
         candles = asyncio.run(_warm_up(spec))
     finally:
         _stop(server)

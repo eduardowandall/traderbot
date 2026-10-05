@@ -13,7 +13,7 @@ from pathlib import Path
 from trader.shared.market import HubMarketData
 from trader.shared.market.pair import market_for
 from trader.shared.notification.notification_service import Notifier
-from trader.shared.paths import data_dir
+from trader.shared.paths import connection_files
 from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.strategy.bot.config import BotConfig, OnTick
 from trader.strategy.spec.strategy import SpecStrategy
@@ -23,7 +23,7 @@ from trader.strategy.trading_service.remote import RemoteCandles, RemoteTradeCli
 def find_connection(path: Path | None = None) -> dict:
     """O arquivo de conexão do trade-runner: o dado, ou o único em `data_dir()`."""
     if path is None:
-        found = sorted(data_dir().glob("trader-*.json"))
+        found = connection_files()
         if len(found) != 1:
             names = ", ".join(p.name for p in found) or "nenhum"
             raise ValueError(

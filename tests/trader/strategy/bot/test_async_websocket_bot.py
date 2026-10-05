@@ -5,14 +5,13 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import StubStrategy, memory_gateway
+from factories import StubStrategy, memory_gateway, served
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.market import JupiterMarketData
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.execution.models.intent import IntentSide, IntentStatus
-from trader.execution.trade.trading_service.local import LocalTradeClient
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.shared.models import (
@@ -36,6 +35,8 @@ ONE = Decimal(1)
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 BONK = SOLANA_MINTS.get_by_symbol("BONK")
+# a spec do bucket no trade-runner: o orçamento é a carteira inteira
+BONK_SPEC = {"symbol": "BONK-USDC", "budget_usd": 100, "max_loss_usd": 100}
 
 
 class FakeStrategy(StubStrategy):
@@ -76,26 +77,20 @@ async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
     quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
     wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
     gateway = memory_gateway()
-    trader = LocalTradeClient(
-        TradeService(paper_provider(wallet, jupiter_client=quotes), gateway),
-        "BONK-USDC",
-        USDC.mint,
-        BONK.mint,
-        owns_service=True,
-    )
+    service = TradeService(paper_provider(wallet, jupiter_client=quotes), gateway)
     market_client = _market_client()
-    bot = AsyncWebsocketTradingBot(
-        BotConfig(
-            name="e2e",
-            symbol="BONK-USDC",
-            strategy=strategy,
-            market=JupiterMarketData(market_client),
-            trader=trader,
-            notifier=NotificationService(),
+    async with served(service, **BONK_SPEC) as trader:
+        bot = AsyncWebsocketTradingBot(
+            BotConfig(
+                name="e2e",
+                symbol="BONK-USDC",
+                strategy=strategy,
+                market=JupiterMarketData(market_client),
+                trader=trader,
+                notifier=NotificationService(),
+            )
         )
-    )
-
-    await bot.arun()
+        await bot.arun()
 
     assert strategy.count == 2
     records = gateway.ledger.list_intents()
@@ -117,39 +112,30 @@ class Inbox(NotificationService):
         self.messages.append(message)
 
 
-async def test_fills_report_the_bucket_and_background_tasks_stop_with_the_bot(
+async def test_fills_report_the_bucket_and_no_task_outlives_the_bot(
     mock_sleep,
 ):
     quotes = ReplayQuoteClient(USDC, Decimal(0))
     quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
     wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
-    trader = LocalTradeClient(
-        TradeService(paper_provider(wallet, jupiter_client=quotes), memory_gateway()),
-        "BONK-USDC",
-        USDC.mint,
-        BONK.mint,
-        owns_service=True,
+    service = TradeService(
+        paper_provider(wallet, jupiter_client=quotes), memory_gateway()
     )
-
-    async def background():
-        await asyncio.Event().wait()  # para sempre, até o bot cancelar
-
     inbox = Inbox()
-    bot = AsyncWebsocketTradingBot(
-        BotConfig(
-            name="e2e",
-            symbol="BONK-USDC",
-            strategy=FakeStrategy(),
-            market=JupiterMarketData(_market_client()),
-            trader=trader,
-            notifier=inbox,
-            background=(background,),
+    async with served(service, **BONK_SPEC) as trader:
+        bot = AsyncWebsocketTradingBot(
+            BotConfig(
+                name="e2e",
+                symbol="BONK-USDC",
+                strategy=FakeStrategy(),
+                market=JupiterMarketData(_market_client()),
+                trader=trader,
+                notifier=inbox,
+            )
         )
-    )
+        await bot.arun()
 
-    await bot.arun()
-
-    # criada com o loop e cancelada com ele: nenhuma task sobra
+    # nenhuma task sobra depois do bot
     assert asyncio.all_tasks() == {asyncio.current_task()}
     fills = [m for m in inbox.messages if m.startswith("Ordem executada")]
     # a compra mostra a posição marcada a mercado; a venda, o PnL realizado

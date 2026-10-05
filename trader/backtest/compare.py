@@ -15,6 +15,7 @@ from decimal import Decimal
 from trader.backtest.replay import BacktestTrade
 from trader.backtest.spec import ReplayCosts, result_to_dict, spec_backtester
 from trader.backtest.ticks import Tick
+from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.execution.models.intent import IntentRecord
 from trader.execution.trade.ledger import Ledger
 from trader.shared.indicators import to_utc
@@ -23,8 +24,6 @@ from trader.shared.models import SOLANA_MINTS, OrderSide, TickerData
 from trader.shared.models.costs import BPS
 from trader.shared.models.order import order_from_json
 from trader.strategy.spec.models import StrategySpec
-
-MAX_CANDLES = 1000  # o que a API de candles devolve por pedido
 
 
 def _bar(ts: datetime, seconds: int) -> int:

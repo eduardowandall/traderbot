@@ -215,8 +215,8 @@ command to run in a terminal. The rules are tested in
   helpers are in `tests/factories.py` (`make_intent`, `make_spec`,
   `open_ledger`, `memory_gateway`, `mock_provider`, `StubStrategy` for bot and
   backtest fakes).
-- Tests patch module paths such as `trader.api.cli.bot.AsyncWebsocketTradingBot`
-  and swap `trader.api.cli.bot.MARKET_DATA` for a fake.
+- Tests patch module paths such as `trader.strategy.runner.AsyncWebsocketTradingBot`
+  and swap `trader.api.cli.backtest.MARKET_DATA` for a fake.
 - Ruff: line length 88, mccabe `max-complexity = 5` (split functions rather
   than suppress). Pyright basic on `trader`, `tests`, `main.py`.
 

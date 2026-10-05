@@ -1,4 +1,4 @@
-"""O CLI: `run`, `serve`, `connect` e `backtest`."""
+"""O CLI: `serve`, `connect` e `backtest`."""
 
 import json
 import random
@@ -13,7 +13,7 @@ from factories import example_spec, make_spec
 from typer.testing import CliRunner
 
 import main as main_module
-from trader.api.cli import backtest as cli_bot
+from trader.api.cli import backtest as cli_backtest
 from trader.api.cli.output import dumps
 from trader.execution.market.hub import PriceHub
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
@@ -96,14 +96,14 @@ class FakeQuotes:
 def fake_quotes(monkeypatch):
     # o backtest mede os custos na Jupiter por padrão: aqui, offline
     quotes = FakeQuotes()
-    monkeypatch.setattr(cli_bot, "COST_QUOTES", lambda: quotes)
+    monkeypatch.setattr(cli_backtest, "COST_QUOTES", lambda: quotes)
     return quotes
 
 
 @pytest.fixture
 def fake_market(monkeypatch):
     market = FakeMarket()
-    monkeypatch.setattr(cli_bot, "MARKET_DATA", lambda: market)
+    monkeypatch.setattr(cli_backtest, "MARKET_DATA", lambda: market)
     return market
 
 
@@ -170,8 +170,8 @@ def test_serve_paper_needs_no_private_key(monkeypatch):
     usdc = SOLANA_MINTS.get_by_symbol("USDC").mint
     assert executor.wallet.balance(usdc) == Decimal("100")
     # o hub de preços e o relatório diário rodam junto com o servidor
-    hub, report = runner.background
-    assert isinstance(hub.__self__, PriceHub)
+    assert isinstance(runner.hub, PriceHub)
+    (report,) = runner.background
     assert report.__self__.gateway is runner.service.gateway
 
 
@@ -313,7 +313,7 @@ def test_a_failed_measurement_names_the_flags(tmp_path, fake_market, monkeypatch
         async def get_usd_prices(self, mints):
             raise httpx.ConnectError("sem rede")
 
-    monkeypatch.setattr(cli_bot, "COST_QUOTES", Down)
+    monkeypatch.setattr(cli_backtest, "COST_QUOTES", Down)
     body = json.loads(_invoke("backtest", _spec_file(tmp_path), "--json").stdout)
 
     message = body["errors"][0]["msg"]
@@ -372,7 +372,7 @@ def test_backtest_reports_parse_errors_as_json(tmp_path):
 
 
 def test_an_unexpected_error_is_still_json(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli_bot, "MARKET_DATA", BrokenMarket)
+    monkeypatch.setattr(cli_backtest, "MARKET_DATA", BrokenMarket)
     result = _invoke("backtest", _spec_file(tmp_path), "--json")
     body = json.loads(result.stdout)
     assert result.exit_code == 1

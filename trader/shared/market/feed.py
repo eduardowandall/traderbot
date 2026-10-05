@@ -29,11 +29,10 @@ class MarketData(CandleSource, Protocol):
 
 
 class HubMarketData:
-    """`MarketData` com preços de um hub (local ou do trade-runner).
+    """`MarketData` com preços do hub do trade-runner.
 
-    `price_of(mint)` é `RemoteTradeClient.price` num `connect` (ou
-    `PriceHub.get` num processo com hub próprio). Candles (só no aquecimento)
-    vêm de `candles`: `RemoteCandles` (op `candles`) num `connect`.
+    `price_of(mint)` é `RemoteTradeClient.price` num `connect`. Candles (só no
+    aquecimento) vêm de `candles`: `RemoteCandles` (op `candles`).
 
     O hub responde na hora, então o feed dá o ritmo do bot: um preço a cada
     `interval` segundos (antes, o ritmo era o das mensagens do websocket).
