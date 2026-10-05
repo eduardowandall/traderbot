@@ -7,8 +7,8 @@ stages changed some of it (stage U removed dry mode, the manual swap, the
 are after stage S, and stage B (moved on 2026-10-05) is last. For how the
 code works today, read [`architecture.md`](architecture.md).
 
-**Labels.** Code comments, `AGENTS.md` and `soak-test.md` cite these stages
-by label (A4, R1, S7, B7, ...). On 2026-10-05 the plan was renewed and its
+**Labels.** Code comments, `AGENTS.md` and the soak report (A2) cite these
+stages by label (A4, R1, S7, B7, ...). On 2026-10-05 the plan was renewed and its
 items renumbered from A1, so the first stage A is called **stage A
 (2026-09)** here; an A label in older text or code means that one.
 
@@ -1456,7 +1456,7 @@ and backtest exactly as before (same ids, same numbers):
   sweep's pair price; every existing USDC number unchanged.
 
 #### B9. Costs that agree across real, paper and backtest — M
-From the soak ([`soak-test.md`](soak-test.md) F7): a 5 USD SOL-USDC round trip
+From the soak ([A2](#a2-paper-soak--owner-done-2026-10-05) F7): a 5 USD SOL-USDC round trip
 cost -0.011 USD in paper and about -0.043 in the backtest. Real swaps send no
 priority fee setting (Jupiter decides, uncapped), paper charges none, and the
 backtest assumes a flat 30 bps fee whatever the pair. The owner chose three
@@ -1737,7 +1737,7 @@ Telegram approval and a service entrypoint stay open. No ledger schema change:
 | A0–A12, R0–R9, S1–S8 | **done** (2026-09-23 → 30) | See [`history.md`](history.md) |
 | U1–U3, T1–T6 | **done** (2026-09-30) | See [`history.md`](history.md) |
 | B4 Real-mode guardrails for agent sessions | **done** (2026-09-30) | 546 tests (43 new). `.claude/settings.json` denies Read `.env` and Edit `.env`/`policy.toml`; `.claude/hooks/guard_commands.py` (PreToolUse, Bash/PowerShell) denies real runs, `--env-file`, `TRADER_POLICY_FILE`, `.env`, printing the key/RPC URL and the real ledger. Checked live: it blocked this session's own command. It matches command text, so docs that mention these are edited with the Edit tool |
-| Owner: one-week paper soak | in progress (since 2026-10-03) | `serve paper` + 3 `connect`s. First review (2026-10-04, 12.5 h) in [`soak-test.md`](soak-test.md): execution path clean; candle warm-up collapses on thin tokens (F1), a quiet websocket costs 30 s per tick (F2), SOL `connect` logs keep only ~2.5 h (F3). F4 fixed (2026-10-04): the trade-runner logs bucket opens, connects and disconnects |
+| Owner: one-week paper soak | in progress (since 2026-10-03) | `serve paper` + 3 `connect`s. First review (2026-10-04, 12.5 h) in [A2](#a2-paper-soak--owner-done-2026-10-05): execution path clean; candle warm-up collapses on thin tokens (F1), a quiet websocket costs 30 s per tick (F2), SOL `connect` logs keep only ~2.5 h (F3). F4 fixed (2026-10-04): the trade-runner logs bucket opens, connects and disconnects |
 | B3 Trade-runner / strategy-runners | **done** (2026-09-30) | `serve <mode>` / `connect spec.json`; `trader/runners/{lock,trade_runner,strategy_runner}.py`, `trading_service/{wire,remote}.py`; one execution process per mode (OS lock, `run` too); exit sweep every 30s. 12 new tests plus a live test (a separate `connect` process trades through `serve paper`). The guard also blocks `serve real` and `trader-real.json` |
 | B2 Wallet allocation + reconcile | **done** (2026-09-30) | `WalletBalances` shared by the service's accounts; budgets must fit the wallet (positions at cost); startup reconcile of every bucket's positions blocks buys of a missing token; per-account `reconcile_position` removed; `ledger_dump.py` shows each bucket's position |
 | Gap review after B3/B2 | **done** (2026-09-30) | 575 tests. A transaction the chain confirmed as failed is retried with the slippage escalation and ends FAILED (was UNCONFIRMED: the mode was blocked); RPC reads at Confirmed (was Finalized: stale balances right after a swap) and sells re-read the wallet; provider rejections (`recusado: ...`) don't count toward the breaker; a balance read that overlaps a fill isn't cached; a leg without a SOL price uses the other leg's; sells keep a client-given idempotency key; `connect` re-reads the connection file after a trade-runner restart and gives up after 5 reconnects so the bot loop backs off |
@@ -1838,7 +1838,7 @@ Telegram approval and a service entrypoint stay open. No ledger schema change:
 ## Renewed plan, items A (from 2026-10-05)
 
 #### A1. Soak quick fixes — S (done 2026-10-05)
-From [`soak-test.md`](soak-test.md):
+From the soak report ([A2](#a2-paper-soak--owner-done-2026-10-05)):
 - F5: `random_chance` fires per tick, not per unit of time (`specs.md`, and
   live tick rates vary by token); fix the stale rationale of
   `spec-random.json`.
@@ -1865,6 +1865,572 @@ From [`soak-test.md`](soak-test.md):
 - **Done.** As designed. Seen in an isolated `/smoke` of `spec-soak-metronome.json`
   (7 min): the connect log had 24 lines (one ticker line a minute), the serve
   log both fills at INFO and no websocket frames.
+
+#### A2. Paper soak — owner (done 2026-10-05)
+The owner's paper soak ("Owner task: a one-week paper soak" in stage B
+above), with one `serve paper` and one `connect` per spec. Two runs: the
+first from 2026-10-03 23:30, reviewed 12.5 h in, with three specs of which
+one traded (sections 1-5, F1-F8); the second on 2026-10-05 on the A1 build,
+three SOL specs trading side by side, ended by the owner after about 3.5 h
+(section 6, F9-F13). Where the findings went: F1 is A4; F2, F4 and F7 were
+fixed in stage B (B7, 2026-10-04, B9); F3, F5 and F8 in A1; F6 is by design;
+F9 is A14; F10-F13 are A13. The F8 note on the local `policy.toml` comments
+is the owner's. The report as written follows ("this file" is the former
+`docs/soak-test.md`; section numbers are its own).
+
+- **Started:** 2026-10-03 23:30 local (UTC+1). **This report:** 2026-10-04,
+  about 12.5 h in.
+- **Times:** log lines are local time (UTC+1); ledger rows are UTC. "10:49 UTC"
+  and "11:49 local" are the same moment.
+- **State was not fresh.** The paper ledger goes back to 2026-09-30 and the
+  paper wallet is older than that (see §4.6). The random spec's bucket already
+  had about 170 round trips from 2026-10-01, and they count toward its
+  `max_loss_usd`.
+
+##### 1. Setup
+
+| Process | PID (python) | Started (local) | Spec | Bucket |
+|---|---|---|---|---|
+| `serve paper` #1 | 11052 | 10-03 23:30:02 | | |
+| `serve paper` #2 | 22136 | 10-04 09:33:20 | | |
+| `serve paper` #3 (running) | 21440 | 10-04 11:49:01 | | |
+| `connect spec-random.json` | 3676 | 10-03 23:30:21 | random, SOL-USDC, 15 s bars, 5 USD legs, budget 20, max loss 10 | `strategy:3f82df8aa389` |
+| `connect spec-sol-dip.json` | 10720 | 10-03 23:30:34 | sol-dip, SOL-USDC, 1 min bars, 4 USD, budget 5, max loss 3 | `strategy:8bb94a8356d2` |
+| `connect spec-wma-composer.json` | 17812 | 10-03 23:30:59 | wma-composer, NOBODY-USDC, 15 s bars, 5 USD, budget 20, max loss 5 | `strategy:5422d6605a9a` |
+
+Log files are `.logs/trader-<epoch>-<pid>.log`. Before the soak, a
+`run paper spec-sol-dip.json` (pid 4844, 23:25-23:29) opened the sol-dip bucket,
+and a `serve paper` (pid 20588) lived for 11 s at 23:29:51 with no activity.
+
+###### Timeline
+
+| Local time | Event |
+|---|---|
+| 10-03 23:30 | Trade-runner #1 up; the three `connect`s say `hello` and start ticking. Paper policy: 60 buys/hour. |
+| 10-03 23:56 | wma-composer is warm, 25 min after its start (see F1). |
+| 10-04 01:00 | Daily report for 2026-10-03 (`daily_report` event at 00:00:02 UTC, 1 bucket). |
+| 10-04 overnight | random runs into the 60 buys/hour limit every hour (§4.7). |
+| 10-04 09:33 | Owner restarts the trade-runner with 120 buys/hour. All three `connect`s reconnect. |
+| 10-04 11:49 | Owner edits `policy.toml` (11:48:51; now 660 buys/hour) and restarts the trade-runner. All three reconnect; random's open position is restored from the ledger and sold 10 s later. |
+| 10-04 12:16 | random reaches `max_loss_usd` (-10.008 USD realized): bucket retired, its `connect` stops by itself (§4.9). sol-dip and wma-composer keep running. |
+
+##### 2. Verdict
+
+**The execution path behaves as designed.** Over about 1,750 fills in the soak
+window: no errors in any process, no unresolved intents, every buy is followed
+by exactly one sell of the same raw quantity, the paper wallet matches the
+ledger to the lamport, policy limits were applied as written, both trade-runner
+restarts were absorbed without losing or duplicating an order, the daily
+report fired once, and random's `max_loss_usd` retired its bucket and stopped
+its `connect` cleanly (§4.9).
+
+**But only one bucket traded.** sol-dip and wma-composer never placed an order.
+For sol-dip that is correct (the market never dipped 2%). For wma-composer it
+is mostly a poor test subject (a near-flat, thinly traded token), but it
+exposed a real warm-up problem (F1). So the multi-bucket paths (two buckets
+submitting at once, the order lock, budget allocation under load) were **not**
+exercised by this soak.
+
+**Since 12:16 nothing in the soak trades.** random is retired, and the other
+two are unlikely to fire. To keep the trade path under load for the rest of the
+week, connect at least two specs that trade often on liquid pairs, so two
+buckets compete for the order lock and the wallet. Each needs a new
+`spec_id`: change a behavior field such as `budget_usd` or `max_loss_usd`.
+Changing `name` or `rationale` is not enough (they are metadata, left out of
+`spec_id`), so the spec would reattach to the retired bucket.
+
+##### 3. Findings
+
+Ordered by how much they matter. F1-F3 are worth a plan item.
+
+###### F1. Warm-up from candles collapses for thinly traded tokens (wma-composer)
+
+`connect` seeds the indicators from `strategy.warmup()` candles (S7 in
+`architecture.md`). The Jupiter 15 s candles for NOBODY only exist for bars
+with trades: the last 100 candles span **2 days** (2026-10-02 15:01 ->
+10-04 10:29 UTC) with 73 gaps longer than `MAX_GAP_BARS` (5). `BarSeries.seed`
+treats each gap as a feed outage and clears the series, so **seeding 100
+candles leaves 1 bar** (checked by calling `BarSeries.seed` on the live
+candles). The spec then warms up live: 100 bars x 15 s = 25 min, which matches
+the log (`5422d6605a9a aquecida` at 23:56:42 for a 23:31:00 start). It happens
+again after every `connect` restart.
+
+The backtest has the same blind spot: `backtest --candles 1000` on this spec
+replays 1,000 candles spread over 14 days (2026-09-20 -> 10-04) and resets on
+almost every gap, so its "no trades" says little.
+
+Options: for candles, fill gaps forward (a candle that doesn't exist means "no
+trade", not "no data"), and keep the reset for live tick gaps only; or refuse,
+at validation, specs on tokens whose candles are too sparse for the timeframe.
+
+###### F2. A quiet websocket costs a 30 s timeout on every tick (wma-composer)
+
+The price websocket only pushes NOBODY when it trades: 384 pushes in 12.4 h.
+`JupiterMarketData.get_price` waits `PRICE_TIMEOUT_SECONDS` (30 s) for the
+websocket, falls back to the Price API, and on the next tick waits 30 s again
+(a timeout doesn't set `_ws_down_until`, only an exception does). Result: 1,820
+ticks in 12.4 h, median gap 30.2 s, and 1,436 `sem preço no websocket`
+warnings. Consequences:
+
+- a 15 s timeframe gets at most one tick per two bars; the empty bar is filled
+  with the previous close, so the WMAs run on a stair-stepped series;
+- the 3.1% trailing stop would be checked only every 30 s on a meme token;
+- the `connect` only talks to the trade-runner every 30 s, so it noticed each
+  trade-runner restart up to 30 s late (09:33:39 and 11:49:26).
+
+Options: after a timeout, poll the Price API at `REST_POLL_SECONDS` (2 s) for a
+while before trying the websocket again (like the exception path), or give the
+websocket a much shorter timeout when the Price API is the backup anyway.
+
+###### F3. Log retention is about 2.5 hours for the SOL `connect`s
+
+The SOL `connect`s tick about 9 times a second (one tick per websocket push)
+and log at DEBUG: every websocket frame (`websockets.client`), every tick
+(`bot.log_ticker`), every `get_price` call and every open-position line. That
+is about 10 MB per 25 min per process. With `LOG_MAX_BYTES` 10 MB x
+`LOG_BACKUPS` 5, **only the last ~2.5 h survive**: at 11:55 the random and
+sol-dip logs started at 09:45 and 09:11, so the night (including the 09:33
+restart for random) is gone, and they kept rotating while this report was
+written. The serve logs and the wma-composer log are complete.
+
+Options: keep `websockets.client` at INFO in the file handler (frames are 35-50%
+of the lines); log the ticker line once per bar instead of once per tick; or
+rotate on time with more backups for long runs.
+
+###### F4. The trade-runner doesn't log who is connected
+
+`TradeRunner._hello` and the disconnect in `_handle` log nothing; nor does
+`open_bucket` unless a position is restored. From the serve log you can't tell
+which specs said `hello`, when a `connect` went away, or which buckets are open.
+A WARNING line on `hello` (spec name, bucket, budget) and on disconnect would
+make a soak readable from the serve log alone.
+
+**Fix (2026-10-04).** `TradeRunner` logs at WARNING, like its start line (the
+console only shows WARNING and up for these loggers):
+
+- `Bucket strategy:<id> aberto para a spec <name>: <symbol>, orçamento <budget>
+  USD, perda máxima <max_loss> USD`: once per bucket per process, on its first
+  `hello`. What the restore finds is already logged by the service
+  (`Posição restaurada do ledger`, and `atingiu o limite` for a bucket that
+  opens already past its max loss);
+- `Spec <name> (<id>) conectada ao bucket strategy:<id> (<n> conectada(s))`:
+  every accepted `hello`, reconnects included;
+- `Spec <name> (<id>) desconectada (<n> conectada(s))`: when that connection
+  closes, for whatever reason.
+
+A refused `hello` was already logged (`Pedido recusado: HelloError: ...`).
+Tested in `tests/trader/api/cli/test_runners.py`
+(`test_the_log_shows_bucket_opens_connects_and_disconnects`). A running
+trade-runner gets the new lines when it restarts; its `connect`s reconnect on
+their own (§4.2).
+
+###### F5. `random_chance` frequency depends on the feed rate
+
+`random_chance` is drawn once per tick, and ticks arrive at the feed's rate: 9.1
+per second live for SOL, 1.6 per second in a candle backtest (each bar
+replayed as an interpolated path). For spec-random this means about **108 round
+trips/hour live (uncapped, 10:49-11:04 UTC) vs 19/hour in the backtest**
+(`backtest --candles 1000 --seed 1`: 81 round trips in 4.2 h). `docs/specs.md`
+says "`pct`% of the time", which reads as a time rate. Also, the spec's
+`rationale` is stale: it says entry draws of 5% and 10% ("~0.5% of ticks"),
+but the entry conditions are now 5% and 20%.
+
+Options: say "per tick" in `specs.md` and that live tick rates vary by token
+(9/s for SOL, ~0.03/s for NOBODY); fix the rationale.
+
+###### F6. random retires on history from 2026-10-01
+
+Its bucket's realized PnL is rebuilt from every row in the ledger for
+`strategy:3f82df8aa389`, including about 170 round trips from 2026-10-01. With
+`max_loss_usd` 10 and about -0.011 USD per round trip, it reached the limit
+at 12:16 local on 2026-10-04 (§4.9). This is the designed behavior, but it
+means:
+
+- the soak's numbers for random are not "since the soak started";
+- once retired, the bucket stays retired: a new `connect spec-random.json`
+  stops on its first tick (`open_bucket` re-checks the max loss). To keep it
+  running, change a behavior field (a new `spec_id`; `name` and `rationale`
+  don't count) or delete the paper ledger.
+
+###### F7. Paper and backtest cost models differ by about 4x
+
+Per round trip of 5 USD on SOL-USDC:
+
+| | Gross (price) | Costs | Net |
+|---|---|---|---|
+| Paper, live (871 round trips) | -0.0097 USD (the 2 x 10 bps paper slippage) | 0.0012 USD (2 x 5,000 lamports) | **-0.0109 USD** |
+| Backtest defaults | 30 bps fee + 10 bps slippage per leg | 0.002 USD per leg | **about -0.043 USD** |
+
+Paper uses the real Jupiter quote (LP fees already inside it), so the
+backtest's 30 bps fee is conservative on SOL-USDC. Paper also charges only the
+base fee: `priority_fee_lamports` is 0 on every row, so paper costs are a lower
+bound for real mode. Worth one line in `specs.md`/`architecture.md` so nobody
+compares the two PnLs one to one.
+
+**Fixed (2026-10-04, B9 in `plan.md`).** `max_priority_fee_lamports` in
+`policy.toml` (default 100,000) is the cap real sends to Jupiter, the fee paper
+charges on every leg, and part of the backtest's network fee. `backtest`
+measures the pair's fee on Jupiter at the spec's size instead of assuming 30
+bps. Every report shows the cost per round trip, computed the same way. With
+the defaults, a 5 USD SOL-USDC round trip now reads about 71 bps in the
+backtest (0 bps pool, 20 bps slippage, about 51 bps network fees). The cap is
+most of that at this size; the owner may want a lower cap for small trades.
+On the soak's ledger, the old paper trades read 21.9 bps.
+
+###### F8. Small things
+
+- `account.py` logs a buy fill at INFO and a sell fill at DEBUG (`ORDER
+  PLACED`); the serve log only shows half the fills at INFO.
+- `log_ticker` prints prices with 9 decimals: NOBODY (0.0006) shows 6
+  significant digits.
+- The local `policy.toml` (untracked) still has comments from an older example
+  (`main.py swap`, `main.py resume`, `[dry.*]`, `ledger list`).
+  `policy.example.toml` is already clean.
+- A policy change needs a trade-runner restart. That worked well here (§4.2),
+  so it is fine as long as it stays documented.
+
+##### 4. Checks and results
+
+###### 4.1 Processes and errors
+
+| Process | Log span checked | ERROR | WARNING (what) |
+|---|---|---|---|
+| serve #1 | 23:30:02 -> 09:32:57 | 0 | 397 policy denials (60/h) |
+| serve #2 | 09:33:20 -> 11:48:20 | 0 | 7 policy denials (120/h) |
+| serve #3 | 11:49:01 -> now | 0 | none besides start and the restored position |
+| connect random | 09:45 -> now (older lines rotated out) | 0 | 7 denials, 1 reconnect |
+| connect sol-dip | 09:11 -> now (older lines rotated out) | 0 | 1-2 reconnects |
+| connect wma-composer | whole run | 0 | 1,436 Price API fallbacks (F2), 2 reconnects |
+
+No `Erro no loop principal`, no `Pedido recusado` (protocol errors), no
+`Varredura ... falhou`, no websocket fallbacks for SOL in the logs that remain.
+The largest gap between SOL ticks was 6.1 s (during order handling); the 3.3-3.5 s
+gaps at the trade-runner restarts were the reconnects.
+
+###### 4.2 Trade-runner restarts
+
+At each restart the trade-runner removed `.data/trader-paper.json` on exit, so
+a `connect`'s first retry said `trade-runners encontrados: nenhum`; the next
+one (2 s later) re-read the file, got the new port and token, sent `hello` again
+and carried on. Downtime seen by the SOL `connect`s was about 3 s.
+
+At the 11:49 restart random had a position open (buy 10:48:20 UTC). The new
+trade-runner restored it from the ledger (`Posição restaurada do ledger:
+0.041157438 @ 121.48`), and the strategy, which never restarted, sold it at
+10:49:11 UTC for the same raw quantity. No intent was left EXECUTING,
+no idempotency key was reused, and the `reconcile` at the first `hello` found
+no mismatch.
+
+###### 4.3 Market data
+
+| Spec | Ticks | Rate | Source |
+|---|---|---|---|
+| random (SOL) | 70,896 in 2.15 h | 9.15/s, median gap 0.03 s | websocket |
+| sol-dip (SOL) | 89,811 in 2.73 h | 9.14/s, median gap 0.04 s | websocket |
+| wma-composer (NOBODY) | 1,820 in 12.4 h | 0.04/s, median gap 30.2 s | Price API after a 30 s websocket timeout (F2) |
+
+###### 4.4 Strategy behavior
+
+- **random:** behaves as specified. Every buy is 5 USD; it alternates strictly
+  buy -> sell; the median hold is 15 s (p95 69 s); the median wait from an exit
+  to the next entry is 8.6 s; the 50% stop never came close. Win rate 0.1% (1 of
+  871): a 15 s hold rarely moves SOL more than the 20 bps the paper slippage
+  takes. Signal to fill over the 494 fills still in the log: median 0.20 s,
+  p95 0.60 s, max 3.9 s (strategy log `_signal` -> `bot.log_placed_order`,
+  minus the bot's fixed 2 s pause after a fill).
+- **sol-dip:** no trades, which is **correct**. In the soak window SOL moved
+  between 119.51 and 121.52; the largest dip from the 30-bar high was 0.43%
+  (needs 2%), and the lowest RSI14 (21.5, 23:07 UTC) came with a 0.25% dip;
+  no bar had even a 1% dip with RSI14 under 45. A
+  backtest of the same window (`backtest spec-sol-dip.json --candles 1000`,
+  2026-10-03 19:18 -> 10-04 11:56) also makes 0 trades.
+- **wma-composer:** no trades, **consistent with its input**. Its 1,828
+  logged ticks (rebuilt from the `log_ticker` lines into a ticks CSV) replayed
+  with `backtest --ticks` also make 0 trades. NOBODY had only 36 distinct
+  prices in 12.5 h (0.000606-0.000627), so the four WMA conditions had almost
+  nothing to work with. See F1 and F2.
+
+###### 4.5 Ledger integrity
+
+Over all 2,068+ executed rows of `strategy:3f82df8aa389` (and the 6 of the
+retired `strategy:555d793e2f18`, an older spec from 2026-09-30):
+
+- buys and sells strictly alternate; each sell's `in_amount` equals the open
+  buy's `out_amount`, and has `closes_position = 1`;
+- `intent_executing` = `intent_executed` = `order_recorded` events (2,061 when
+  counted), and `ledger_dump.py` shows no unresolved intents;
+- no `reconcile_mismatch`, `failed_tx_fee`, `bucket_retired` or
+  `bucket_max_loss` events before the max loss (§4.9);
+- denied buys are folded into `repeat_count`, as designed: 113 denied rows
+  stand for 486 denied requests.
+
+###### 4.6 Paper wallet vs ledger
+
+`wallet - (sum of executed flows - fees - rent)` should be constant. Sampled 6
+times, 20 s apart, across 5 new fills: always **USDC 72.036903, SOL
+0.706204384** to the raw unit. Every change to `paper-wallet.json` is in the
+ledger. (That "starting" balance isn't the 100 USDC + 0.5 SOL default: the
+wallet predates this ledger.)
+
+###### 4.7 Policy
+
+`max_trades_per_hour` counts buys only, as `policy.toml` describes:
+
+| UTC hours | Limit | Executed buys/hour | Denied requests/hour |
+|---|---|---|---|
+| 23 -> 07 | 60 | 54-60 | 36-48 |
+| 08 (restart at 08:33) | 60 -> 120 | 67 | 29 |
+| 09 | 120 | 120 | 6 |
+| 10 (uncapped from 10:49) | 120 -> 660 | 105 | 1 |
+
+After a denial the `connect` pauses orders for 30 s (`denial_cooldown`) while
+still taking prices; the longest idle gaps (about 23 min) are the hourly limit.
+Sells were never denied.
+
+###### 4.8 Daily report
+
+`daily_report` for 2026-10-03 at 00:00:02 UTC, 1 bucket (only random had
+fills), from trade-runner #1. Neither restart sent it again.
+
+###### 4.9 Max-loss retirement (random)
+
+Observed live on 2026-10-04, and it worked end to end:
+
+| Local time | Where | What |
+|---|---|---|
+| 12:16:06.427 | ledger | sell executed, realized -0.0113 USD; bucket total -10.0079 |
+| 12:16:06.557 | serve | `_check_max_loss`: `prejuízo -10.0079... atingiu o limite 10`; bucket RETIRING |
+| 12:16:06.560 | ledger | `bucket_max_loss` event (`limit` 10, `realized_usd` -10.0079) |
+| 12:16:08.607 | connect random | next tick (after the 2 s post-fill pause): `bucket_done` -> `encerrado: parando o bot` |
+| 12:16:18.626 | connect random | websocket closed; the whole `uv` -> `python` process tree exited, no error |
+
+The check runs after the fill, so the bucket overshoots the limit by the last
+round trip's loss (0.008 USD here). No position was open, so there was nothing
+for `_close_if_retiring` or the 30 s sweep to sell. The trade-runner kept
+serving the other two `connect`s with no warnings. Closing the websocket took
+10 s (the server didn't answer the close frame; `websockets`' default
+`close_timeout`), which is harmless.
+
+Uncapped (10:49-11:16 UTC) random made 97 fills in 27 min, about 108 round
+trips/hour, costing about 1.2 USD/hour of paper slippage and fees.
+
+###### 4.10 Resources
+
+At 11:59 local, after 12.5 h:
+
+| Process | Private memory | CPU time |
+|---|---|---|
+| connect random | 59.5 MB | 2,079 s (4.6% of a core) |
+| connect sol-dip | 58.9 MB | 1,771 s (3.9%) |
+| connect wma-composer | 61.3 MB | 39 s |
+| serve #3 (10 min old) | 58.5 MB | 17 s (2.8%) |
+
+At 12:16, private memory was unchanged (sol-dip 58.9, wma-composer 61.3,
+serve 58.9 MB). Two samples are not a leak test; sample again at the end of
+the week.
+
+The ledger is 13.5 MB (+1 MB WAL) for about 2,200 intents and 6,300 events.
+
+##### 5. How these checks were made
+
+All read-only; nothing was written to `.data/`.
+
+- `uv run --no-sync python .claude/scripts/ledger_dump.py paper`.
+- SQL on `.data/ledger-paper.sqlite3` opened with `?mode=ro`: intents by
+  account/side/status and hour, denial reasons, event counts, buy/sell
+  pairing, and the wallet invariant (§4.6).
+- Log scan per process (all rotated files, oldest first): levels, distinct
+  WARNING/ERROR messages with numbers masked, tick gaps from `bot.log_ticker`.
+- `backtest` on sol-dip (`--candles 1000`), random (`--candles 1000 --seed
+  1`) and wma-composer (`--candles 1000` and `--ticks` rebuilt from its log).
+- `JupiterMarketData.get_candles` to measure dips/RSI over the window and the
+  NOBODY candle gaps, and `BarSeries.seed` on those candles.
+- `Get-Process` for memory and CPU.
+
+`connect` has no `--record-ticks` (only `run` does), so the wma-composer replay
+had to rebuild ticks from the log, at the 9 decimals `log_ticker` prints.
+Giving `connect` the same option would let
+`.claude/scripts/live_vs_backtest.py` replay exactly what each strategy saw.
+(Done in B14: `run` is gone and `connect` has `--record-ticks`.)
+
+##### 6. Second run: three SOL buckets on the current build (2026-10-05)
+
+The restart A2 asked for: the A1 build, a fresh paper ledger, and two liquid
+specs that trade often (`spec-soak-metronome.json`, `spec-soak-revert.json`)
+next to `spec-random.json`, so several buckets share one trade-runner. The
+owner ended it after about 3.5 h ("good enough"), so there is no week-long
+run and no end-of-week memory sample. Reviewed at 18:25 local the same day.
+Times are local (UTC+1) unless marked UTC.
+
+###### 6.1 Setup and timeline
+
+The paper ledger was deleted at about 14:41 (its first row is a
+`daily_report` at 13:41:59 UTC); the paper wallet was kept. Log files are
+`.logs/trader-<epoch>-<pid>.log`.
+
+| Local time | Event |
+|---|---|
+| 14:39 | On the old ledger, `connect spec-random.json` stops on its first tick (bucket retired on 10-04, F6). |
+| 14:41:59 | `serve paper` (pid 20496, a build before A1's log changes) on the new ledger; `connect spec-random.json` (41632). |
+| 15:50:52 | Trade-runner restarted (pid 38976, A1 build). |
+| 15:51:12 | `connect spec-soak-metronome.json` (23576): bucket `strategy:733e9d719fd6`. |
+| 15:52:02 | `connect spec-soak-revert.json` (31096): bucket `strategy:e104dba8efcd`. |
+| 15:53:01 | random's `connect` restarted (34164) on the A1 build: three buckets, one trade-runner, for 2 h 22 min. |
+| 18:15:34 | Trade-runner stopped to take the A3 build (committed 18:13). |
+| 18:15:38 | A3 trade-runner (36880); the three running `connect`s (A1 code) reconnect by themselves within 8 s. 18:15:54: random buys. |
+| 18:16:05 | Trade-runner restarted again (43000, still running). It restores random's open position from the ledger. |
+| 18:16:18-18:16:40 | random's `connect` stopped and started four times (41620, 34516, 27268, 31452). 27268 sells at 18:16:37 and is stopped 2 s later. |
+| 18:17:21 | revert's `connect` restarted (25444) on the A3 code. |
+| 18:21:53-18:22:17 | The owner stops every `connect`. random had bought at 18:22:05, so its bucket holds 0.041730159 SOL; the next `connect spec-random.json` restores it. |
+
+###### 6.2 Verdict
+
+**Clean again, now with three buckets.** 121 intents, all EXECUTED: random
+45 buys and 44 sells, metronome 8 and 8, revert 8 and 8. No denials, no
+failed or rejected rows, no unresolved intents, no `reconcile_mismatch`, no
+ERROR in any trade-runner log. Four trade-runner starts and six `connect`
+restarts lost or duplicated no order, including a position bought under one
+trade-runner and sold under the next, and a sell whose `connect` was stopped
+while the fill was being reported (§6.4). Both soak specs behaved as written,
+at the rate their rationale promised.
+
+**What it could not show:** the order lock was never contended (F12), and two
+things only show up when comparing with a backtest or at restarts: the replay
+places stops and targets about 25 bps tighter than live at 5 USD (F9), and a
+fresh trade-runner answers a burst of first price requests with
+`StalePriceError` (F10). These and the two small ones (F11, F13) are plan
+items A13 and A14.
+
+###### 6.3 Findings
+
+###### F9. Replays measure stops and targets from a fill that includes the network fee
+
+`SpecStrategy` measures every position-relative exit from `entry_price`, the
+entry order's `quote_price` (the fill), and starts the trailing stop's peak
+there. The replay folds `network_fee_usd` into the fill
+(`ReplayQuoteClient.get_quote` takes it from the output, since the replay
+wallet holds no SOL); paper and real pay it in SOL, outside the fill. At 5 USD
+legs the fee is 0.0126 USD, 25 bps, so the replay's entry sits about 35 bps
+above the tick (10 bps slippage plus the fee) where live sits about 9 bps
+above (tick 119.58792 at 16:16:00, BUY at 119.69521). Every exit measured from
+the entry is that much tighter in the replay: revert's 0.5% trailing stop
+fires 0.15% below the entry tick in the backtest and about 0.41% below live;
+`stop_loss`, `take_profit`, `trailing_take_profit` and `entry_price` in an
+`expr` shift the same way. The effect is the fee over the trade size (2.5 bps
+at 50 USD).
+
+Seen on revert: `backtest --candles 1000` over the same afternoon enters
+where live entered (16:15/16:16, 16:31/16:31, 17:24/17:24, 17:43/17:44,
+18:02/18:02 for backtest/live), but in the live window 5 of its 10 exits are
+trailing stops; live had 0 of 8 (7 `max_hold`, 1 `take_profit`). Costs agree
+(70.3 bps per round trip in the backtest, 64.6-69.6 bps live), so only the
+exits drift. Plan item A14.
+
+###### F10. A fresh trade-runner refuses the second first-price request for a mint
+
+`PriceHub._watch` adds a new mint to the watch list and then polls the Price
+API for its first price. A second `price` request for the same mint during
+that poll sees the mint as known, finds no price and gets `StalePriceError`.
+It happened at both restarts that had several `connect`s waiting (18:15:42
+and 18:16:07: `Pedido recusado: StalePriceError: sem preço de So111...`).
+The `connect` logs it as ERROR with a traceback (`Erro no loop principal`),
+backs off one step and is fine on the next tick. Harmless, but it is the only
+ERROR of the run and every multi-spec restart will show it. Plan item A13.
+
+###### F11. A fill is reported 2 s late, and not at all if the `connect` stops
+
+`AsyncWebsocketTradingBot._handle_reply` sleeps 2 s after a fill ("da tempo da
+wallet atualizar", marked TODO) before returning the order, and only then is
+it logged (`log_placed_order`) and sent to Telegram. The wallet is the
+trade-runner's now, and the reply already comes after the ledger. At 18:16:37
+random's `connect` signalled a sell, the trade-runner filled it 0.28 s later,
+and the `connect` was stopped at +1.95 s: the ledger has the sell, the
+`connect` log and Telegram never saw it. Plan item A13 (report first; whether
+the pause stays goes with A5).
+
+###### F12. The order lock was never contended
+
+Paper intents take 0.19 s (median; max 0.46 s) from creation to the last
+update, and the three buckets placed about 20 orders an hour between them:
+no two intents of different buckets overlapped, and the closest pair started
+0.73 s apart (16:39:29: random's buy ended at .247, revert's sell started at
+.978). A soak at this rate can't exercise the lock; a test can (several
+buckets submitting at once on one `TradeService`). Plan item A13.
+
+###### F13. Backtest times are local, ledger times are UTC
+
+Jupiter candles are parsed as naive local time (`candles_to_tickers`), so
+`backtest --json` prints `start`, `end` and trade times in local time with no
+offset, while the ledger is UTC. Matching F9's trades by eye needed the one-hour
+shift. `live_vs_backtest.py` already normalizes. Plan item A13 (print UTC).
+
+###### 6.4 Checks and results
+
+**Processes and logs.** A1's F3 fix holds: the A1 trade-runner wrote 250 KB in
+2 h 25 min (pid 20496, before the fix, wrote 8.8 MB in 69 min, mostly
+websocket frames); the `connect` logs are 47-194 KB and nothing rotated.
+Warnings are only starts, `hello`s, disconnects and reconnects (F4's lines
+made the timeline readable from the trade-runner log alone). The only ERRORs
+are F10's two lines in the revert and random `connect`s.
+
+**The two soak specs** (2 h 22 min side by side):
+
+| | Round trips | Hold | Wait from exit to entry | Exits | Rate live / backtest |
+|---|---|---|---|---|---|
+| metronome | 8 | 300.5-301.2 s | 736-951 s (cooldown 720 s + draw) | 8 `max_hold5m` | 3.3/h / 2.95/h (49 in 16.6 h, `--seed 1`) |
+| revert | 8 | 432-481 s | 407-965 s (cooldown 360 s) | 7 `max_hold8m`, 1 `take_profit0.15%` | 3.3/h / 3.6/h (15 in 4.2 h) |
+
+random made 44 round trips in about 3.6 h (median hold 143 s, shortest 2.2 s).
+Its 1% chance per tick at one tick a second matches.
+
+**Ledger.** Per bucket, buys and sells alternate; each sell's `in_amount` is
+the open buy's `out_amount` and has `closes_position = 1`; no idempotency
+key repeats; every sell has `pnl_complete = 1`. Every intent has
+`intent_executing` -> `intent_executed` -> `order_recorded`, and the 7
+created by the A3 build also an `intent_sent` before the execution. Other
+events: three `bucket_opened` and one `daily_report` (for 10-04, with 0
+buckets: the ledger was new). Costs are `simulated` on every leg: 105,000
+lamports (5,000 base plus the 100,000 priority cap), no rent.
+
+| Bucket | Net PnL | Cost per round trip |
+|---|---|---|
+| random | -1.5426 USD (44) | 69.3 bps |
+| soak-metronome | -0.2915 USD (8) | 69.6 bps |
+| soak-revert | -0.2383 USD (8) | 64.6 bps |
+
+At about 0.035 USD a round trip and ~3.3 round trips an hour, each soak
+spec's 15 USD max loss would have lasted about 5.4 days, as planned.
+
+**Paper wallet.** The 7 swaps in A3's applied log match their ledger rows to
+the raw unit (in, out, fee, rent). Balances at the end: 57.306262 USDC,
+0.722330263 SOL; with this ledger's flows taken out, the wallet started it
+with 62.870936 USDC and 0.693305104 SOL (the wallet predates the ledger, as
+in §4.6). No fills happened while it was sampled, so the invariant wasn't
+re-checked over time.
+
+**Restarts.** At 18:15 the three A1 `connect`s reconnected to the A3
+trade-runner with no changes (the protocol didn't change). The position random
+bought under pid 36880 was restored by pid 43000 (`Posição restaurada do
+ledger: 0.041750099 @ 119.76`), shown by the next `connect`s (`LONG
+0.04175010 @ 119.76020`) and sold once at 18:16:37. The `connect` started
+after that sell began flat, with the sell in its PnL (-1.4410 -> -1.4736).
+
+**Wallet allocation.** Open budgets 20 + 15 + 15 = 50 USD fit the wallet at
+every `hello`; no refusal.
+
+**Resources.** The A3 trade-runner used 62.5 MB private memory and 9.6 s of
+CPU in its first 7 minutes (58.5 MB for the 10-04 one at 10 minutes). The
+long-run sample was not taken.
+
+###### 6.5 How these checks were made
+
+As in §5, read-only: `ledger_dump.py paper`; SQL on the ledger with
+`?mode=ro` (pairing, event sequences, overlaps between buckets, costs,
+the wallet's applied log against the rows); a scan of each log by level and
+distinct message; `backtest --candles 1000 --json` of both soak specs
+(metronome with `--seed 1 --fee-bps 0 --network-fee-usd 0.012579` after a
+Jupiter 429), and a replay of revert with the strategy logger on to get each
+exit's label; `Get-Process` for memory.
 
 #### A3. Resolve UNCONFIRMED intents — M (done 2026-10-05)
 Today a process killed mid-swap leaves an UNCONFIRMED (or EXECUTING) intent

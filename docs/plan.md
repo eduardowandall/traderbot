@@ -32,8 +32,8 @@ it before the code. Track progress in §5, record decisions in §9.
 
 ## 2. Where we are
 
-**Overall: about 88%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
-and goal 6 is scored on its own so a new goal doesn't hide progress). 761
+**Overall: about 89%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
+and goal 6 is scored on its own so a new goal doesn't hide progress). 764
 tests. Nothing has traded real money yet: the next stretch of work leads to a
 first tiny-budget real run.
 
@@ -41,8 +41,8 @@ first tiny-budget real run.
 |---|---|---|---|
 | 1. Specs as files | `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `backtest`, `/smoke`, `serve` + `connect` for any number of specs; the trade-runner checks each spec's terms against its own policy | No spec has traded real money (A6) | **90%** |
 | 2. Manual trades | Removed in stage U | Comes back with a wallet treasury | deferred |
-| 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up, re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | Warm-up collapses on thin tokens' candle gaps (A4); no crossovers | **85%** |
-| 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization | Several buckets trading at once not yet soaked (A2); one wallet only | **80%** |
+| 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up, re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | Warm-up collapses on thin tokens' candle gaps (A4); replays measure exits from a fee-laden fill (A14); no crossovers | **85%** |
+| 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | Orders submitted at the same instant only by a test (A13); one wallet only | **85%** |
 | 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included | Replays ignore rent | **96%** |
 | 6. Perps | Research, venue choice and design (§8) | Everything else (A7–A12) | **5%** |
 | (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking and resolution, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | Owner approval for large trades; a service entrypoint | **90%** |
@@ -76,15 +76,6 @@ first tiny-budget real run.
 In order. Each item ships on its own with the suite green (`/check`). Size:
 **S** under an hour, **M** several modules, **L** a design change.
 
-### A2. Owner: finish the paper soak — owner
-Running on the current build since 2026-10-05, ends about 2026-10-10. Connect
-two liquid specs that trade often (a new `spec_id` each), so two buckets
-compete for the order lock and the wallet: `docs/examples/spec-soak-metronome.json`
-and `spec-soak-revert.json` (SOL-USDC, 5 USD legs, about 3 round trips an
-hour each, budget and max loss 15 USD, which lasts about 5 days in paper); take the end-of-week memory
-sample. At the end, move `soak-test.md` into `history.md`; what goes wrong
-becomes an item here.
-
 ### A4. Warm-up across candle gaps — M
 Soak F1: Jupiter candles only exist for bars with trades, and
 `BarSeries.seed` treats every gap over `MAX_GAP_BARS` as an outage and clears
@@ -95,7 +86,40 @@ The backtest headline of the liquid examples must not change.
 
 ### A5. One rule for when orders re-read the wallet — S
 Old B10 C3, waiting for a talk with the owner. It touches real sells, so it is
-settled before A6.
+settled before A6. The bot's 2 s pause after every fill
+(`AsyncWebsocketTradingBot._handle_reply`, "da tempo da wallet atualizar")
+is part of the same question: keep it or drop it here (A13 only moves the
+fill report before it).
+
+### A13. Soak II small fixes — S
+From the second soak run (A2 in `history.md`, F10-F13). No schema or spec id
+change.
+- F10: `PriceHub` keeps the first poll of a new mint in flight and every
+  `price` request for that mint awaits it, so `connect`s that say `hello`
+  together after a restart don't get `StalePriceError`. The bot logs a
+  stale-price reply as a WARNING without a traceback (it is not a bug in the
+  loop).
+- F11: the bot logs the fill and sends the Telegram message before the 2 s
+  pause, so a `connect` stopped right after a fill still reports it.
+- F12: a test where several buckets submit at once (`asyncio.gather`) on one
+  `TradeService`: orders run one at a time, every bucket stays within its
+  budget, and the wallet never goes negative.
+- F13: `backtest` prints `start`, `end` and trade times in UTC, like the
+  ledger.
+
+### A14. Replay fills like live fills — M
+Soak F9: the replay takes `network_fee_usd` out of the swap output, so a
+replay fill is fee/size worse than a live one (25 bps at 5 USD), and every
+exit measured from `entry_price` (stops, targets, trailing peaks, `expr`)
+fires that much earlier than live. In paper and real the fee is paid in SOL,
+outside the fill. Charge the replay's network fee outside the fill as well
+(the leg's cost, off the bucket's PnL and equity), so a replay entry is the
+tick plus slippage and pool fee, as live. Done when `round_trip_costs` and
+the realized PnL of a spec without position-relative exits are unchanged,
+the revert soak spec's exits on the soak afternoon look like live (mostly
+`max_hold`), and the headline change of each `docs/examples/` spec is
+recorded here. Before A6: a first real run uses a tiny budget, where the gap
+is largest.
 
 ### A6. First real run — S (owner, with a checklist)
 - The owner's answers to §7 recorded: pairs, `max_trade_usd`, daily notional,
@@ -160,11 +184,13 @@ ledger schema, so it waits for the end of a paper soak.
 | Item | Status | Notes |
 |---|---|---|
 | A1 Soak quick fixes | done | 2026-10-05; in `history.md` |
-| A2 Owner: paper soak | in progress | Restarted on the current build 2026-10-05 |
+| A2 Owner: paper soak | done | 2026-10-05, ended early by the owner; in `history.md` (F9-F13 -> A13, A14) |
 | A3 Resolve UNCONFIRMED | done | 2026-10-05; in `history.md` |
 | A4 Warm-up across candle gaps | open | |
 | A5 Wallet re-read rule | open | Owner discussion first |
-| A6 First real run | open | After A2, A4, A5 |
+| A13 Soak II small fixes | open | |
+| A14 Replay fills like live fills | open | |
+| A6 First real run | open | After A4, A5, A13, A14 |
 | A7 Perps: decoupling | open | |
 | A8 Perps: model, paper, spec | open | Schema bump; after a soak |
 | A9 Perps: backtest | open | |
@@ -202,7 +228,9 @@ ledger schema, so it waits for the end of a paper soak.
   owner moves or deletes the file;
   `.claude/scripts/ledger_dump.py` prints it read-only.
 - **Replays** measure fees on Jupiter now (or take flags), not at the time of
-  the candles; the rent of a token account is not modelled. The live vs
+  the candles; the rent of a token account is not modelled. Until A14 the
+  replay's network fee is inside the fill, so exits measured from the entry
+  fire earlier than live (25 bps at 5 USD legs). The live vs
   backtest comparison assumes the bucket started the window flat with its
   whole budget.
 - **One tick per second** from the hub: conditions that count ticks, like
@@ -411,3 +439,8 @@ Decisions up to 2026-10-04 are in [`history.md`](history.md).
   tiny-budget real spot run; resolving UNCONFIRMED intents (A3) is required
   before it, and perps come after it. A keeper rejection maps to REJECTED (the
   status added in old B10) instead of a `recusado:` prefix.
+- **2026-10-05 (owner, A2):** the paper soak ends after the second run (about
+  3.5 h on the current build, 2 h 22 min with three buckets in one
+  `serve`) instead of a week; no end-of-week memory sample. The run was clean;
+  its findings are A13 (F10-F13) and A14 (F9). The report moved from
+  `soak-test.md` into `history.md` (A2).
