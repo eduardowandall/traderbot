@@ -223,12 +223,12 @@ def _real_mode(c: _Check) -> Iterator[str]:
 
 def _unresolved(c: _Check) -> Iterator[str]:
     if c.state.unresolved_intent_ids:
-        # sem comando de resolução: o dono confere na blockchain e move (ou
-        # apaga) o arquivo do ledger do modo
+        # o trade-runner tenta resolver a cada varredura (`gateway/resolve.py`);
+        # o log dele diz o que conferir quando não consegue
         ids = ", ".join(c.state.unresolved_intent_ids)
         yield (
-            f"intenções sem confirmação: {ids} (confira na blockchain; o ledger "
-            "do modo fica bloqueado até ser movido ou apagado)"
+            f"intenções sem desfecho: {ids} (o trade-runner tenta resolver a "
+            "cada varredura; veja o log dele)"
         )
 
 

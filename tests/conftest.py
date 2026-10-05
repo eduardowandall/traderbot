@@ -3,7 +3,13 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import bonk_quote, close_open_ledgers, inspection_passes, open_ledger
+from factories import (
+    bonk_quote,
+    close_open_ledgers,
+    inspection_passes,
+    open_ledger,
+    signs,
+)
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, VersionedTransaction
 
@@ -50,7 +56,7 @@ def mock_rpc_client():
     )
     _mock.check_signature_is_confirmed = AsyncMock(return_value=True)
     inspection_passes(_mock)
-    _mock.sign_transaction = AsyncMock(side_effect=lambda tx, keypair: tx)
+    signs(_mock)
     _mock.send_transaction = AsyncMock(
         return_value=SendTransactionResp(value=Signature.new_unique())
     )
@@ -61,6 +67,20 @@ def mock_rpc_client():
 def mock_sleep():
     with mock.patch("asyncio.sleep"):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _send_log():
+    """Executores chamados direto (sem o gateway) gravam envios em lugar nenhum.
+
+    O on-chain recusa enviar sem quem grave (A3); dentro do gateway, o
+    `send_hook` dele vale por cima deste.
+    """
+    from trader.execution.models.intent import send_hook
+
+    token = send_hook.set(lambda sent: None)
+    yield
+    send_hook.reset(token)
 
 
 @pytest.fixture(autouse=True)

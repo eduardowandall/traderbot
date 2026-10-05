@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import bonk_quote, simulation
+from factories import bonk_quote, signs, simulation
 from solders.hash import Hash
 from solders.instruction import Instruction
 from solders.keypair import Keypair
@@ -118,7 +118,7 @@ async def test_the_executor_refuses_a_draining_transaction_before_sending():
     rpc.simulate_transaction = AsyncMock(
         return_value=simulation(10**9, [_token_data(quote.inputMint, 0)])
     )
-    rpc.sign_transaction = AsyncMock(side_effect=lambda tx, kp: tx)
+    signs(rpc)
     client = AsyncMock()
     client.get_swap_transaction = AsyncMock(return_value=_tx(JUPITER_V6))
     executor = OnChainExecutor(keypair, rpc, client, 100_000)

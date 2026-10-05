@@ -1865,3 +1865,76 @@ From [`soak-test.md`](soak-test.md):
 - **Done.** As designed. Seen in an isolated `/smoke` of `spec-soak-metronome.json`
   (7 min): the connect log had 24 lines (one ticker line a minute), the serve
   log both fills at INFO and no websocket frames.
+
+#### A3. Resolve UNCONFIRMED intents — M (done 2026-10-05)
+Today a process killed mid-swap leaves an UNCONFIRMED (or EXECUTING) intent
+that blocks the mode until the ledger file is moved or deleted. At `serve`
+start, for each one: read its signature's status at Confirmed; success ->
+EXECUTED with its fill and costs; failed on-chain -> FAILED with the fee
+booked; unknown with the blockhash expired -> FAILED (nothing moved);
+otherwise it keeps blocking and the log says what the owner must check. Every
+resolution is a ledger event. First check whether the signature is stored
+before the send (`ledger/intents.py` records it only on the error path); an
+intent without one stays blocking. Decide the paper behaviour in the design.
+- **Design.** No schema bump: everything new is an event.
+  - **Every send is logged before it happens.** The signature is known once
+    the transaction is signed. `TradeGateway._execute` sets a send hook (a
+    `ContextVar`, like `botname`) for the duration of `execute()`; the
+    executor calls it with a `SentTx` (signature, `last_valid_block_height`
+    of the blockhash, mints, quoted in/out) right before `send_transaction`.
+    The hook writes an `intent_sent` event and the `signature` column in one
+    transaction; if that write fails the send doesn't happen (a pre-broadcast
+    failure). Retries log one `intent_sent` per attempt. The
+    `intent_executing` event gets `"send_log": true`, so an intent created
+    by this build with no `intent_sent` was never sent.
+  - **Outcome of one send** (`Executor.outcome(sent) -> TxOutcome`): on
+    chain, `getSignatureStatuses` with the history search at Confirmed:
+    `err` -> FAILED; confirmed/finalized -> LANDED; not found and the
+    finalized block height past `last_valid_block_height` -> EXPIRED (it can
+    never land); anything else, or an RPC error -> PENDING. Paper: the
+    simulated wallet keeps a log of applied swaps (signature, amounts, fee,
+    rent; the last 200, in `paper-wallet.json`, an old file reads as empty);
+    applied -> LANDED, otherwise EXPIRED (a paper swap is applied in the same
+    step, so one that isn't applied never will be).
+  - **Resolving an intent** (`trader/execution/trade/gateway/resolve.py`),
+    for every EXECUTING or UNCONFIRMED intent:
+    - one send LANDED -> `mark_executed` with that signature, costs from
+      `fetch_swap_costs`, the order from `order_from_fill` (USD from the
+      oracle at resolve time; the trade's own snapshot is gone), and for a
+      sell the PnL against the open entry (computed before the sell is
+      marked, with the same keep-the-rest rule as `AsyncAccount.sell`, now
+      one function in `book.py`); `record_fill` as usual;
+    - all sends FAILED or EXPIRED -> FAILED, and the fee of each FAILED
+      send not yet in a `failed_tx_fee` event is booked;
+    - no send and `send_log` -> FAILED (never sent: interrupted before the
+      broadcast, e.g. Ctrl+C during the quote);
+    - otherwise (a send PENDING, or an intent from an older build with no
+      send log) it keeps blocking, and the log says which signature to check
+      (once per intent per process).
+    Each resolution writes an `intent_resolved` event (outcome, signature,
+    reason).
+  - **When.** `TradeService.resolve_intents()` runs under the order lock (so
+    nothing of this process is in flight, and the OS lock keeps other
+    `serve`s of the mode out): once when `serve` starts, before it accepts
+    connections, and on every sweep while anything is active. Open buckets of
+    the touched accounts are restored from the ledger and the balance cache
+    is dropped, so a PENDING send that lands later doesn't need a restart.
+  - The policy's unresolved message says the trade-runner retries by itself
+    and what to check if it can't.
+- **Done.** As designed. The signature is now stored before the send (it used
+  to be only on the error path). `sign_transaction` returns a `SignedTx` with
+  the blockhash's `last_valid_block_height`; `AsyncAccount.sell` and the
+  resolver share `PositionBook.settle_sell` and, in `fills.py`, `settle`
+  (costs and failed fees after EXECUTED), `record_fill_safely` and
+  `record_leftover`; `TradeIntent.pair()` gives the (quote, token) mints. The
+  on-chain executor refuses to send when no send hook is set
+  (`announce_send(required=True)`). Paper keeps the last 200 applied swaps
+  and the time of the last one trimmed (`trimmed_at`): a send missing from
+  the log but sent before that time is PENDING, never EXPIRED. A sweep that
+  resolves a losing sell re-checks the bucket's `max_loss_usd`.
+  A resolution counts toward the circuit breaker like any FAILED row (it
+  re-arms at the next restart). Checked in paper by forging the last buy of a
+  `/smoke` run back to UNCONFIRMED without its order: the next `serve paper`
+  resolved it at start, with the wallet's actual fill. The on-chain path is
+  covered by unit tests only (no live RPC in agent sessions); its first real
+  use is the owner's.

@@ -18,7 +18,7 @@ from trader.execution.models.errors import (
     SwapFailedError,
     TransactionFailedOnChainError,
 )
-from trader.execution.models.intent import IntentStatus
+from trader.execution.models.intent import IntentStatus, TxOutcome
 from trader.execution.trade.gateway.account import AsyncAccount
 from trader.execution.trade.ledger.reports import FAILED_TX_FEE
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
@@ -69,6 +69,9 @@ class FlakyExecutor:
         if self.fee is None:
             raise RuntimeError("rpc caiu")
         return self.fee
+
+    async def outcome(self, sent):
+        return TxOutcome.PENDING
 
     async def aclose(self):
         return None

@@ -20,8 +20,10 @@ from trader.execution.models.intent import (
     IntentSide,
     IntentStatus,
     PolicyDecision,
+    SentTx,
     TradeIntent,
 )
+from trader.execution.trade.ledger.reports import FAILED_TX_FEE
 from trader.execution.trade.ledger.store import (
     LedgerStore,
     _dec,
@@ -36,6 +38,9 @@ from trader.shared.models.order import Order, SwapResult, order_from_json, order
 
 logger = logging.getLogger(__name__)
 
+INTENT_SENT = "intent_sent"
+INTENT_RESOLVED = "intent_resolved"
+
 
 class IntentStore(LedgerStore):
     def record_intent(self, intent: TradeIntent, decision: PolicyDecision) -> None:
@@ -48,15 +53,15 @@ class IntentStore(LedgerStore):
         if not decision.allowed and self._count_repeat(intent, decision):
             return
         self._insert(intent, decision, status)
-        self._add_event(
-            "intent_" + str(status),
-            intent.intent_id,
-            {
-                "intent": asdict(intent),
-                "reasons": list(decision.reasons),
-                "policy_version": decision.policy_version,
-            },
-        )
+        payload = {
+            "intent": asdict(intent),
+            "reasons": list(decision.reasons),
+            "policy_version": decision.policy_version,
+        }
+        if decision.allowed:
+            # todo envio desta intenção terá um `intent_sent` antes (A3)
+            payload["send_log"] = True
+        self._add_event("intent_" + str(status), intent.intent_id, payload)
 
     def _count_repeat(self, intent: TradeIntent, decision: PolicyDecision) -> bool:
         """Soma a recusa na última linha da conta, se for a mesma recusa."""
@@ -158,6 +163,19 @@ class IntentStore(LedgerStore):
             out_amount=result.out_amount,
         )
 
+    def record_send(self, intent_id: str, sent: SentTx) -> None:
+        """Grava o envio (evento e assinatura) antes de ele acontecer.
+
+        Só numa intenção ativa; uma falha aqui levanta, e o envio não ocorre.
+        """
+        with self._write():
+            status = self._status_of(intent_id)
+            if status not in ACTIVE_STATUSES:
+                raise ValueError(f"intenção {intent_id} está {status}: sem envio")
+            self._update_locked(
+                intent_id, INTENT_SENT, asdict(sent), signature=sent.signature
+            )
+
     def mark_failed(self, intent_id: str, error: str) -> None:
         self._mark_error(intent_id, IntentStatus.FAILED, error)
 
@@ -237,6 +255,44 @@ class IntentStore(LedgerStore):
             (key, *statuses),
         ).fetchone()
         return _record(row) if row else None
+
+    def active_intents(self) -> list[IntentRecord]:
+        """Intenções sem desfecho (executando ou sem confirmação), em ordem."""
+        placeholders, statuses = _in(ACTIVE_STATUSES)
+        rows = self.conn.execute(
+            f"SELECT * FROM intents WHERE status IN ({placeholders}) "
+            "ORDER BY created_at, rowid",
+            statuses,
+        ).fetchall()
+        return [_record(r) for r in rows]
+
+    def sends_of(self, intent_id: str) -> list[SentTx]:
+        """Os envios gravados da intenção, na ordem das tentativas."""
+        return [SentTx(**payload) for payload in self._payloads(INTENT_SENT, intent_id)]
+
+    def has_send_log(self, intent_id: str) -> bool:
+        """A intenção é de uma versão que grava todo envio antes de enviar."""
+        return any(
+            payload.get("send_log")
+            for payload in self._payloads(
+                "intent_" + str(IntentStatus.EXECUTING), intent_id
+            )
+        )
+
+    def booked_fee_signatures(self, intent_id: str) -> set[str]:
+        """Assinaturas falhas da intenção cuja taxa já foi registrada."""
+        return {
+            signature
+            for payload in self._payloads(FAILED_TX_FEE, intent_id)
+            for signature in payload.get("signatures", ())
+        }
+
+    def _payloads(self, type_: str, intent_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT payload FROM events WHERE type = ? AND intent_id = ? ORDER BY id",
+            (type_, intent_id),
+        ).fetchall()
+        return [json.loads(r["payload"]) for r in rows]
 
     def list_intents(self, limit: int = 20) -> list[IntentRecord]:
         rows = self.conn.execute(

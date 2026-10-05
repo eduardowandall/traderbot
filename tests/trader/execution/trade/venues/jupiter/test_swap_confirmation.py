@@ -8,6 +8,7 @@ from factories import (
     inspection_passes,
     make_intent,
     memory_gateway,
+    signs,
     simulation,
 )
 from solders.keypair import Keypair
@@ -22,6 +23,7 @@ from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
 )
 from trader.execution.trade.venues.jupiter.async_rpc_client import (
     AsyncRPCClient,
+    SignedTx,
     TransactionFailedError,
 )
 
@@ -163,7 +165,9 @@ class TestSendErrorsCountAsSubmitted:
         provider.executor._get_swap_transaction = AsyncMock()
         signed = mock.Mock()
         signed.signatures = [Signature.new_unique()]
-        provider.executor._get_signed_transaction = AsyncMock(return_value=signed)
+        provider.executor._get_signed_transaction = AsyncMock(
+            return_value=SignedTx(signed, 1)
+        )
         return signed
 
     async def test_a_send_that_times_out_is_never_resent(self, provider, mock_sleep):
@@ -202,7 +206,7 @@ class TestFailedOnChain:
 
     def _failing_executor(self, provider):
         rpc = provider.executor.rpc_client
-        rpc.sign_transaction = AsyncMock(side_effect=lambda tx, keypair: tx)
+        signs(rpc)
         rpc.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )

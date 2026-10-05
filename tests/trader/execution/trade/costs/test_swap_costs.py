@@ -5,7 +5,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import inspection_passes
+from factories import inspection_passes, signs
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
@@ -271,7 +271,7 @@ class TestFetchSwapCosts:
             USDC.mint, USDC.ui_to_raw("10"), SOL.mint, SOL.ui_to_raw("0.1")
         )
         provider.jupiter_client.get_quote = AsyncMock(return_value=quote)
-        provider.executor.rpc_client.sign_transaction = AsyncMock()
+        signs(provider.executor.rpc_client)
         provider.executor.rpc_client.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )

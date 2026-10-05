@@ -18,12 +18,19 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
+from trader.execution.models.book import remainder_entry
 from trader.execution.models.errors import failed_signatures_of
 from trader.execution.models.intent import TradeIntent
 from trader.execution.trade.gateway.gateway import TradeGateway
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.shared.models.costs import LAMPORTS_PER_SOL, FailedTxFee, TradeCosts
-from trader.shared.models.order import SwapResult
+from trader.shared.models.costs import (
+    LAMPORTS_PER_SOL,
+    FailedTxFee,
+    PnLResult,
+    TradeCosts,
+)
+from trader.shared.models.mints import SOLANA_MINTS
+from trader.shared.models.order import Order, SwapResult, order_to_json
 
 logger = logging.getLogger(__name__)
 
@@ -55,19 +62,77 @@ async def execute_trade(
     sol_usd: Decimal | None = None,  # do retrato de antes do trade
     on_failed_fee: OnFailedFee | None = None,
 ) -> Fill:
-    failed = _FailedFees(gateway, provider, intent, sol_usd, on_failed_fee)
+    failed = FailedFees(gateway, provider, intent, sol_usd, on_failed_fee)
     try:
         result = await gateway.submit(intent, call)
     except Exception as ex:
         await failed.book(failed_signatures_of(ex))
         raise
+    return await settle(provider, result, failed, result.failed_signatures)
+
+
+async def settle(
+    provider: AsyncJupiterProvider,
+    result: SwapResult,
+    fees: FailedFees,
+    failed: Sequence[str],
+) -> Fill:
+    """Depois de EXECUTED: os custos do swap e a taxa das tentativas falhas.
+
+    Único caminho até `fetch_swap_costs` (o `execute_trade` e a resolução de
+    intenções, A3). **Nunca** levanta.
+    """
     costs = await provider.fetch_swap_costs(result)
-    await failed.book(result.failed_signatures)
+    await fees.book(failed)
     return Fill(result, costs)
 
 
+def record_fill_safely(
+    gateway: TradeGateway,
+    intent_id: str,
+    order: Order,
+    realized_usd: Decimal | None = None,
+    pnl: PnLResult | None = None,
+) -> None:
+    """Grava o fill; uma falha aqui não desfaz o que já foi executado.
+
+    A intenção já está EXECUTED (com assinatura e valores), e o restore
+    reconstrói a posição a partir dela mesmo sem a ordem gravada.
+    """
+    try:
+        gateway.record_fill(intent_id, order, realized_usd, pnl)
+    except Exception as ex:
+        logger.error(
+            f"Fill executado mas não gravado ({intent_id}): {ex}; "
+            f"ordem: {order_to_json(order)}"
+        )
+
+
+def record_leftover(
+    gateway: TradeGateway, account_id: str, entry: Order, exit_order: Order
+) -> None:
+    """Tokens que ficaram na carteira quando a posição fechou (ex: reserva)."""
+    rest = remainder_entry(entry, exit_order.quantity)
+    if rest is None:
+        return
+    symbol = SOLANA_MINTS[entry.output_mint].symbol
+    logger.warning(f"Posição fechada com {rest.quantity} {symbol} na carteira")
+    try:
+        gateway.add_event(
+            "position_leftover",
+            {
+                "account": account_id,
+                "mint": entry.output_mint,
+                "quantity": rest.quantity,
+                "cost_quote": rest.quote_amount,
+            },
+        )
+    except Exception as ex:
+        logger.error(f"Sobra da posição não registrada: {ex}")
+
+
 @dataclass(frozen=True)
-class _FailedFees:
+class FailedFees:
     gateway: TradeGateway
     provider: AsyncJupiterProvider
     intent: TradeIntent

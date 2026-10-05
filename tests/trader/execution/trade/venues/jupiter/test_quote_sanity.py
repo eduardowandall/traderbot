@@ -7,6 +7,7 @@ import pytest
 
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.models.errors import SwapRejectedError
+from trader.execution.models.intent import TxOutcome
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.execution.wiring import build_provider
@@ -36,6 +37,9 @@ class Recorder:
 
     async def fetch_fee(self, signature):
         return None
+
+    async def outcome(self, sent):
+        return TxOutcome.PENDING
 
     async def aclose(self):
         return None

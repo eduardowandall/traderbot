@@ -128,9 +128,14 @@ for the wallet and all its token accounts (`tx_inspection.py`): only the input
 token may leave, by at most the quote's `inAmount`, plus SOL for fees. Then it
 sends and waits for confirmation (`async_rpc_client.py`, Helius). A failed
 inspection is a `TransactionInspectionError` and nothing is sent. After `send_transaction`, any failure is a
-`TransactionSubmittedError`: the intent becomes UNCONFIRMED, it is never
-retried, and it blocks the mode's trading until the owner checks the chain
-and moves or deletes the ledger. `fetch_costs` (`executor.py:182`) parses the
+`TransactionSubmittedError`: the intent becomes UNCONFIRMED and it is never
+retried. Right before the send, `announce_send` writes the signature, the
+quote's amounts and the blockhash's `last_valid_block_height` to the ledger
+(`intent_sent`, through the gateway's `send_hook`). `TradeService.resolve_intents`
+(`trade/gateway/resolve.py`), run by `serve` at start and on every sweep,
+asks `Executor.outcome` about each send: landed -> EXECUTED with its order and
+PnL, failed or expired -> FAILED with the fee booked, still pending -> it keeps
+blocking. `fetch_costs` (`executor.py:182`) parses the
 confirmed transaction (`swap_costs.py`) for the real amounts, fee and rent.
 Real mode is denied unless `real_trading_enabled = true`.
 
@@ -199,7 +204,8 @@ same `TickContext` and `IndicatorBank` as the blocks.
 - **Policy** per trade, per day, per hour, daily loss, allowed symbols; real
   mode off by default. Sells skip the budget rules so a position is never stuck.
 - **Idempotency keys** in the ledger: no double execution across restarts.
-- **UNCONFIRMED and own-account EXECUTING intents** block trading.
+- **UNCONFIRMED and own-account EXECUTING intents** block trading until the
+  trade-runner resolves them from their logged sends (A3).
 - **Circuit breaker:** N consecutive failures since the process started stop
   trading; a restart re-arms it.
 - **Bucket budget and `max_loss_usd`** per spec; the SOL fee reserve.
@@ -275,5 +281,6 @@ together.
 ## 10. Where it's going
 
 The roadmap is [`plan.md`](plan.md): next, a first tiny-budget real run
-(recovering UNCONFIRMED intents first), then perpetual futures. Specs stay
+(warm-up across candle gaps and the wallet re-read rule first), then
+perpetual futures. Specs stay
 files written from [`specs.md`](specs.md).

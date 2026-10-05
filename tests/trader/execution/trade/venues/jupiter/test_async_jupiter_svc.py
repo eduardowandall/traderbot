@@ -331,7 +331,9 @@ class TestPlaceOrder:
             address_table_lookups=[],
         )
         tx = VersionedTransaction(message, [keypair])
-        signed_tx = await api.executor._get_signed_transaction(tx=tx)
+        signed = await api.executor._get_signed_transaction(tx=tx)
+        assert isinstance(signed.last_valid_block_height, int)
+        signed_tx = signed.tx
         assert isinstance(signed_tx, VersionedTransaction)
         assert signed_tx.signatures[0].verify(
             keypair.pubkey(), to_bytes_versioned(signed_tx.message)

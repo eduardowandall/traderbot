@@ -8,8 +8,9 @@ processo confere com a política **dele** antes de abrir (ou reusar) o bucket
 `strategy:<id>`; depois `bucket` e `submit`, e os dados de
 mercado: `price` (do hub) e `candles` (da Jupiter, para o aquecimento). Só
 este processo fala com a Jupiter. A cada
-`sweep_seconds`, vende o que sobrou em buckets encerrados ou vencidos: as
-saídas não dependem do strategy-runner estar vivo.
+`sweep_seconds`, resolve intenções sem desfecho (também no início) e vende o
+que sobrou em buckets encerrados ou vencidos: as saídas não dependem do
+strategy-runner estar vivo.
 """
 
 import asyncio
@@ -97,6 +98,9 @@ class TradeRunner:
 
     async def serve(self) -> None:
         """Serve até ser cancelado (Ctrl+C); o arquivo de conexão sai no fim."""
+        # antes de aceitar conexões: um processo anterior morto no meio de
+        # um swap deixou intenções sem desfecho (A3)
+        await self.service.resolve_intents()
         server = await self.start()
         path = connection_path(self.mode)
         self._write_connection(path, server.sockets[0].getsockname()[1])
@@ -241,8 +245,12 @@ class TradeRunner:
             await self.sweep()
 
     async def sweep(self, now: datetime | None = None) -> None:
-        """Encerra specs vencidas e vende sobras de buckets encerrados."""
+        """Resolve intenções pendentes, encerra specs vencidas e vende sobras."""
         now = now or datetime.now(UTC)
+        try:
+            await self.service.resolve_intents()
+        except Exception as ex:
+            logger.error(f"Resolução de intenções falhou: {ex}")
         for name, spec in list(self.specs.items()):
             try:
                 await self._sweep_one(name, spec, now)

@@ -36,6 +36,7 @@ from trader.execution.trade.gateway import (
 )
 from trader.execution.trade.gateway.account import AsyncAccount
 from trader.execution.trade.gateway.balances import WalletBalances
+from trader.execution.trade.gateway.resolve import IntentResolver
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.shared.models import Order, OrderSide
 from trader.shared.trading_service.protocol import (
@@ -91,6 +92,7 @@ class TradeService:
         # tokens com menos na carteira do que as posições do ledger
         self._blocked: set[str] = set()
         self._reconciled = False
+        self._resolver = IntentResolver(gateway, provider, prices)
 
     def account_id(self, name: str) -> str:
         return f"{self.mode}:{name}" if self.mode else name
@@ -131,6 +133,23 @@ class TradeService:
         await self._check_allocation(name, bucket)
         self._buckets[name] = bucket
         self._check_max_loss(name, bucket)  # já restaurado além do limite?
+
+    async def resolve_intents(self) -> None:
+        """Resolve intenções sem desfecho (A3) e restaura os buckets delas.
+
+        Sob o lock de ordens: nenhuma intenção deste processo está em
+        execução enquanto isso roda.
+        """
+        async with self._lock:
+            accounts = await self._resolver.run()
+        if not accounts:
+            return
+        self.wallet.invalidate()
+        for name, bucket in self._buckets.items():
+            if bucket.account.account_id in accounts:
+                bucket.account.restore_from_ledger()
+                # uma venda resolvida pode ter passado do `max_loss_usd`
+                self._check_max_loss(name, bucket)
 
     async def _reconcile_wallet(self) -> None:
         """Por token: a soma das posições abertas do ledger cabe na carteira?

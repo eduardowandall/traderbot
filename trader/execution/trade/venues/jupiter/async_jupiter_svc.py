@@ -35,6 +35,7 @@ from trader.execution.models.errors import SwapRejectedError as SwapRejectedErro
 from trader.execution.models.errors import (
     TransactionSubmittedError as TransactionSubmittedError,
 )
+from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.executor import Executor, OnChainExecutor
 from trader.execution.trade.venues.jupiter.swap_costs import quote_info
@@ -351,6 +352,19 @@ class AsyncJupiterProvider[E: Executor]:
         except Exception as ex:
             self.logger.warning(f"Taxa da transação falha {signature}: {ex}")
             return None
+
+    async def send_outcome(self, sent: SentTx) -> TxOutcome:
+        """O que aconteceu com um envio gravado. **Nunca** levanta.
+
+        Uma consulta que falha é PENDING: a intenção continua bloqueando e a
+        próxima varredura tenta de novo.
+        """
+        try:
+            async with asyncio.timeout(COSTS_TIMEOUT_SECONDS):
+                return await self.executor.outcome(sent)
+        except Exception as ex:
+            self.logger.warning(f"Status da transação {sent.signature}: {ex}")
+            return TxOutcome.PENDING
 
     async def aclose(self) -> None:
         """Fecha as conexões HTTP/WebSocket/RPC abertas."""

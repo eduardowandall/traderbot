@@ -104,12 +104,12 @@ class TestSubmit:
             )
         assert _record(gateway, intent).status == IntentStatus.UNCONFIRMED
 
-        with pytest.raises(PolicyDeniedError, match="sem confirmação"):
+        with pytest.raises(PolicyDeniedError, match="sem desfecho"):
             await gateway.submit(make_intent(), AsyncMock(return_value=RESULT))
 
         # sem comando de resolução: nem um processo novo destrava o ledger
         again = TradeGateway(gateway.ledger, Policy(), real_mode=False)
-        with pytest.raises(PolicyDeniedError, match="sem confirmação"):
+        with pytest.raises(PolicyDeniedError, match="sem desfecho"):
             await again.submit(make_intent(), AsyncMock(return_value=RESULT))
 
     async def test_cancellation_mid_execution_is_unconfirmed(self, tmp_path):

@@ -6,6 +6,7 @@ import pytest
 from factories import memory_gateway
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.trade.gateway.account import AsyncAccount
 from trader.execution.trade.venues import JupiterQuoteResponse
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import SwapRejectedError
@@ -15,7 +16,9 @@ from trader.execution.trade.venues.paper import (
     SimulatedWallet,
     paper_provider,
 )
+from trader.execution.trade.venues.paper import wallet as wallet_module
 from trader.execution.trade.venues.paper.executor import DEFAULT_FEE_LAMPORTS
+from trader.execution.trade.venues.paper.wallet import APPLIED_LOG_SIZE
 from trader.shared.models import SOLANA_MINTS
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -204,3 +207,59 @@ class TestPaperSlippage:
         assert result.costs is not None
         assert result.costs.actual_out_amount == filled
         assert wallet.raw_balance(SOL.mint) == 10**9 + filled - DEFAULT_FEE_LAMPORTS
+
+
+class TestAppliedLog:
+    """A3: a carteira paper lembra os swaps aplicados, para resolver intenções."""
+
+    async def test_an_applied_swap_landed_and_its_costs_can_be_read_back(
+        self, tmp_path
+    ):
+        wallet = SimulatedWallet(
+            tmp_path / "w.json", initial={"USDC": Decimal("100"), "SOL": Decimal("1")}
+        )
+        executor = SimulatedExecutor(wallet)
+        result = await executor.execute(
+            USDC.mint, SOL.mint, _quote(USDC.mint, 10_000_000, SOL.mint, 1_000_000)
+        )
+        sent = SentTx(result.signature, USDC.mint, SOL.mint, 10_000_000, 1_000_000)
+
+        # outro processo (o `serve` reiniciado) lê o mesmo arquivo
+        again = SimulatedExecutor(SimulatedWallet(tmp_path / "w.json"))
+        assert await again.outcome(sent) == TxOutcome.LANDED
+        bare = dataclasses.replace(result, costs=None)
+        assert await again.fetch_costs(bare) == result.costs
+        missing = dataclasses.replace(sent, signature="paper-outro")
+        assert await again.outcome(missing) == TxOutcome.EXPIRED
+
+    def test_the_log_keeps_only_the_last_swaps(self):
+        wallet = SimulatedWallet(initial={"USDC": Decimal("100")})
+        for i in range(APPLIED_LOG_SIZE + 5):
+            wallet.apply_swap(USDC.mint, 1, SOL.mint, 1, signature=f"s{i}")
+        assert wallet.applied("s4") is None
+        assert wallet.applied(f"s{APPLIED_LOG_SIZE + 4}") is not None
+        assert wallet.trimmed_at is not None
+
+    async def test_a_send_that_may_have_been_trimmed_is_pending_not_expired(
+        self, monkeypatch, tmp_path
+    ):
+        # aplicado e cortado do registro: dizer EXPIRED perderia a posição
+        monkeypatch.setattr(wallet_module, "APPLIED_LOG_SIZE", 2)
+        clock = iter(range(100, 200))
+        monkeypatch.setattr(wallet_module.time, "time", lambda: next(clock))
+        wallet = SimulatedWallet(tmp_path / "w.json", initial={"USDC": Decimal("100")})
+        executor = SimulatedExecutor(wallet)
+        old = SentTx("s0", USDC.mint, SOL.mint, 1, 1, sent_at=100)
+        for i in range(4):
+            wallet.apply_swap(USDC.mint, 1, SOL.mint, 1, signature=f"s{i}")
+
+        again = SimulatedExecutor(SimulatedWallet(tmp_path / "w.json"))
+        assert await again.outcome(old) == TxOutcome.PENDING
+        # enviado depois do último corte e fora do registro: nunca aplicado
+        late = SentTx("nunca", USDC.mint, SOL.mint, 1, 1, sent_at=150)
+        assert await executor.outcome(late) == TxOutcome.EXPIRED
+
+    def test_an_old_wallet_file_has_an_empty_log(self, tmp_path):
+        path = tmp_path / "old.json"
+        path.write_text('{"balances": {}, "open_accounts": []}', encoding="utf-8")
+        assert SimulatedWallet(path).applied("x") is None

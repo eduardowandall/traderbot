@@ -9,7 +9,7 @@ SOL para taxas, as intenções de compra e venda e a conversão do fill em
 
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
@@ -20,14 +20,19 @@ from trader.execution.market.prices import PriceOracle, usd_snapshot
 from trader.execution.models.book import PositionBook, remainder_entry
 from trader.execution.models.intent import IntentSide, TradeIntent, with_idempotency_key
 from trader.execution.trade.gateway.balances import WalletBalances
-from trader.execution.trade.gateway.fills import Fill, execute_trade
+from trader.execution.trade.gateway.fills import (
+    Fill,
+    execute_trade,
+    record_fill_safely,
+    record_leftover,
+)
 from trader.execution.trade.gateway.gateway import AccountState, TradeGateway
 from trader.execution.trade.gateway.orders import order_from_fill, priced_mints
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.costs import LAMPORTS_PER_SOL, FailedTxFee
 from trader.shared.models.mints import SOL_MINT
-from trader.shared.models.order import SwapResult, order_to_json
+from trader.shared.models.order import SwapResult
 from trader.shared.models.position import Position
 
 SOL = SOLANA_MINTS[SOL_MINT].pubkey
@@ -147,26 +152,6 @@ class AsyncAccount:
             usd=usd,
             requested_quantity=requested_quantity,
         )
-
-    def _record_fill(
-        self,
-        intent: TradeIntent,
-        order: Order,
-        realized_usd: Decimal | None = None,
-        pnl=None,
-    ) -> None:
-        """Grava o fill; uma falha aqui não desfaz o que já foi executado.
-
-        A intenção já está EXECUTED (com assinatura e valores), e o restore
-        reconstrói a posição a partir dela mesmo sem a ordem gravada.
-        """
-        try:
-            self.gateway.record_fill(intent.intent_id, order, realized_usd, pnl)
-        except Exception as ex:
-            self.logger.error(
-                f"Fill executado mas não gravado ({intent.intent_id}): {ex}; "
-                f"ordem: {order_to_json(order)}"
-            )
 
     async def _execute_order(
         self,
@@ -344,7 +329,7 @@ class AsyncAccount:
             usd,
         )
         self.logger.info(f"ORDER PLACED: {asdict(order)}", extra=asdict(order))
-        self._record_fill(intent, order)
+        record_fill_safely(self.gateway, intent.intent_id, order)
         self.book.open(order)
         return order
 
@@ -412,31 +397,10 @@ class AsyncAccount:
             f"ORDER PLACED: order={asdict(order)} position={asdict(position)}",
             extra=asdict(order),
         )
-        keep_rest = not capped_by_wallet and remainder_entry(entry, order.quantity)
-        order = replace(order, closes_position=not keep_rest)
-        closed = self.book.reduce(order) if keep_rest else self.book.close(order)
-        self._record_fill(intent, order, closed.realized_usd, closed.pnl)
-        if not keep_rest:
-            self._record_leftover(entry, order)
-        return order
-
-    def _record_leftover(self, entry: Order, exit_order: Order) -> None:
-        """Tokens que ficaram na carteira quando a posição fechou (ex: reserva)."""
-        rest = remainder_entry(entry, exit_order.quantity)
-        if rest is None:
-            return
-        self.logger.warning(
-            f"Posição fechada com {rest.quantity} {self._token.symbol} na carteira"
+        order, closed = self.book.settle_sell(order, not capped_by_wallet)
+        record_fill_safely(
+            self.gateway, intent.intent_id, order, closed.realized_usd, closed.pnl
         )
-        try:
-            self.gateway.add_event(
-                "position_leftover",
-                {
-                    "account": self.account_id,
-                    "mint": self._token.mint,
-                    "quantity": rest.quantity,
-                    "cost_quote": rest.quote_amount,
-                },
-            )
-        except Exception as ex:
-            self.logger.error(f"Sobra da posição não registrada: {ex}")
+        if order.closes_position:
+            record_leftover(self.gateway, self.account_id, entry, order)
+        return order

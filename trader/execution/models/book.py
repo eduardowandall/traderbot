@@ -120,6 +120,23 @@ class PositionBook:
         self.position = None if rest is None else Position(rest)
         return closed
 
+    def settle_sell(
+        self, exit_order: Order, may_keep_rest: bool
+    ) -> tuple[Order, ClosedPosition]:
+        """Fecha a posição, ou só reduz se pode sobrar algo que não é poeira.
+
+        `may_keep_rest` é falso quando a venda já fecha a posição de qualquer
+        jeito (limitada ao saldo da carteira). Devolve a ordem com
+        `closes_position` decidido e o que foi realizado.
+        """
+        entry = self._open().entry_order
+        keep_rest = (
+            may_keep_rest and remainder_entry(entry, exit_order.quantity) is not None
+        )
+        exit_order = replace(exit_order, closes_position=not keep_rest)
+        closed = self.reduce(exit_order) if keep_rest else self.close(exit_order)
+        return exit_order, closed
+
     def charge(self, fee: FailedTxFee) -> None:
         """Taxa de transações que falharam: sai do PnL (e do orçamento)."""
         self.failed_fee_sol += fee.sol

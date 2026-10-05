@@ -4,8 +4,9 @@ Fluxo de `submit`:
 1. idempotência: se a chave já executou (ou pode ter executado), não repete;
 2. política: avalia a intenção com o estado do ledger;
 3. registra a intenção (recusada ou em execução) no ledger;
-4. executa e registra o resultado. Falha após o envio vira UNCONFIRMED, que
-   bloqueia novos trades do modo até o dono mover (ou apagar) o ledger.
+4. executa e registra o resultado; cada envio é gravado antes de acontecer.
+   Falha após o envio vira UNCONFIRMED, que bloqueia novos trades do modo
+   até ser resolvida (`resolve.py`, no início do `serve` e a cada varredura).
 
 O circuit breaker conta só as falhas desde que este gateway foi criado:
 reiniciar o processo rearma.
@@ -16,16 +17,21 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 
 from trader.execution.models.book import remainder_entry
 from trader.execution.models.errors import SwapRejectedError, TransactionSubmittedError
-from trader.execution.models.intent import IntentRecord, IntentSide, TradeIntent
+from trader.execution.models.intent import (
+    IntentRecord,
+    IntentSide,
+    TradeIntent,
+    send_hook,
+)
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.ledger import AccountPnL, Ledger, ledger_path
 from trader.execution.trade.ledger.reports import FAILED_TX_FEE
 from trader.execution.trade.policy import Policy, evaluate, load_policy
 from trader.shared.models.costs import FailedTxFee, PnLResult
-from trader.shared.models.mints import SOLANA_MINTS
 from trader.shared.models.order import Order, OrderSide, SwapResult, order_from_json
 
 logger = logging.getLogger(__name__)
@@ -86,7 +92,7 @@ def _order_of(record: IntentRecord) -> Order:
 
 def _entry_from_record(record: IntentRecord) -> Order:
     intent = record.intent
-    quote, token = SOLANA_MINTS[intent.spend_mint], SOLANA_MINTS[intent.receive_mint]
+    quote, token = intent.pair()  # uma compra
     quantity = (
         token.raw_to_ui(record.out_amount) if record.out_amount else intent.quantity
     ) or Decimal("0")
@@ -285,7 +291,12 @@ class TradeGateway:
         intent: TradeIntent,
         execute: Callable[[], Awaitable[SwapResult]],
     ) -> SwapResult:
-        """Executa e registra falhas; o sucesso é registrado por `submit`."""
+        """Executa e registra falhas; o sucesso é registrado por `submit`.
+
+        Durante a execução, cada envio é gravado antes de acontecer
+        (`send_hook`): é o que permite resolver a intenção depois (A3).
+        """
+        token = send_hook.set(partial(self.ledger.record_send, intent.intent_id))
         try:
             return await execute()
         except TransactionSubmittedError as ex:
@@ -307,3 +318,5 @@ class TradeGateway:
                 intent.intent_id, f"interrompida: {type(ex).__name__}"
             )
             raise
+        finally:
+            send_hook.reset(token)

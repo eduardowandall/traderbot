@@ -14,6 +14,7 @@ import pytest
 from factories import (
     NoCandles,
     PriceTable,
+    make_intent,
     make_spec,
     open_ledger,
     terms_of,
@@ -506,3 +507,34 @@ def test_connect_takes_its_candles_from_the_trade_runner():
     assert isinstance(bot.market, HubMarketData)
     assert isinstance(bot.market.candles, RemoteCandles)
     assert bot.market.candles.trader is bot.trader
+
+
+async def test_serve_resolves_dead_intents_before_it_accepts_connections():
+    runner = _runner()
+    order = []
+    runner.service.resolve_intents = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda: order.append("resolve")
+    )
+
+    async def start():
+        order.append("start")
+        raise RuntimeError("parou")
+
+    runner.start = start  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="parou"):
+        await runner.serve()
+    assert order == ["resolve", "start"]
+
+
+async def test_the_sweep_resolves_an_intent_that_was_never_sent():
+    from trader.execution.models.intent import PolicyDecision
+
+    runner = _runner()
+    ledger = runner.service.gateway.ledger
+    intent = make_intent(account="paper:strategy:x")
+    ledger.record_intent(intent, PolicyDecision(True))
+    ledger.mark_unconfirmed(intent.intent_id, "interrompida: CancelledError")
+
+    await runner.sweep()
+
+    assert ledger.get(intent.intent_id).status == IntentStatus.FAILED  # type: ignore[union-attr]

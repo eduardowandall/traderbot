@@ -24,7 +24,7 @@ from typing import Protocol
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.solders import SendTransactionResp
+from solders.solders import SendTransactionResp, TransactionConfirmationStatus
 from solders.transaction import VersionedTransaction
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
@@ -34,8 +34,10 @@ from trader.execution.models.errors import (
     TransactionFailedOnChainError,
     TransactionSubmittedError,
 )
+from trader.execution.models.intent import SentTx, TxOutcome, announce_send
 from trader.execution.trade.venues.jupiter.async_rpc_client import (
     AsyncRPCClient,
+    SignedTx,
     TransactionFailedError,
 )
 from trader.execution.trade.venues.jupiter.swap_costs import SwapLegs, parse_swap_costs
@@ -69,6 +71,9 @@ class Executor(Protocol):
 
     # `meta.fee` de uma transação que falhou na rede; None se não achou
     async def fetch_fee(self, signature: str) -> int | None: ...
+
+    # o que aconteceu com um envio gravado (resolver intenções, A3)
+    async def outcome(self, sent: SentTx) -> TxOutcome: ...
 
     async def aclose(self) -> None: ...
 
@@ -120,9 +125,22 @@ class OnChainExecutor:
     ) -> SwapResult:
         tx = await self._get_swap_transaction(quote)
         check_programs(tx)  # antes de assinar: só programas conhecidos
-        new_tx = await self._get_signed_transaction(tx)
-        await self._inspect_balances(new_tx, quote)  # simula, antes de enviar
-        resp = await self._send_transaction_and_wait_for_confirmation(new_tx)
+        signed = await self._get_signed_transaction(tx)
+        await self._inspect_balances(signed.tx, quote)  # simula, antes de enviar
+        # no ledger antes de enviar: um processo morto daqui em diante deixa a
+        # assinatura para resolver a intenção (A3); se falha, não envia
+        announce_send(
+            SentTx(
+                signed.signature,
+                input_mint,
+                output_mint,
+                int(quote.inAmount),
+                int(quote.outAmount),
+                signed.last_valid_block_height,
+            ),
+            required=True,
+        )
+        resp = await self._send_transaction_and_wait_for_confirmation(signed.tx)
         # valores da quote; os efetivos (e os custos) vêm de `fetch_costs`,
         # chamado só depois que o ledger marcou a intenção como executada
         return SwapResult(
@@ -141,9 +159,7 @@ class OnChainExecutor:
             quote, self.pubkey, self.max_priority_fee_lamports
         )
 
-    async def _get_signed_transaction(
-        self, tx: VersionedTransaction
-    ) -> VersionedTransaction:
+    async def _get_signed_transaction(self, tx: VersionedTransaction) -> SignedTx:
         return await self.rpc_client.sign_transaction(tx, self.keypair)
 
     async def _inspect_balances(
@@ -240,9 +256,37 @@ class OnChainExecutor:
         tx = await self.rpc_client.get_confirmed_transaction(signature)
         return None if tx is None or tx.meta is None else int(tx.meta.fee)
 
+    async def outcome(self, sent: SentTx) -> TxOutcome:
+        """O status da assinatura na rede, em Confirmed.
+
+        Sem status: expirou se a altura finalizada passou do
+        `last_valid_block_height` (nunca mais entra), senão ainda pendente.
+        """
+        status = await self.rpc_client.signature_status(sent.signature)
+        if status is not None:
+            return _status_outcome(status)
+        if sent.last_valid_block_height is None:
+            return TxOutcome.PENDING
+        height = await self.rpc_client.finalized_block_height()
+        if height > sent.last_valid_block_height:
+            return TxOutcome.EXPIRED
+        return TxOutcome.PENDING
+
     async def aclose(self) -> None:
         # só o RPC é exclusivo do executor; o cliente Jupiter é do provider
         await self.rpc_client.aclose()
+
+
+def _status_outcome(status) -> TxOutcome:
+    # transações que falham também são confirmadas: o erro vem antes
+    if status.err is not None:
+        return TxOutcome.FAILED
+    if status.confirmation_status in (
+        TransactionConfirmationStatus.Confirmed,
+        TransactionConfirmationStatus.Finalized,
+    ):
+        return TxOutcome.LANDED
+    return TxOutcome.PENDING
 
 
 def _signature_of(tx: VersionedTransaction) -> str | None:

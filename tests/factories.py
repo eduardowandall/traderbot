@@ -318,6 +318,28 @@ def inspection_passes(rpc, lamports: int = 10**9):
     return rpc
 
 
+def events_of(ledger: Ledger, type_: str) -> list[dict]:
+    """Os payloads dos eventos de um tipo, na ordem."""
+    import json
+
+    rows = ledger.conn.execute(
+        "SELECT payload FROM events WHERE type = ? ORDER BY id", (type_,)
+    ).fetchall()
+    return [json.loads(r["payload"]) for r in rows]
+
+
+def signs(rpc, last_valid_block_height: int = 1_000):
+    """Um RPC falso que "assina" devolvendo a própria transação (A3: `SignedTx`)."""
+    from unittest.mock import AsyncMock
+
+    from trader.execution.trade.venues.jupiter.async_rpc_client import SignedTx
+
+    rpc.sign_transaction = AsyncMock(
+        side_effect=lambda tx, keypair: SignedTx(tx, last_valid_block_height)
+    )
+    return rpc
+
+
 def simulation(lamports: int = 10**9, tokens=()):
     """Resposta de simulação com a carteira e as contas de token pedidas."""
     from types import SimpleNamespace

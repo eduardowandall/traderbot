@@ -19,6 +19,10 @@ from trader.shared.models.mints import SOL_MINT
 
 # saldo inicial quando a carteira de paper ainda não existe
 DEFAULT_PAPER_BALANCES = {"USDC": Decimal("100"), "SOL": Decimal("0.5")}
+# swaps aplicados guardados no arquivo (os últimos): resolver uma intenção de
+# um processo morto no meio (A3). Um envio que pode ter saído do registro
+# (`trimmed_at`) nunca é dado como não aplicado
+APPLIED_LOG_SIZE = 200
 
 
 class InsufficientFundsError(SwapRejectedError):
@@ -36,6 +40,9 @@ class SimulatedWallet:
         # contas de token já abertas: a primeira vez que a carteira recebe um
         # token, a conta é criada e paga rent (como on-chain)
         self._open: set[str] = set()
+        self._applied: list[dict] = []
+        # horário do swap mais novo que já saiu do registro (None: nenhum)
+        self.trimmed_at: float | None = None
         if self.path and self.path.exists():
             self.reload()
         elif initial is not None:
@@ -58,6 +65,12 @@ class SimulatedWallet:
         self._raw = {mint: int(raw) for mint, raw in data["balances"].items()}
         # arquivos antigos não têm a lista: quem tem saldo já tem conta
         self._open = set(data.get("open_accounts", self._funded()))
+        log = data.get("applied", {})
+        if isinstance(log, list):  # o primeiro formato do registro: só a lista
+            self._applied, self.trimmed_at = log, None
+        else:
+            self._applied = list(log.get("swaps", []))
+            self.trimmed_at = log.get("trimmed_at")
 
     @property
     def is_empty(self) -> bool:
@@ -80,6 +93,20 @@ class SimulatedWallet:
         """True se receber `mint` exige criar uma conta de token (e pagar rent)."""
         return mint != SOL_MINT and mint not in self._open
 
+    def applied(self, signature: str) -> dict | None:
+        """O swap aplicado com esta assinatura, ou None.
+
+        Procura na memória e, sem achar, relê o arquivo (outro processo).
+        """
+        found = self._find_applied(signature)
+        if found is None:
+            self.reload()
+            found = self._find_applied(signature)
+        return found
+
+    def _find_applied(self, signature: str) -> dict | None:
+        return next((a for a in self._applied if a["signature"] == signature), None)
+
     def raw_balance(self, mint: str) -> int:
         return self._raw.get(mint, 0)
 
@@ -99,12 +126,14 @@ class SimulatedWallet:
         out_amount: int,
         fee_lamports: int = 0,
         rent_lamports: int = 0,
+        signature: str | None = None,
     ) -> None:
         """Debita a entrada (+ taxa e rent em SOL) e credita a saída, atomicamente.
 
         Com arquivo: sob um lock, relê, calcula numa cópia, grava e só então
         muda a memória. Uma gravação que falha não aplica nada (a re-tentativa
         não aplica o swap duas vezes), e dois processos não se sobrescrevem.
+        Com `signature`, o swap entra no registro dos aplicados.
         """
         with _file_lock(self.path):
             self._read()
@@ -115,8 +144,24 @@ class SimulatedWallet:
                 out_amount,
                 fee_lamports + rent_lamports,
             )
-            self._write(raw, opened)
+            applied, trimmed_at = self._applied, self.trimmed_at
+            if signature is not None:
+                entry = {
+                    "signature": signature,
+                    "in_amount": in_amount,
+                    "out_amount": out_amount,
+                    "fee": fee_lamports,
+                    "rent": rent_lamports,
+                    "at": time.time(),
+                }
+                applied = [*applied, entry]
+                if len(applied) > APPLIED_LOG_SIZE:
+                    # sem horário (o primeiro formato): agora, o lado seguro
+                    trimmed_at = applied[-APPLIED_LOG_SIZE - 1].get("at", time.time())
+                    applied = applied[-APPLIED_LOG_SIZE:]
+            self._write(raw, opened, applied, trimmed_at)
             self._raw, self._open = raw, opened
+            self._applied, self.trimmed_at = applied, trimmed_at
 
     def _after_swap(
         self,
@@ -143,9 +188,15 @@ class SimulatedWallet:
         return raw, self._open | {output_mint}
 
     def _save(self) -> None:
-        self._write(self._raw, self._open)
+        self._write(self._raw, self._open, self._applied, self.trimmed_at)
 
-    def _write(self, raw: dict[str, int], opened: set[str]) -> None:
+    def _write(
+        self,
+        raw: dict[str, int],
+        opened: set[str],
+        applied: list[dict],
+        trimmed_at: float | None,
+    ) -> None:
         if self.path is None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +204,11 @@ class SimulatedWallet:
         tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(
             json.dumps(
-                {"balances": raw, "open_accounts": sorted(opened)},
+                {
+                    "balances": raw,
+                    "open_accounts": sorted(opened),
+                    "applied": {"swaps": applied, "trimmed_at": trimmed_at},
+                },
                 indent=2,
                 sort_keys=True,
             ),

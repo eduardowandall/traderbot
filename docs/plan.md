@@ -32,8 +32,8 @@ it before the code. Track progress in §5, record decisions in §9.
 
 ## 2. Where we are
 
-**Overall: about 87%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
-and goal 6 is scored on its own so a new goal doesn't hide progress). 735
+**Overall: about 88%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
+and goal 6 is scored on its own so a new goal doesn't hide progress). 761
 tests. Nothing has traded real money yet: the next stretch of work leads to a
 first tiny-budget real run.
 
@@ -43,9 +43,9 @@ first tiny-budget real run.
 | 2. Manual trades | Removed in stage U | Comes back with a wallet treasury | deferred |
 | 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up, re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | Warm-up collapses on thin tokens' candle gaps (A4); no crossovers | **85%** |
 | 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization | Several buckets trading at once not yet soaked (A2); one wallet only | **80%** |
-| 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest | UNCONFIRMED intents have no resolve step and no fee (A3); replays ignore rent | **94%** |
+| 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included | Replays ignore rent | **96%** |
 | 6. Perps | Research, venue choice and design (§8) | Everything else (A7–A12) | **5%** |
-| (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | Recovering from UNCONFIRMED without deleting the ledger (A3); owner approval for large trades; a service entrypoint | **90%** |
+| (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking and resolution, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | Owner approval for large trades; a service entrypoint | **90%** |
 
 ## 3. Principles and decisions that stand
 
@@ -84,17 +84,6 @@ and `spec-soak-revert.json` (SOL-USDC, 5 USD legs, about 3 round trips an
 hour each, budget and max loss 15 USD, which lasts about 5 days in paper); take the end-of-week memory
 sample. At the end, move `soak-test.md` into `history.md`; what goes wrong
 becomes an item here.
-
-### A3. Resolve UNCONFIRMED intents — M (before A6)
-Today a process killed mid-swap leaves an UNCONFIRMED (or EXECUTING) intent
-that blocks the mode until the ledger file is moved or deleted. At `serve`
-start, for each one: read its signature's status at Confirmed; success ->
-EXECUTED with its fill and costs; failed on-chain -> FAILED with the fee
-booked; unknown with the blockhash expired -> FAILED (nothing moved);
-otherwise it keeps blocking and the log says what the owner must check. Every
-resolution is a ledger event. First check whether the signature is stored
-before the send (`ledger/intents.py` records it only on the error path); an
-intent without one stays blocking. Decide the paper behaviour in the design.
 
 ### A4. Warm-up across candle gaps — M
 Soak F1: Jupiter candles only exist for bars with trades, and
@@ -172,10 +161,10 @@ ledger schema, so it waits for the end of a paper soak.
 |---|---|---|
 | A1 Soak quick fixes | done | 2026-10-05; in `history.md` |
 | A2 Owner: paper soak | in progress | Restarted on the current build 2026-10-05 |
-| A3 Resolve UNCONFIRMED | open | Required before A6 |
+| A3 Resolve UNCONFIRMED | done | 2026-10-05; in `history.md` |
 | A4 Warm-up across candle gaps | open | |
 | A5 Wallet re-read rule | open | Owner discussion first |
-| A6 First real run | open | After A2–A5 |
+| A6 First real run | open | After A2, A4, A5 |
 | A7 Perps: decoupling | open | |
 | A8 Perps: model, paper, spec | open | Schema bump; after a soak |
 | A9 Perps: backtest | open | |
@@ -191,7 +180,8 @@ ledger schema, so it waits for the end of a paper soak.
   the wallet opened (a cost, marked refundable), and other SOL the route
   charged. Attempts the chain confirmed as failed are a `failed_tx_fee` event
   and come off the bucket's realized PnL (an unreadable fee counts as the
-  5000-lamport base fee). An UNCONFIRMED intent's fee is not recorded (A3).
+  5000-lamport base fee). An intent resolved after a restart books the fee
+  of its failed sends too (A3).
 - Real mode reads the confirmed transaction, including the real in/out
   amounts. Paper simulates the base fee plus the priority-fee cap and
   first-time rent, and fills 10 bps below the quote (never below its
@@ -206,8 +196,10 @@ ledger schema, so it waits for the end of a paper soak.
   PnL and the policy are USD. On a non-stable quote without a price, a
   budgeted bucket offers 0. A backtest's return on such a pair includes the
   quote token's own USD move.
-- **No commands to inspect or repair the ledger.** An UNCONFIRMED intent
-  blocks the mode until the file is moved or deleted (A3);
+- **No commands to inspect or repair the ledger.** `serve` resolves
+  UNCONFIRMED/EXECUTING intents from their logged sends (A3); one still
+  pending on the chain, or from a build before A3, blocks the mode until the
+  owner moves or deletes the file;
   `.claude/scripts/ledger_dump.py` prints it read-only.
 - **Replays** measure fees on Jupiter now (or take flags), not at the time of
   the candles; the rent of a token account is not modelled. The live vs
@@ -239,7 +231,7 @@ Top risks:
    policy and budgets bound every trade; the guard hook keeps agent sessions
    out of real mode.
 2. **Double execution or lost confirmations.** Idempotency keys, no re-send
-   after broadcast, UNCONFIRMED blocking (A3 adds recovery).
+   after broadcast, every send logged first, UNCONFIRMED blocking until resolved.
 3. **Key compromise.** The key only in `serve`; a low-balance hot wallet.
 4. **Jupiter changes undocumented endpoints.** Price API fallback;
    configurable hosts.

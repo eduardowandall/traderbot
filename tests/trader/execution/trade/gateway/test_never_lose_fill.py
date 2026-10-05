@@ -138,7 +138,7 @@ class TestGatewayKeepsTheResult:
             await gateway.submit(make_intent(), swap)
         monkeypatch.setattr(gateway.ledger, "mark_executed", real_mark)
 
-        with pytest.raises(PolicyDeniedError, match="sem confirmação"):
+        with pytest.raises(PolicyDeniedError, match="sem desfecho"):
             await gateway.submit(make_intent(), swap)
         # outra conta (outro bot) segue operando
         assert await gateway.submit(make_intent(account="paper:JUP-USDC"), swap)

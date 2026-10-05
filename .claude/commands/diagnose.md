@@ -7,8 +7,7 @@ allowed-tools: Bash(uv run --no-sync python .claude/scripts/ledger_dump.py:*), B
 Diagnose the run. Mode and symptom: $ARGUMENTS (the default mode is paper).
 
 The checks below are all read-only. Don't move or delete `.data/` files
-without asking: that is the only way to clear an UNCONFIRMED intent, and it
-throws away the mode's history. Work through the checks in order and stop at
+without asking: it throws away the mode's history. Work through the checks in order and stop at
 the first real cause:
 
 1. **Ledger:** `uv run --no-sync python .claude/scripts/ledger_dump.py <mode> --limit 20`
@@ -16,9 +15,11 @@ the first real cause:
    - `status: denied` with `reasons` means the policy refused the intent;
      compare the limit in the reason with `policy.toml` (`[<mode>.limits]`).
    - A non-empty `unresolved` list (UNCONFIRMED, or EXECUTING for over 5
-     minutes) blocks all trading in that mode. There is no resolve command:
-     the owner checks the signature on the chain, then moves or deletes the
-     ledger file.
+     minutes) blocks all trading in that mode. `serve` resolves them from
+     their `intent_sent` events at start and every sweep; grep its log for
+     `sem desfecho` to see why one is still open (a send pending on the
+     chain, or an intent from a build without the send log: then the owner
+     checks the signature and moves or deletes the ledger).
    - `circuit breaker` in the reasons: consecutive failures in this process;
      restarting the bot re-arms it. Look at the `error` of the failed rows
      (REJECTED rows, provider refusals such as price impact, don't count).

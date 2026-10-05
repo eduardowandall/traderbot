@@ -6,10 +6,15 @@ no ledger (`IntentRecord`).
 """
 
 import uuid
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum, auto
+
+from trader.shared.models.mints import SOLANA_MINTS, Mint
+from trader.shared.models.order import SwapResult
 
 
 class IntentSide(StrEnum):
@@ -26,7 +31,7 @@ class IntentStatus(StrEnum):
     # quote, saldo simulado): nada quebrou, então fica fora do circuit breaker
     REJECTED = auto()
     # enviada à rede mas sem confirmação: pode ou não ter sido executada.
-    # bloqueia novos trades do modo até o dono mover ou apagar o ledger.
+    # bloqueia novos trades do modo até ser resolvida (`gateway/resolve.py`)
     UNCONFIRMED = auto()
 
 
@@ -62,6 +67,13 @@ class TradeIntent:
     idempotency_key: str = field(default_factory=lambda: uuid.uuid4().hex)
     intent_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: datetime = field(default_factory=_now)
+
+    def pair(self) -> tuple[Mint, Mint]:
+        """(token de cotação, token negociado), pelo lado da intenção."""
+        spend, receive = SOLANA_MINTS[self.spend_mint], SOLANA_MINTS[self.receive_mint]
+        if self.side == IntentSide.BUY:
+            return spend, receive
+        return receive, spend
 
 
 def with_idempotency_key(intent: TradeIntent, key: str | None) -> TradeIntent:
@@ -105,3 +117,61 @@ class IntentRecord:
     net_pnl_quote: Decimal | None = None
     # recusas idênticas seguidas somadas nesta linha (além da primeira)
     repeat_count: int = 0
+
+
+@dataclass(frozen=True)
+class SentTx:
+    """Uma transação de swap prestes a ser enviada (A3).
+
+    Gravada no ledger (`intent_sent`) **antes** do envio: depois de um
+    processo morto no meio, é o que permite conferir na rede se ela entrou.
+    """
+
+    signature: str
+    input_mint: str
+    output_mint: str
+    in_amount: int  # raw, conforme a quote
+    out_amount: int
+    # depois desta altura de bloco a transação não entra mais (None: paper)
+    last_valid_block_height: int | None = None
+    # paper: quando foi aplicada (epoch), para saber se saiu do registro
+    sent_at: float | None = None
+
+    def to_result(self) -> SwapResult:
+        """O resultado do swap, se este envio entrou (valores da quote)."""
+        return SwapResult(
+            self.signature,
+            self.input_mint,
+            self.output_mint,
+            self.in_amount,
+            self.out_amount,
+        )
+
+
+class TxOutcome(StrEnum):
+    """O que a rede (ou a carteira simulada) diz de uma `SentTx`."""
+
+    LANDED = auto()  # confirmada com sucesso
+    FAILED = auto()  # confirmada com erro: só a taxa foi paga
+    EXPIRED = auto()  # não entrou e não entra mais: nada foi movido
+    PENDING = auto()  # ainda não dá para saber
+
+
+# quem grava os envios da intenção em execução: o gateway define durante o
+# `execute()`; o executor chama `announce_send` logo antes de enviar
+send_hook: ContextVar[Callable[[SentTx], None] | None] = ContextVar(
+    "send_hook", default=None
+)
+
+
+def announce_send(sent: SentTx, required: bool = False) -> None:
+    """Grava o envio antes de ele acontecer; se a gravação falha, levanta.
+
+    `required` (on-chain): sem quem grave, levanta (antes do envio) em vez
+    de enviar algo que nenhuma resolução encontraria depois.
+    """
+    hook = send_hook.get()
+    if hook is not None:
+        hook(sent)
+    elif required:
+        raise LookupError(f"envio {sent.signature} sem registro no ledger")

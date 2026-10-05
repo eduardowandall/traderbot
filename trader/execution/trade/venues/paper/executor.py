@@ -7,6 +7,7 @@ quote (`slippage_bps`), nunca abaixo do mínimo dela (`otherAmountThreshold`):
 on-chain, abaixo disso a transação falharia.
 """
 
+import time
 import uuid
 from decimal import Decimal
 
@@ -14,6 +15,7 @@ from solders.pubkey import Pubkey
 
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.models.account_data import MintBalance
+from trader.execution.models.intent import SentTx, TxOutcome, announce_send
 from trader.execution.trade.venues.jupiter.executor import DEFAULT_SOL_FEE_RESERVE
 from trader.execution.trade.venues.paper.wallet import SimulatedWallet
 from trader.shared.models import SOLANA_MINTS, SwapResult
@@ -77,24 +79,38 @@ class SimulatedExecutor:
         )
         # como on-chain: `fee_lamports` é a taxa total (base + priority)
         fee = self.fee_lamports + self.priority_fee_lamports
+        signature = f"paper-{uuid.uuid4().hex}"
+        announce_send(
+            SentTx(
+                signature,
+                input_mint,
+                output_mint,
+                in_amount,
+                int(quote.outAmount),
+                sent_at=time.time(),
+            )
+        )
         self.wallet.apply_swap(
-            input_mint, in_amount, output_mint, out_amount, fee, rent
+            input_mint, in_amount, output_mint, out_amount, fee, rent, signature
         )
         return SwapResult(
-            signature=f"paper-{uuid.uuid4().hex}",
+            signature=signature,
             input_mint=input_mint,
             output_mint=output_mint,
             in_amount=in_amount,
             out_amount=out_amount,
-            costs=TradeCosts(
-                source=self.cost_source,
-                fee_lamports=fee,
-                priority_fee_lamports=self.priority_fee_lamports,
-                rent_lamports=rent,
-                actual_in_amount=in_amount,
-                actual_out_amount=out_amount,
-            ),
+            costs=self._costs(in_amount, out_amount, fee, rent),
             quote=quote,
+        )
+
+    def _costs(self, in_amount: int, out_amount: int, fee: int, rent: int):
+        return TradeCosts(
+            source=self.cost_source,
+            fee_lamports=fee,
+            priority_fee_lamports=self.priority_fee_lamports,
+            rent_lamports=rent,
+            actual_in_amount=in_amount,
+            actual_out_amount=out_amount,
         )
 
     def _filled_out(self, quote: JupiterQuoteResponse) -> int:
@@ -105,8 +121,29 @@ class SimulatedExecutor:
         return max(slipped, floor)
 
     async def fetch_costs(self, result: SwapResult) -> TradeCosts | None:
-        # os custos simulados já vêm no resultado da execução
-        return result.costs
+        # os custos simulados já vêm no resultado da execução; uma intenção
+        # resolvida depois (A3) os lê do registro da carteira
+        if result.costs is not None:
+            return result.costs
+        applied = self.wallet.applied(result.signature)
+        if applied is None:
+            return None
+        return self._costs(
+            applied["in_amount"], applied["out_amount"], applied["fee"], applied["rent"]
+        )
+
+    async def outcome(self, sent: SentTx) -> TxOutcome:
+        """Aplicado na carteira, ou nunca: o swap simulado é aplicado na hora.
+
+        Fora do registro, mas enviado antes do último corte dele: pode ter
+        sido aplicado e cortado, então fica PENDING (o dono confere).
+        """
+        if self.wallet.applied(sent.signature) is not None:
+            return TxOutcome.LANDED
+        trimmed = self.wallet.trimmed_at
+        if trimmed is not None and (sent.sent_at is None or sent.sent_at <= trimmed):
+            return TxOutcome.PENDING
+        return TxOutcome.EXPIRED
 
     async def fetch_fee(self, signature: str) -> int | None:
         return None  # nada falha "na rede" aqui

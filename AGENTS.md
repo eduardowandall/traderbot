@@ -163,8 +163,9 @@ command to run in a terminal. The rules are tested in
   returning the wallet's accounts where only the input leaves, up to
   `inAmount`. Both refusals are `SwapRejectedError`s. Test fakes of the RPC
   need `inspection_passes()` from `tests/factories.py`.
-- **Nothing raises after EXECUTED**: `execute_trade` is the only caller of
-  `provider.fetch_swap_costs` (never raises), build orders with
+- **Nothing raises after EXECUTED**: `fills.settle` (from `execute_trade` and
+  the A3 resolver) is the only caller of `provider.fetch_swap_costs` (never
+  raises), fills are written with `record_fill_safely`, build orders with
   `order_from_fill` (falls back to the quote), `record_fill` failures are
   logged. Nothing that can fail after confirmation goes inside `_do_swap`.
   Retries only cover pre-broadcast failures and transactions the chain
@@ -192,11 +193,18 @@ command to run in a terminal. The rules are tested in
 - **Ledger schema** is one `_SCHEMA` with a `user_version` in
   `trader/execution/trade/ledger/store.py`. There are no migrations: an older file is refused
   (`LedgerFormatError`); bump `SCHEMA_VERSION` when the schema changes.
-- **UNCONFIRMED** (process killed mid-swap) blocks all trading in that mode
-  until the ledger file is moved or deleted. The circuit breaker counts
+- **UNCONFIRMED/EXECUTING** (process killed mid-swap) blocks all trading in
+  that mode until resolved (A3, `trader/execution/trade/gateway/resolve.py`):
+  every send is an `intent_sent` event written before the broadcast (the
+  gateway's `send_hook`, `announce_send` in the executor; if that write
+  fails, nothing is sent), and `serve` asks the chain (or the paper wallet's
+  `applied` log) about each one at start and on every sweep. Only an intent
+  with a send still PENDING, or one from a build without the send log, keeps
+  blocking; then the owner checks the chain. The circuit breaker counts
   failures since the process started (a restart re-arms it); provider
   rejections (`SwapRejectedError`, stored as REJECTED) don't count.
-- **RPC commitment is Confirmed** everywhere (reads, simulation, confirmation);
+- **RPC commitment is Confirmed** everywhere (reads, simulation, confirmation;
+  the one exception is the block height that decides a send expired, A3);
   Finalized lags ~13s and would show pre-swap balances.
 - **State paths** go through `trader/shared/paths.py` (`TRADER_DATA_DIR`,
   `TRADER_POLICY_FILE`, `TRADER_LOG_DIR`; relative values resolve against the

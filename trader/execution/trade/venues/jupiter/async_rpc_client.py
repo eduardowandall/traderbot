@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from decimal import Decimal
 
 import httpx
 import httpx2
 from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
-from solana.rpc.commitment import Confirmed
+from solana.rpc.commitment import Confirmed, Finalized
 from solana.rpc.models import TokenAccountOpts
 from solders.keypair import Keypair
 from solders.message import MessageV0, to_bytes_versioned
@@ -60,6 +61,17 @@ _READ_RETRY = retry(
 
 class TransactionFailedError(Exception):
     """A transação foi processada pela rede, mas falhou (status.err)."""
+
+
+@dataclass(frozen=True)
+class SignedTx:
+    tx: VersionedTransaction
+    # o blockhash dela vale até esta altura de bloco: depois, nunca entra
+    last_valid_block_height: int
+
+    @property
+    def signature(self) -> str:
+        return str(self.tx.signatures[0])
 
 
 class AsyncRPCClient:
@@ -127,9 +139,29 @@ class AsyncRPCClient:
         ]
 
     @logger_wrapper
+    @_READ_RETRY
+    async def signature_status(self, signature: str):
+        """O status da assinatura (busca no histórico), ou None se a rede não a viu.
+
+        Para resolver uma intenção depois (A3): o nó pode já ter esquecido o
+        status recente, por isso `search_transaction_history`.
+        """
+        result = await self.client.get_signature_statuses(
+            [Signature.from_string(signature)], search_transaction_history=True
+        )
+        return result.value[0]
+
+    @logger_wrapper
+    @_READ_RETRY
+    async def finalized_block_height(self) -> int:
+        """Altura de bloco finalizada: passou do `last_valid_block_height` de
+        uma transação não vista, ela nunca mais entra."""
+        return (await self.client.get_block_height(commitment=Finalized)).value
+
+    @logger_wrapper
     async def sign_transaction(
         self, tx: VersionedTransaction, keypair: Keypair
-    ) -> VersionedTransaction:
+    ) -> SignedTx:
         await self.is_connected()
         latest = await self.client.get_latest_blockhash()
 
@@ -151,7 +183,7 @@ class AsyncRPCClient:
         signature = keypair.sign_message(to_bytes_versioned(message))
 
         new_tx.signatures = [signature]
-        return new_tx
+        return SignedTx(new_tx, latest.value.last_valid_block_height)
 
     @logger_wrapper
     async def simulate_transaction(
