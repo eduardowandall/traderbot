@@ -16,6 +16,9 @@ from trader.shared.models import Interval, OrderSignal, Position, TickerData
 from trader.shared.notification.notification_service import Notifier
 from trader.strategy.trading_service.client import TradeClient
 
+# a cada preço: horário, preço em cotação e o USD da cotação (ex: `TickRecorder`)
+OnTick = Callable[[datetime, Decimal, Decimal | None], None]
+
 
 class Strategy(Protocol):
     """O que o bot e o backtester pedem de uma estratégia (`SpecStrategy`)."""
@@ -60,7 +63,7 @@ class BotConfig:
     notifier: Notifier
     # chamado a cada preço recebido (ex: `TickRecorder.record`): horário,
     # preço em cotação e, num par sem stablecoin, o USD da cotação
-    on_tick: Callable[[datetime, Decimal, Decimal | None], None] | None = None
-    # tarefas que rodam junto com o loop e param com ele (ex: o relatório
-    # diário do `run`); o bot não sabe o que fazem
+    on_tick: OnTick | None = None
+    # tarefas que rodam junto com o loop e param com ele; o bot não sabe o
+    # que fazem
     background: Sequence[Callable[[], Coroutine[Any, Any, None]]] = ()

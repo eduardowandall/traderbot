@@ -1,7 +1,7 @@
 """Compare a live bucket with a backtest of the ticks it saw, as JSON.
 
-Record the ticks while the spec runs (`main.py run paper SPEC --record-ticks
-FILE`), then replay them: the strategy warms up on the candles that closed
+Record the ticks while the spec runs (`main.py connect SPEC --record-ticks
+FILE`, with `serve paper` running), then replay them: the strategy warms up on the candles that closed
 before the first tick (as the bot does at startup), trades on the ticks, and
 the result is printed next to the legs the bucket `<mode>:strategy:<spec_id>`
 executed in the same window, with the differences (trade count, realized PnL,

@@ -1,4 +1,4 @@
-"""Um processo de execução por modo (`run` ou `serve`): lock do sistema.
+"""Um processo de execução por modo (o `serve`): lock do sistema.
 
 Os buckets de um modo dividem a carteira e o ledger; o cache de saldo, a
 alocação e a reconciliação (B2) só valem se um processo só executa ordens.
@@ -56,8 +56,8 @@ class ModeLock:
         except OSError:
             handle.close()
             raise ModeBusyError(
-                f"outro processo já executa o modo {self.mode} (`run` ou `serve`); "
-                f"para várias specs ao mesmo tempo use `serve {self.mode}` + `connect`"
+                f"outro `serve {self.mode}` já está rodando; ligue mais specs a ele "
+                "com `connect`"
             ) from None
         self._handle = handle
 

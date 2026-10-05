@@ -1,6 +1,6 @@
 """Relatório diário dos buckets de um modo, pelo notificador (Telegram).
 
-Roda no processo de execução (`run` ou `serve`), o dono do ledger. A cada
+Roda no processo de execução (`serve`), o dono do ledger. A cada
 minuto confere se o dia anterior (UTC) já foi relatado: um evento
 `daily_report` com o dia fica no ledger, então reiniciar não reenvia. Por
 bucket: fills do dia, custos pagos, PnL realizado no dia e no total, taxas de

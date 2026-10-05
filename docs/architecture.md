@@ -33,8 +33,8 @@ The top folders of `trader/` follow the two processes:
 
 | Folder | Process | What |
 |---|---|---|
-| `trader/execution/` | the trade-runner (`serve`, or the execution half of `run`) | `market/`: everything that reads Jupiter (the client, candles, the `PriceHub`, the USD oracle), never moves funds; `trade/`: the key, wallet, ledger, policy, venues and the one path to a swap; `runner.py` is the `serve` server (it also answers `price` and `candles`), `wiring.py` builds it per mode |
-| `trader/strategy/` | the strategy-runner (`connect`, or the bot half of `run`) | the bot loop (`bot/`), the spec engine (`spec/`), the client of the trade-runner (`trading_service/`); `runner.py` builds one bot |
+| `trader/execution/` | the trade-runner (`serve`) | `market/`: everything that reads Jupiter (the client, candles, the `PriceHub`, the USD oracle), never moves funds; `trade/`: the key, wallet, ledger, policy, venues and the one path to a swap; `runner.py` is the `serve` server (it also answers `price` and `candles`), `wiring.py` builds it per mode |
+| `trader/strategy/` | the strategy-runner (`connect`) | the bot loop (`bot/`), the spec engine (`spec/`), the client of the trade-runner (`trading_service/`); `runner.py` builds one bot |
 | `trader/shared/` | both | models, the strategy's feed without network (`market/`: `MarketData`, `HubMarketData`, pairs), the spec's terms (`spec/`: `SpecTerms` and the policy checks over them, all the trade-runner sees of a spec, B13), the wire protocol (`trading_service/`), `paths.py`, Telegram |
 | `trader/api/cli/` | entry points | the Typer commands and the per-mode process lock |
 | `trader/backtest/` | in-process | replays a spec through both sides |
@@ -48,7 +48,7 @@ the ledger or the policy.
 
 | Layer | What | Modules |
 |---|---|---|
-| app | commands and wiring | `main.py`, `trader/api/cli/` (`run`, `backtest`, `serve`, `connect`), `trader/execution/runner.py`, `trader/execution/wiring.py` (mode -> components), `trader/execution/notification/` (daily report), `trader/backtest/` |
+| app | commands and wiring | `main.py`, `trader/api/cli/` (`serve`, `connect`, `backtest`), `trader/execution/runner.py`, `trader/execution/wiring.py` (mode -> components), `trader/execution/notification/` (daily report), `trader/backtest/` |
 | strategy-side | the loop that knows no mode, key or ledger | `trader/strategy/bot/` (`async_websocket_bot.py`, `decision.py`, `config.py`), `trader/strategy/trading_service/` (`client.py`, `remote.py`), `trader/strategy/runner.py` |
 | strategy | specs: pure signals | `trader/strategy/spec/` (`models.py`, `expr.py`, `parse.py`, `strategy.py`, `conditions.py`) |
 | execution | buckets, the account, the one path to a swap | `trader/execution/trade/trading_service/` (`service.py`, `local.py`), `trader/execution/trade/gateway/` (`account.py`, `gateway.py`, `fills.py`, `orders.py`) |
@@ -59,27 +59,30 @@ the ledger or the policy.
 
 ## 3. One paper buy, hop by hop
 
-`uv run main.py run paper docs/examples/spec-sol-dip.json`
+`uv run main.py serve paper`, then, in another terminal,
+`uv run main.py connect docs/examples/spec-sol-dip.json` (B14: trading is only
+`serve` + `connect`; the hops below split across the two processes at the
+`TradeClient` seam, hop 3, see §9).
 
 ### Startup (once)
 
 | # | Where | What happens | Why it exists |
 |---|---|---|---|
 | S1 | `main.py:11` `main` | Sets up logging, runs the Typer app; an escaping error is printed through `redacted_excepthook`. | Typer's own hook would print the Helius key. |
-| S2 | `trader/api/cli/bot.py:35` `run` | Loads the spec, validates it against the paper policy (`_check_limits`), builds everything. | Refuse a spec that could never trade. |
-| S3 | `trader/execution/wiring.py:65` `build_trade_service` | paper → `paper_provider(SimulatedWallet)`; real → `AsyncJupiterProvider.on_chain(key)`. Adds `TradeGateway.for_mode` (ledger + policy) and the USD price oracle. | The **only** place a mode turns into components. |
-| S4 | `trader/api/cli/bot.py:60` | `LocalTradeClient(service, "strategy:<spec_id>", ...)`, then `AsyncWebsocketTradingBot(BotConfig(...))`. | The bot only ever sees its bucket (`TradeClient`); B3 will swap in a socket client. |
-| S5 | `trader/strategy/bot/async_websocket_bot.py:156` `_startup` | `trader.open()` → `TradeService.open_bucket` (`service.py:83`): marks `bucket_opened` once, rebuilds the position and PnL from the ledger (`AsyncAccount.restore_from_ledger` → `TradeGateway.restore`, `gateway.py:177`), reconciles against the wallet. | A restart continues where it stopped. |
+| S2 | `trader/api/cli/runners.py` `serve` | Takes the mode's lock, builds the `PriceHub`, the service and a `TradeRunner`, writes `.data/trader-paper.json`. | One process per mode holds the wallet and the ledger. |
+| S3 | `trader/execution/wiring.py:65` `build_trade_service` | paper → `paper_provider(SimulatedWallet)`; real → `AsyncJupiterProvider.on_chain(key)`. Adds `TradeGateway.for_mode` (ledger + policy) and the USD price oracle (the hub). | The **only** place a mode turns into components. |
+| S4 | `trader/api/cli/runners.py` `connect` → `trader/strategy/runner.py` `strategy_bot` | Loads the spec, builds a `RemoteTradeClient` with `spec.terms()` and a `HubMarketData` over the `price` and `candles` ops, then `AsyncWebsocketTradingBot(BotConfig(...))`. At `hello`, the trade-runner validates the terms against its policy (`TradeRunner._valid_terms`). | The bot only ever sees its bucket (`TradeClient`); a spec that could never trade is refused before it starts. |
+| S5 | `trader/strategy/bot/async_websocket_bot.py:156` `_startup` | `trader.open()` → `hello` → `TradeService.open_bucket` (`service.py:83`): marks `bucket_opened` once, rebuilds the position and PnL from the ledger (`AsyncAccount.restore_from_ledger` → `TradeGateway.restore`, `gateway.py:177`), reconciles against the wallet. | A restart continues where it stopped. |
 | S6 | `async_websocket_bot.py:173` `_resume_strategy` | `strategy.resume(last_exit_at, opened_at, last_exit_price)`. | Cooldown, re-arm and `ttl_days` survive restarts. |
-| S7 | `async_websocket_bot.py:156` | Fetches `strategy.warmup()` candles and seeds the indicators (`strategy.setup`). | Entries wait for converged indicators. |
+| S7 | `async_websocket_bot.py:156` | Fetches `strategy.warmup()` candles (through the `candles` op) and seeds the indicators (`strategy.setup`). | Entries wait for converged indicators. |
 
 ### Each tick
 
 | # | Where | What happens | Why it exists |
 |---|---|---|---|
-| 1 | `async_websocket_bot.py:186` `_tick` | Price from `MarketData.get_price`: a `HubMarketData` over the process's `PriceHub` (`execution/market/hub.py`: one websocket for all mints, the Price API for quiet ones; never older than 30s, one price per second), in the **quote token**: for a non-stable quote the CLI gave the bot `market_for(...)`'s `PairMarketData`, which divides two USD feeds. Then `trader.bucket()` → `TradeService.get_bucket` (`service.py:240`): `available` = `min(spendable, budget cap / quote_usd)` in the quote token, the quote's USD price, position, PnL. | The strategy sizes against what the bucket may spend; money stays USD, prices stay in the pair's own unit. |
+| 1 | `async_websocket_bot.py:186` `_tick` | Price from `MarketData.get_price`: a `HubMarketData` over the trade-runner's `PriceHub` (the `price` op) (`execution/market/hub.py`: one websocket for all mints, the Price API for quiet ones; never older than 30s, one price per second), in the **quote token**: for a non-stable quote the CLI gave the bot `market_for(...)`'s `PairMarketData`, which divides two USD feeds. Then `trader.bucket()` → `TradeService.get_bucket` (`service.py:240`): `available` = `min(spendable, budget cap / quote_usd)` in the quote token, the quote's USD price, position, PnL. | The strategy sizes against what the bucket may spend; money stays USD, prices stay in the pair's own unit. |
 | 2 | `async_websocket_bot.py:68` `process_market_data` → `trader/strategy/bot/decision.py:23` `order_for` | `SpecStrategy.on_market_refresh(price, available, position, quote_usd)` (`strategy_spec/strategy.py:96`) returns `OrderSignal(BUY, spend / price)` (`_entry`, `:176`; `spend` from `fixed_usd / quote_usd` or `pct_of_bucket`), wrapped as an `OrderRequest`. | The same decision code runs in the backtest. |
-| 3 | `trading_service/local.py:45` → `service.py:163` `submit_order` | Refuses buys on a retiring bucket, takes the order lock. | Buckets share one wallet; orders go one at a time. |
+| 3 | `RemoteTradeClient.submit` → `TradeRunner._submit` → `service.py:163` `submit_order` | Refuses buys on a retiring bucket, takes the order lock. | Buckets share one wallet; orders go one at a time. |
 | 4 | `service.py:290` `_place` → `:304` `_execute` | Dispatches on side: `account.buy(..., limit=<cap in the quote token>)`. Any exception becomes an `OrderReply` (denied / rejected / error), logged once. | Nothing from execution crosses into the strategy side as an exception. |
 | 5 | `trader/execution/trade/gateway/account.py:311` `buy` → `:280` `_buy_limit` | One balance read; checks no open position, the minimum, the SOL fee reserve and the bucket cap; computes `spend = quantity * price` once (capped). | Budget and wallet limits in one place. |
 | 6 | `account.py:259` `_usd_snapshot`, `:262` `_intent` | USD snapshot of both sides and SOL from the process's price oracle (the hub; stablecoins are 1), **before** the trade; builds the `TradeIntent` (spend amount, USD notional, idempotency key). | After EXECUTED nothing may fail, so no fetch happens later. |
@@ -211,13 +214,14 @@ same `TickContext` and `IndicatorBank` as the blocks.
 - **Wallet checks:** one balance cache per `TradeService`; open budgets must
   fit the wallet; open positions are reconciled against the wallet at the first
   open, and a missing token blocks its buys.
-- **One execution process per mode** (OS lock shared by `run` and `serve`).
+- **One execution process per mode** (an OS lock taken by `serve`).
 - **Stopping the process stops trading** (there is no separate kill switch).
 
 ## 9. Several specs: `serve` + `connect`
 
-`run` puts the bot and the `TradeService` in one process. For several specs,
-the same hops split across processes at the `TradeClient` seam (hop 3):
+Every spec trades this way (B14 removed `run`): the hops split across
+processes at the `TradeClient` seam (hop 3). `LocalTradeClient`, the
+in-process version, is left for the backtest and the tests.
 
 - **`main.py serve <mode>`** (`trader/execution/runner.py`) holds the
   mode's lock, the key, the wallet, the ledger and one `TradeService`, and
@@ -227,23 +231,24 @@ the same hops split across processes at the `TradeClient` seam (hop 3):
   what's left in retired buckets, so exits don't depend on the other process.
   Its log shows each bucket open, each accepted `hello` and each disconnect,
   with the number of specs connected. It also runs the price hub and answers
-  `price`, so N strategy-runners share one websocket and one Price API poll;
+  `price` and `candles`, so N strategy-runners share one websocket and one
+  Price API poll and never talk to Jupiter themselves;
   the hub is also its own price oracle (budgets, USD values, the sweep, the
   daily report and the quote check), so nothing else polls the Price API.
 - **`main.py connect spec.json`** (`trader/strategy/runner.py`, the
   strategy side) runs the usual bot with a `RemoteTradeClient`
   (`trading_service/remote.py`) instead of `LocalTradeClient`, and a
-  `HubMarketData` over `RemoteTradeClient.price` (candles for the warm-up
-  still come straight from Jupiter). It has no key,
+  `HubMarketData` over `RemoteTradeClient.price` and `RemoteCandles` (the
+  warm-up). `--record-ticks FILE` writes every price it gets for `backtest
+  --ticks`. It has no key,
   no ledger and no mode; on a dropped connection it reconnects and resends with
   the same idempotency key, so an order executes at most once.
-- **One execution process per mode** (`trader/api/cli/lock.py`): `run` and
-  `serve` take the same OS lock, so the shared balance cache, the budget
-  allocation and the startup reconcile in `TradeService` see every order.
+- **One execution process per mode** (`trader/api/cli/lock.py`): `serve`
+  takes an OS lock, so the shared balance cache, the budget allocation and the
+  startup reconcile in `TradeService` see every order.
 - **The daily report** (`trader/execution/notification/daily_report.py`) runs in the
-  execution process, which owns the ledger: next to the server in `serve`, and
-  in `run` as one of the bot's `BotConfig.background` tasks (the bot only
-  starts and cancels it); `TradeRunner.background` does the same in `serve`. Each minute it checks whether the previous UTC day
+  execution process, which owns the ledger, next to the server
+  (`TradeRunner.background`). Each minute it checks whether the previous UTC day
   has a `daily_report` event; if not, it sends fills, costs, realized PnL and
   open positions marked at the hub's price for every bucket of the mode.
 

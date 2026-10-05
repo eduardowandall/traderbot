@@ -323,12 +323,31 @@ def test_the_mode_lock_refuses_a_second_process():
         pass
 
 
-def test_run_refuses_to_start_while_the_mode_is_busy():
-    spec = PROJECT_ROOT / "docs" / "examples" / "spec-random.json"
-    with ModeLock("paper"), mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot"):
-        result = CliRunner().invoke(main_module.app, ["run", "paper", str(spec)])
+def test_serve_refuses_to_start_while_the_mode_is_busy():
+    with ModeLock("paper"):
+        result = CliRunner().invoke(main_module.app, ["serve", "paper"])
     assert result.exit_code == 1
-    assert "outro processo" in result.stderr
+    assert "já está rodando" in result.stderr
+
+
+async def test_hello_opens_the_bucket_from_the_terms():
+    # B13: o bucket nasce dos termos (orçamento, perda máxima, prazo)
+    runner = _runner()
+    spec = make_spec(expires_at=None, ttl_days=7)
+    async with await runner.start() as server:
+        client = await _client(runner, server, spec=spec)
+        snapshot = await client.bucket()
+        await client.aclose()
+    assert snapshot.bucket == f"strategy:{terms_of(spec).spec_id}"
+    assert snapshot.budget_usd == Decimal(50)
+    assert runner.specs[snapshot.bucket] == terms_of(spec)  # perda máxima e prazo
+
+
+async def test_hello_enforces_the_policys_expiry_window():
+    runner = _runner()
+    async with await runner.start() as server:
+        with pytest.raises(HelloRefusedError, match="mais de 30 dias"):
+            await _client(runner, server, spec=make_spec())  # expira em 2099
 
 
 def test_connect_needs_no_key_and_finds_the_trade_runner(monkeypatch, tmp_path):

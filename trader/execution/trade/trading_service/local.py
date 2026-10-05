@@ -1,5 +1,5 @@
 """`LocalTradeClient`: `TradeClient` para um bucket de um `TradeService` no
-mesmo processo (testes, backtest e o `main.py run` de sempre)."""
+mesmo processo (o backtest e os testes)."""
 
 from decimal import Decimal
 

@@ -107,7 +107,7 @@ def test_paper_bot_trades_on_the_live_feed(tmp_path):
 
 
 async def _run_bot(ticks_file):
-    """Como `main.py run paper spec-random.json`, parando por `stop()`.
+    """O bot e o serviço num processo só (`LocalTradeClient`), parando por `stop()`.
 
     Cancelar a task no meio de um swap deixaria a intenção UNCONFIRMED; o
     `stop()` só vale entre ticks.

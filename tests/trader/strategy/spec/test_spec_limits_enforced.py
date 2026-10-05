@@ -1,16 +1,12 @@
 """R6: uma spec em execução respeita os próprios limites (validade, orçamento, perda)."""
 
-import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest import mock
 
 import pytest
 from factories import make_spec, open_ledger
 from pydantic import ValidationError
-from typer.testing import CliRunner
 
-import main as main_module
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.trade.gateway import TradeGateway
@@ -129,33 +125,3 @@ class TestMaxLoss:
         await restarted.open_bucket("s", USDC.mint, JUP.mint, max_loss_usd=Decimal(5))
 
         assert (await restarted.get_bucket("s")).status == BucketStatus.RETIRING
-
-
-class TestRunCommand:
-    def _run(self, tmp_path, spec):
-        path = tmp_path / "spec.json"
-        path.write_text(json.dumps(spec), encoding="utf-8")
-        with mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
-            result = CliRunner().invoke(main_module.app, ["run", "paper", str(path)])
-        return result, bot_cls
-
-    def test_an_invalid_spec_does_not_start(self, tmp_path):
-        result, bot_cls = self._run(tmp_path, make_spec())  # expira em 2099
-
-        assert result.exit_code != 0
-        assert "spec inválida para paper" in result.output
-        bot_cls.assert_not_called()
-
-    def test_a_valid_spec_runs_in_its_own_capped_bucket(self, tmp_path):
-        spec = make_spec()
-        spec.pop("expires_at")
-        spec["ttl_days"] = 7
-
-        result, bot_cls = self._run(tmp_path, spec)
-
-        assert result.exit_code == 0, result.output
-        trader = bot_cls.call_args.args[0].trader
-        spec_id = StrategySpec.model_validate(spec).spec_id()
-        assert trader.name == f"strategy:{spec_id}"
-        assert trader.budget_usd == Decimal("50")
-        assert trader.max_loss_usd == Decimal("10")

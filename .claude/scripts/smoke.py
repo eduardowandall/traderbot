@@ -1,4 +1,4 @@
-"""Isolated smoke run of the bot in paper mode, then a ledger report.
+"""Isolated smoke run in paper mode (`serve` + `connect`), then a ledger report.
 
 State goes to a fresh temp dir (TRADER_DATA_DIR / TRADER_POLICY_FILE /
 TRADER_LOG_DIR), with a permissive policy, so the real `.data/` ledger and
@@ -8,9 +8,10 @@ Usage (from the project root):
     uv run --no-sync python .claude/scripts/smoke.py
         [--seconds 40] [--spec docs/examples/spec-random.json] [--seed 1]
 
-Runs a strategy spec (default: the random one) on the spec's own pair;
-`--seed` fixes the `random_chance` draws. The report comes from
-`ledger_dump.py` (the CLI has no ledger commands).
+Starts `serve paper` (the trade-runner), waits for its connection file, then
+`connect`s a strategy spec (default: the random one) on the spec's own pair;
+`--seed` fixes the `random_chance` draws. Trading is only `serve` + `connect`
+(B14). The report comes from `ledger_dump.py` (the CLI has no ledger commands).
 """
 
 import argparse
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # o random opera quase a cada tick: mais folga que o padrão do paper
 POLICY = "[paper.limits]\nmax_daily_notional_usd = 100000\nmax_trades_per_hour = 1000\n"
 ERROR_MARKERS = ("ERROR", "Traceback")
+MAIN = ["uv", "run", "--no-sync", "main.py"]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -58,25 +60,52 @@ def _stop(proc: subprocess.Popen) -> None:
     proc.wait()
 
 
-def _run_bot(args: argparse.Namespace, workdir: Path, env: dict) -> str:
-    cmd = ["uv", "run", "--no-sync", "main.py", "run", "paper", str(args.spec)]
-    cmd += ["--seed", args.seed]
-    print("$", " ".join(cmd), flush=True)
-    err_path = workdir / "err.txt"
-    with open(workdir / "out.txt", "wb") as out, open(err_path, "wb") as err:
-        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=out, stderr=err)
-        time.sleep(args.seconds)
-        exited = proc.poll()
-        _stop(proc)
-    if exited is not None:
-        print(f"[!] bot exited on its own before {args.seconds}s (code {exited})")
-    return _decode(err_path.read_bytes())
+def _start(args: list[str], workdir: Path, name: str, env: dict) -> subprocess.Popen:
+    print("$", " ".join(args), flush=True)
+    with (
+        open(workdir / f"{name}.out.txt", "wb") as out,
+        open(workdir / f"{name}.err.txt", "wb") as err,
+    ):
+        return subprocess.Popen(args, cwd=ROOT, env=env, stdout=out, stderr=err)
 
 
-def _report_log(log: str) -> None:
-    lines = log.splitlines()
+def _wait_for(path: Path, server: subprocess.Popen, seconds: float = 60) -> bool:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        if server.poll() is not None or time.monotonic() > deadline:
+            return False
+        time.sleep(0.5)
+    return True
+
+
+def _connect(args: argparse.Namespace, workdir: Path, env: dict) -> subprocess.Popen:
+    cmd = [*MAIN, "connect", str(args.spec), "--seed", args.seed]
+    client = _start(cmd, workdir, "connect", env)
+    time.sleep(args.seconds)
+    if client.poll() is not None:
+        print(f"[!] connect exited before {args.seconds}s (code {client.poll()})")
+    return client
+
+
+def _run_bot(args: argparse.Namespace, workdir: Path, env: dict) -> None:
+    server = _start([*MAIN, "serve", "paper"], workdir, "serve", env)
+    client = None
+    try:
+        if _wait_for(workdir / "data" / "trader-paper.json", server):
+            client = _connect(args, workdir, env)
+        else:
+            print("[!] serve paper did not come up (see its log below)")
+    finally:
+        for proc in (client, server):
+            if proc is not None:
+                _stop(proc)
+
+
+def _report_log(name: str, workdir: Path) -> None:
+    path = workdir / f"{name}.err.txt"
+    lines = _decode(path.read_bytes()).splitlines() if path.exists() else []
     errors = [line for line in lines if any(m in line for m in ERROR_MARKERS)]
-    print(f"--- stderr: {len(lines)} lines, {len(errors)} error lines")
+    print(f"--- {name} stderr: {len(lines)} lines, {len(errors)} error lines")
     print("\n".join(errors[:10] or lines[-15:]))
 
 
@@ -101,7 +130,9 @@ def main() -> int:
         "PYTHONIOENCODING": "utf-8",
         "COLUMNS": "200",  # rich wraps the log at 80 columns otherwise
     }
-    _report_log(_run_bot(args, workdir, env))
+    _run_bot(args, workdir, env)
+    for name in ("serve", "connect"):
+        _report_log(name, workdir)
     _report_ledger(env)
     print(f"--- state kept in {workdir}")
     return 0

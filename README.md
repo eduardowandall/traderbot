@@ -2,43 +2,49 @@
 
 A Solana trading bot that swaps tokens through the **Jupiter DEX**. Every
 strategy is a small JSON **spec** (entry conditions, a stop, exits, a budget);
-the bot runs one spec against live prices, and every order passes a risk
-policy and is recorded in a local ledger.
+a trade-runner holds the wallet and runs many specs against live prices, and
+every order passes a risk policy and is recorded in a local ledger.
 
 How the code works, following one trade: [`docs/architecture.md`](docs/architecture.md).
 
 ## Quick start (paper: no key, no money)
 
+In one terminal, the trade-runner (the wallet, the ledger, the prices):
+
 ```bash
 uv sync
-uv run main.py run paper docs/examples/spec-random.json --seed 1
+uv run main.py serve paper
+```
+
+In another, a spec connected to it:
+
+```bash
+uv run main.py connect docs/examples/spec-random.json --seed 1
 ```
 
 `paper` trades a **simulated wallet** (`.data/paper-wallet.json`, created with
-100 USDC and 0.5 SOL) at real Jupiter prices and quotes. Stop it with Ctrl+C.
+100 USDC and 0.5 SOL) at real Jupiter prices and quotes. Stop each with Ctrl+C.
 
 ## Commands
 
 ```bash
-uv run main.py run <paper|real> <spec.json> [--seed N] [--record-ticks FILE]
 uv run main.py serve <paper|real>
-uv run main.py connect <spec.json> [--trader FILE] [--seed N]
+uv run main.py connect <spec.json> [--trader FILE] [--seed N] [--record-ticks FILE]
 uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--json]
 ```
 
-- **Several specs at once:** start `serve <mode>` (the only process with the
-  key, the wallet and the ledger), then one `connect spec.json` per spec in its
-  own terminal (no key needed). Only one `run` or `serve` per mode can run at a
-  time; each spec's budget must fit the wallet together with the others.
-
-- **run**: the mode is required. The spec's `symbol` (`OUTPUT-INPUT`:
-  `SOL-USDC` buys SOL with USDC) is the pair. The spec trades in its own
-  bucket with its `budget_usd`; losing `max_loss_usd` retires it.
+- **serve**: the mode is required. The only process with the key, the wallet
+  and the ledger, and the only one that talks to Jupiter; one per mode. With
+  Telegram set up, it sends a daily report (fills, costs, PnL, open positions
+  marked to market) for the previous UTC day.
+- **connect**: one per spec, in its own terminal, no key needed. The spec's
+  `symbol` (`OUTPUT-INPUT`: `SOL-USDC` buys SOL with USDC) is the pair. The
+  trade-runner checks the spec against its policy; the spec trades in its own
+  bucket with its `budget_usd`, and losing `max_loss_usd` retires it. Each
+  spec's budget must fit the wallet together with the others.
   `--record-ticks` saves the prices for a later backtest, and
   `.claude/scripts/live_vs_backtest.py SPEC --ticks FILE` compares that
-  backtest with what the bucket actually did. With Telegram set up, `run` and
-  `serve` also send a daily report (fills, costs, PnL, open positions marked
-  to market) for the previous UTC day.
+  backtest with what the bucket actually did.
 - **backtest**: replays recent candles (or recorded ticks) with the spec's
   budget and prints a short summary (return, drawdown, trades); `--json`
   prints the full result as one JSON object. Any registry token can be the
@@ -54,7 +60,8 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
 ```bash
 cp .env.example .env    # fill in HELIUS_RPC_URL and SOLANA_PRIVATE_KEY
 cp policy.example.toml policy.toml   # set real_trading_enabled = true
-uv run --env-file .env main.py run real <spec.json>
+uv run --env-file .env main.py serve real
+uv run main.py connect <spec.json>      # in another terminal, per spec
 ```
 
 Use a dedicated low-balance wallet. Before a swap is signed, its quote is checked

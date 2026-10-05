@@ -378,3 +378,4 @@ All read-only; nothing was written to `.data/`.
 had to rebuild ticks from the log, at the 9 decimals `log_ticker` prints.
 Giving `connect` the same option would let
 `.claude/scripts/live_vs_backtest.py` replay exactly what each strategy saw.
+(Done in B14: `run` is gone and `connect` has `--record-ticks`.)

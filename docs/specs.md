@@ -182,8 +182,8 @@ Examples: `(sma(5) - sma(20)) / sma(20) > 0.01` (5-bar average 1% above the
 
 ## Limits checked before it runs
 
-`run` refuses a spec that breaks any of these (the backtest only checks the
-format):
+The trade-runner (`serve`) refuses a spec that breaks any of these when its
+`connect` says `hello` (the backtest only checks the format):
 
 - `symbol`: a known pair, two different tokens, output not a stablecoin, both
   in the policy's `allowed_symbols` if that list is set;
@@ -202,12 +202,14 @@ format):
    drawdown, win rate and the first trades (`--json` for the full result), and
    refuses too few bars for the warm-up.
    Few trades mean little: widen the window or loosen a condition.
-3. Run it in paper: `uv run main.py run paper my-spec.json` (or `/smoke --spec
-   my-spec.json` for an isolated 40s run with a report).
+3. Run it in paper: `uv run main.py serve paper` in one terminal and
+   `uv run main.py connect my-spec.json` in another (or `/smoke --spec
+   my-spec.json` for an isolated 40s run of both, with a report).
 4. Change the numbers and repeat. A different behaviour is a different id, so
    each version gets its own bucket and PnL.
-5. Real mode is the owner's step: `uv run --env-file .env main.py run real
-   my-spec.json`, with `real_trading_enabled = true` in `policy.toml`.
+5. Real mode is the owner's step: `uv run --env-file .env main.py serve real`,
+   then `uv run main.py connect my-spec.json`, with
+   `real_trading_enabled = true` in `policy.toml`.
 
 Most new ideas fit in an `expr`. A building block that doesn't exist yet (a
 new indicator, a crossover) is a code change: a model in `models.py`, its union

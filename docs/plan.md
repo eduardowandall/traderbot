@@ -38,7 +38,7 @@ once, and approving them for real money.
 
 | Goal | Done | Missing | Score |
 |---|---|---|---|
-| 1. Strategies are spec files written from the docs | Spec format; `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `run` validates the spec against the mode's policy and runs it in its own capped bucket with a max-loss stop; `backtest` prints JSON | Running several spec files at once (B3) | **70%** |
+| 1. Strategies are spec files written from the docs | Spec format; `docs/specs.md` is the authoring contract (a test keeps it in step with the code); the trade-runner validates the spec's terms against the mode's policy and runs it in its own capped bucket with a max-loss stop (`serve` + `connect`, B14); `backtest` prints JSON | Running several spec files at once (B3) | **70%** |
 | 2. Manual trades | Removed in stage U (no `swap` command) | Comes back with B2's wallet allocation | deferred |
 | 3. Structured strategy building | Spec v1: 18 condition types plus a restricted `expr`, `fixed_usd` and `pct_of_bucket` sizing, any registry token as the input (prices in the quote token, money in USD), required stop, converged warm-up, re-arm after exits, `ttl_days`; backtests replay direction-aware OHLC paths with slippage and refuse too little data; feed gaps cool the spec down; cooldown, re-arm and expiry survive restarts | No crossovers (an `expr` compares levels on the current bar, not across bars); ratio candles approximate the bar's high/low | **88%** |
 | 4. One wallet, bucket per strategy | Buckets with budget and max-loss caps; one bucket per spec id; per-bucket ledger account; partial exits kept per bucket; atomic authorization across processes | One strategy per process; no wallet treasury (a bucket without a budget can spend another's tokens, B2); no aggregate reconcile | **50%** |
@@ -94,7 +94,7 @@ Stages A, R, S, U and T are done; their designs and progress notes are in
   `max(0, budget_usd + min(0, realized_usd))`. Buckets are long-only, one
   position at a time.
 - The bucket check runs before `policy.evaluate`.
-- `run` refuses a spec whose sizing is above the mode's `max_trade_usd`
+- The trade-runner refuses (at `hello`) a spec whose sizing is above the mode's `max_trade_usd`
   (otherwise every buy would be denied). With B2, the budgets of the open
   buckets must fit the wallet.
 - **Exits don't depend on the strategy process.** On retire, expiry or
@@ -584,6 +584,32 @@ lifetime terms, so only those are shared now (2026-10-05).
 Tests: `StrategySpec.terms()` (fixed and pct sizing, both expiries), terms
 refused at `hello` (bad JSON shape, over the policy), the bucket opened from
 terms, and the live `connect`-through-`serve` test.
+
+#### B14. Trading is `serve` + `connect` only — S
+`run` was a second way to trade: the bot and the trade-runner in one process,
+with its own hub, its own candle reads and its own wiring. Every spec now
+trades through a trade-runner (2026-10-05).
+- **`run` is gone**, with `_run_bot` and `_check_limits`. To trade one spec:
+  `serve <mode>` in one terminal, `connect spec.json` in another. The
+  trade-runner validates the spec's terms at `hello` (B13), so `connect`
+  checks no policy itself.
+- **`--record-ticks` moves to `connect`**: each price the bot receives, and the
+  quote's USD for a non-stable pair, goes to the CSV that `backtest --ticks`
+  and `live_vs_backtest.py` replay.
+- **`trader/api/cli/bot.py` becomes `backtest.py`** (`backtest`, the cost
+  measurement, `MARKET_DATA`, `COST_QUOTES`, `SPEC_HELP`). `mode_lock` and
+  `limits_from_policy` move to `runners.py`, next to `serve`.
+- The process lock is one `serve` per mode. The daily report and the Telegram
+  fills come from `serve`.
+- **`/smoke`** starts an isolated `serve paper` plus a `connect` for the spec,
+  then reports both logs and the ledger.
+- The guard hook still blocks `run real` (an old habit) and blocks `serve
+  real`; its message points to `serve real`.
+- `LocalTradeClient` stays: the backtest and the tests use it.
+
+Tests: the CLI has `backtest`, `connect` and `serve`; `connect --seed` and
+`--record-ticks` reach the bot; an unreadable spec fails before connecting;
+`/smoke` end to end by hand.
 
 #### B8. Perpetual futures — L (planned in [`perps.md`](perps.md))
 Long and short perp positions with leverage, on Jupiter Perps, through the

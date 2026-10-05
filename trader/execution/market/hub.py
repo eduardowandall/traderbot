@@ -12,7 +12,7 @@
 `price(mint)` nunca espera o websocket: devolve o último valor, ou levanta
 `StalePriceError` se ele tem mais de `max_age` segundos (nenhuma estratégia
 decide com dado velho). O trade-runner (`serve`) roda um hub e o serve aos
-strategy-runners (op `price`); o `run` roda o seu no próprio processo.
+strategy-runners (op `price`).
 
 O hub também é o `PriceOracle` do processo (`usd_prices`): o serviço, a
 varredura, o relatório diário e a conferência das quotes leem dele, então só

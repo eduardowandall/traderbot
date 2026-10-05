@@ -93,7 +93,7 @@ def build_trade_service(
 ) -> TradeService:
     """O serviço que executa as ordens dos buckets deste modo.
 
-    `prices`: o oráculo USD do processo (o `PriceHub` no `run`/`serve`), para
+    `prices`: o oráculo USD do processo (o `PriceHub` do `serve`), para
     o serviço e a conferência das quotes; sem ele, a Price API no cliente
     Jupiter das quotes. Quem cria fecha: `service.aclose()` (provider) e o
     ledger do gateway.

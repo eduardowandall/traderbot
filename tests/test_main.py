@@ -13,7 +13,7 @@ from factories import example_spec, make_spec
 from typer.testing import CliRunner
 
 import main as main_module
-from trader.api.cli import bot as cli_bot
+from trader.api.cli import backtest as cli_bot
 from trader.api.cli.output import dumps
 from trader.execution.market.hub import PriceHub
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
@@ -127,8 +127,9 @@ def test_the_cli_commands():
     names = sorted(
         getattr(c.callback, "__name__", "") for c in main_module.app.registered_commands
     )
-    assert names == ["backtest", "connect", "run", "serve"]
+    assert names == ["backtest", "connect", "serve"]
     for gone in (
+        "run",  # B14: só `serve` + `connect` operam
         "swap",
         "halt",
         "resume",
@@ -141,58 +142,41 @@ def test_the_cli_commands():
         assert _invoke(gone).exit_code != 0
 
 
-# --- run -----------------------------------------------------------------------
+# --- serve / connect ---------------------------------------------------------
 
 
-def test_run_requires_the_mode():
-    result = _invoke("run", RANDOM_SPEC)
-    assert result.exit_code != 0
+def _serve(*args):
+    """`serve` até montar o trade-runner; devolve (resultado, runner)."""
+    with mock.patch("trader.api.cli.runners._serve", new=mock.AsyncMock()) as run:
+        result = _invoke("serve", *args)
+    assert run.call_args, result.output
+    return result, run.call_args.args[0]
 
 
-def test_run_rejects_dry_mode():
-    result = _invoke("run", "dry", RANDOM_SPEC)
-    assert result.exit_code != 0
+def test_serve_requires_the_mode():
+    assert _invoke("serve").exit_code != 0
+    assert _invoke("serve", "dry").exit_code != 0
 
 
-def test_run_seeds_the_spec():
-    with mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
-        result = _invoke("run", "paper", RANDOM_SPEC, "--seed", "1")
-
-    assert result.exit_code == 0, result.output
-    config = bot_cls.call_args.args[0]
-    assert isinstance(config.strategy, SpecStrategy)
-    assert config.symbol == "SOL-USDC"  # o par vem da spec
-    assert config.trader.name == f"strategy:{config.strategy.spec_id}"
-    assert config.strategy.rng.random() == random.Random("1").random()
-    # o relatório diário e o hub de preços rodam junto com o bot
-    report, prices = config.background
-    assert report.__self__.mode == "paper"
-    assert report.__self__.gateway is config.trader.service.gateway
-    assert isinstance(prices.__self__, PriceHub)
-    assert config.market.price_of.__self__ is prices.__self__  # o feed é o hub
-
-
-def test_run_paper_needs_no_private_key(monkeypatch):
+def test_serve_paper_needs_no_private_key(monkeypatch):
     monkeypatch.delenv("SOLANA_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("HELIUS_RPC_URL", raising=False)
-    with mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
-        result = _invoke("run", "paper", RANDOM_SPEC)
+    result, runner = _serve("paper")
 
     assert result.exit_code == 0, result.output
-    config = bot_cls.call_args.args[0]
-    assert config.trader.service.mode == "paper"
-    executor = config.trader.service.provider.executor
+    assert runner.service.mode == "paper"
+    executor = runner.service.provider.executor
     assert isinstance(executor, SimulatedExecutor)
     usdc = SOLANA_MINTS.get_by_symbol("USDC").mint
     assert executor.wallet.balance(usdc) == Decimal("100")
-    # vai para o stderr: o stdout fica reservado para o JSON do backtest
-    assert "Carteira paper criada" in result.stderr
-    assert "Carteira paper criada" not in result.stdout
+    # o hub de preços e o relatório diário rodam junto com o servidor
+    hub, report = runner.background
+    assert isinstance(hub.__self__, PriceHub)
+    assert report.__self__.gateway is runner.service.gateway
 
 
-def test_run_real_uses_the_key():
+def test_serve_real_uses_the_key():
     with (
-        mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls,
         mock.patch(
             "trader.execution.wiring.AsyncJupiterProvider.on_chain",
             return_value=mock.Mock(),
@@ -201,35 +185,45 @@ def test_run_real_uses_the_key():
             "trader.execution.wiring.keypair_from_env", return_value=mock.Mock()
         ) as key,
     ):
-        result = _invoke("run", "real", example_spec("wma-composer"))
+        result, runner = _serve("real")
 
     assert result.exit_code == 0, result.output
     key.assert_called_once()
-    assert bot_cls.call_args.args[0].trader.service.mode == "real"
+    assert runner.service.mode == "real"
 
 
-def test_run_record_ticks_passes_recorder():
-    with mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
-        result = _invoke("run", "paper", RANDOM_SPEC, "--record-ticks", "ticks/sol.csv")
+def _connect(*args):
+    with mock.patch("trader.api.cli.runners.strategy_bot") as build:
+        result = _invoke("connect", *args)
+    return result, build
+
+
+def test_connect_seeds_the_spec():
+    result, build = _connect(RANDOM_SPEC, "--seed", "1")
+
     assert result.exit_code == 0, result.output
-    on_tick = bot_cls.call_args.args[0].on_tick
+    strategy = build.call_args.args[0]
+    assert isinstance(strategy, SpecStrategy)
+    assert strategy.rng.random() == random.Random("1").random()
+    assert build.call_args.kwargs["on_tick"] is None
+    build.return_value.run.assert_called_once()
+
+
+def test_connect_record_ticks_passes_recorder():
+    result, build = _connect(RANDOM_SPEC, "--record-ticks", "ticks/sol.csv")
+    assert result.exit_code == 0, result.output
+    on_tick = build.call_args.kwargs["on_tick"]
     assert on_tick.__self__.path == Path("ticks/sol.csv")
 
 
-def test_run_rejects_an_unreadable_spec(tmp_path):
+def test_connect_rejects_an_unreadable_spec(tmp_path):
     path = tmp_path / "broken.json"
     path.write_text("{not json", encoding="utf-8")
-    missing = _invoke("run", "paper", "nope.json")
-    broken = _invoke("run", "paper", path)
+    missing, build = _connect("nope.json")
+    broken, _ = _connect(str(path))
     assert missing.exit_code != 0 and "nope.json" in missing.output
     assert broken.exit_code != 0 and "broken.json" in broken.output
-
-
-def test_run_refuses_a_spec_above_the_mode_limit(tmp_path):
-    policy_file().write_text("[paper.limits]\nmax_trade_usd = 10\n", encoding="utf-8")
-    result = _invoke("run", "paper", _spec_file(tmp_path))  # sizing 20 USD
-    assert result.exit_code != 0
-    assert "sizing" in result.output
+    build.assert_not_called()
 
 
 def test_notifier_comes_from_the_env(monkeypatch):

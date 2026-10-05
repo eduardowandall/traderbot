@@ -2,7 +2,8 @@
 
 Wraps `main.py backtest --json` and trims the result down to its
 headline numbers plus the first few trades. The backtest also reports format
-errors in the spec; the mode's policy limits are checked by `run`.
+errors in the spec; the mode's policy limits are checked by the trade-runner
+(`serve`) when a `connect` says `hello`.
 
 Usage (from the project root):
     uv run --no-sync python .claude/scripts/spec_check.py SPEC.json

@@ -1,8 +1,8 @@
 """`JupiterMarketData`: preços e candles direto da Jupiter (sem chave).
 
 Camada market: só lê dados públicos, sem chave, carteira nem RPC. Roda no
-trade-runner (candles do op `candles`), no `run` (candles do aquecimento) e no
-backtest; os strategy-runners leem pelo trade-runner. Quem executa swaps fica em
+trade-runner (candles do op `candles`) e no backtest; os strategy-runners leem
+pelo trade-runner. Quem executa swaps fica em
 `trader.execution.trade.venues.jupiter.async_jupiter_svc`.
 """
 

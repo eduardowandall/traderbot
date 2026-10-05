@@ -1,8 +1,8 @@
 """O feed que a estratégia lê: `MarketData`, e `HubMarketData` sobre um hub.
 
 Sem rede: quem fala com a Jupiter é o trade-runner (`trader.execution.market`).
-No `run`, os preços vêm do `PriceHub` do processo; num `connect`, do
-trade-runner (ops `price` e `candles`). Camada market.
+Num `connect`, preços e candles vêm do trade-runner (ops `price` e
+`candles`). Camada market.
 """
 
 import asyncio
@@ -31,9 +31,9 @@ class MarketData(CandleSource, Protocol):
 class HubMarketData:
     """`MarketData` com preços de um hub (local ou do trade-runner).
 
-    `price_of(mint)` é `PriceHub.get` no `run`, ou `RemoteTradeClient.price`
-    num `connect`. Candles (só no aquecimento) vêm de `candles`: a Jupiter no
-    `run`, `RemoteCandles` (op `candles`) num `connect`.
+    `price_of(mint)` é `RemoteTradeClient.price` num `connect` (ou
+    `PriceHub.get` num processo com hub próprio). Candles (só no aquecimento)
+    vêm de `candles`: `RemoteCandles` (op `candles`) num `connect`.
 
     O hub responde na hora, então o feed dá o ritmo do bot: um preço a cada
     `interval` segundos (antes, o ritmo era o das mensagens do websocket).

@@ -1,5 +1,5 @@
 ---
-description: Smoke-run the bot in paper mode with isolated state, then report the log, ledger and PnL
+description: Smoke-run a spec in paper (an isolated serve + connect), then report both logs, the ledger and PnL
 argument-hint: "[--seconds N] [--spec FILE] [--seed N]"
 allowed-tools: Bash(uv run --no-sync python .claude/scripts/smoke.py:*)
 ---
@@ -11,6 +11,9 @@ uv run --no-sync python .claude/scripts/smoke.py $ARGUMENTS
 ```
 
 - Defaults: `docs/examples/spec-random.json` with `seed=1`, for 40s, in paper.
+- It starts `serve paper`, waits for its connection file, then runs
+  `connect` for the spec (trading is only `serve` + `connect`, B14), and
+  reports each process's stderr.
 - State lives in a fresh `tb-smoke-*` temp dir with a permissive policy, so the
   real `.data/` ledger and paper wallet are never touched. The path is printed
   at the end.

@@ -27,8 +27,8 @@ _ENV_DUMP = re.compile(r"\bprintenv\b|\benv:(?!\w)", re.IGNORECASE)
 
 REASONS = {
     "real": (
-        "modo real é do dono: rode `main.py run real` você mesmo num terminal "
-        "(sessões de agente só usam paper e backtest)"
+        "modo real é do dono: rode `main.py serve real` (e os `connect`) você "
+        "mesmo num terminal (sessões de agente só usam paper e backtest)"
     ),
     "env_file": "--env-file carrega a chave da carteira; só o dono usa (modo real)",
     "policy_file": "TRADER_POLICY_FILE troca a política de risco; só o dono muda",
@@ -63,7 +63,10 @@ def _tokens(part: str) -> list[str]:
 
 
 def _starts_real_mode(part: str) -> bool:
-    """`... main.py ... run|serve ... real ...`, em qualquer ordem de opções."""
+    """`... main.py ... serve ... real ...`, em qualquer ordem de opções.
+
+    `run` saiu no B14, mas segue bloqueado: um `run real` antigo não passa.
+    """
     tokens = [t.strip("'\"").lower() for t in _tokens(part)]
     for i, token in enumerate(tokens):
         if token.replace("\\", "/").endswith("main.py"):

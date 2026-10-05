@@ -8,7 +8,7 @@ lado da estratégia (`trader.strategy.spec.parse`).
 
 `SpecLimits` é um dado simples, não a `Policy`: a camada de estratégia não
 importa a política (camada de risco). Quem monta os limites a partir da
-política é a camada de aplicação (`trader/api/cli/bot.py`). Esta validação é
+política é a camada de aplicação (`trader/api/cli/runners.py`). Esta validação é
 consultiva: quem executa (o gateway) valida de novo com a política dele.
 """
 

@@ -15,7 +15,7 @@ from trader.shared.market.pair import market_for
 from trader.shared.notification.notification_service import Notifier
 from trader.shared.paths import data_dir
 from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
-from trader.strategy.bot.config import BotConfig
+from trader.strategy.bot.config import BotConfig, OnTick
 from trader.strategy.spec.strategy import SpecStrategy
 from trader.strategy.trading_service.remote import RemoteCandles, RemoteTradeClient
 
@@ -38,6 +38,7 @@ def strategy_bot(
     strategy: SpecStrategy,
     connection_file: Path | None,
     notifier: Notifier,
+    on_tick: OnTick | None = None,
 ) -> AsyncWebsocketTradingBot:
     """O bot da spec, com ordens, preços e candles pelo trade-runner.
 
@@ -64,5 +65,6 @@ def strategy_bot(
         market=market,
         trader=trader,
         notifier=notifier,
+        on_tick=on_tick,
     )
     return AsyncWebsocketTradingBot(config)

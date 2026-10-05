@@ -16,25 +16,24 @@ roadmap: [`docs/plan.md`](docs/plan.md) (plan there first, then implement).
 - CI (`.github/workflows/ci.yml`, ubuntu + windows): ruff check, ruff format
   --check, pyright, pytest. `live.yml` runs the live suite on demand.
 - Scripts in `.claude/scripts/`, run with `uv run --no-sync python .claude/scripts/<x>.py`:
-  `check.py` (the CI gate, one line per step), `smoke.py` (isolated paper run +
-  report), `spec_check.py` (backtest headline), `ledger_dump.py` (read-only JSON
+  `check.py` (the CI gate, one line per step), `smoke.py` (isolated `serve paper` +
+  `connect`, then a report), `spec_check.py` (backtest headline), `ledger_dump.py` (read-only JSON
   of a ledger and the paper wallet), `live_vs_backtest.py SPEC --ticks FILE`
   (a `--record-ticks` file replayed next to the bucket's legs in the same
   window). Slash commands wrap them: `/check`,
   `/smoke`, `/spec`, `/diagnose`, `/phase`, `/sync-docs`.
 
-## The CLI: `run`, `serve`, `connect`, `backtest`
+## The CLI: `serve`, `connect`, `backtest`
 ```bash
-uv run main.py run paper docs/examples/spec-random.json [--seed N] [--record-ticks FILE]
-uv run --env-file .env main.py run real <spec.json>
 uv run main.py serve paper                      # trade-runner: key, wallet, ledger
-uv run main.py connect <spec.json> [--trader FILE] [--seed N]   # one per spec, no key
+uv run main.py connect <spec.json> [--trader FILE] [--seed N] [--record-ticks FILE]   # one per spec, no key
+uv run --env-file .env main.py serve real       # the owner only
 uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--json]
 ```
-- **One execution process per mode** (`trader/api/cli/lock.py`, an OS lock on
-  `.data/trader-<mode>.lock`): `run` or `serve`, never both. One spec: `run`.
-  Several specs at once: one `serve <mode>` plus one `connect spec.json` per
-  spec. `serve` writes `{host, port, token, pid}` to `.data/trader-<mode>.json`;
+- **Trading is `serve` + `connect` only** (B14; there is no `run`). One
+  `serve <mode>` per mode (`trader/api/cli/lock.py`, an OS lock on
+  `.data/trader-<mode>.lock`), plus one `connect spec.json` per spec, in its
+  own terminal (even for a single spec). `serve` writes `{host, port, token, pid}` to `.data/trader-<mode>.json`;
   `connect` finds it (or `--trader FILE`), sends the spec's terms (B13:
   `SpecTerms`, from `spec.terms()`: id, symbol, budget, max loss, largest buy,
   expiry; the full spec stays in `connect`), and the trade-runner validates
@@ -46,7 +45,7 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
 - **Prices come from a hub** (`trader/execution/market/hub.py`, B7): one websocket for
   every mint plus a batched Price API poll for quiet ones. `serve` runs it and
   answers `connect`s through the `price` op (warm-up candles through the
-  `candles` op, B12); `run` runs its own. A price older
+  `candles` op, B12). A price older
   than 30s raises `StalePriceError` (no decisions on stale data), and
   `HubMarketData` paces each bot at one price per second. The hub is also
   the process's `PriceOracle` (B10): `build_trade_service(prices=hub)` gives
@@ -62,13 +61,15 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   quotes, no key) and `real` (needs `SOLANA_PRIVATE_KEY` + `HELIUS_RPC_URL`;
   optional `SOLANA_PUBLIC_KEY` is checked against the key). The mode has no
   default. There is no dry mode.
-- `run` validates the spec against the mode's policy and trades in bucket
-  `strategy:<spec_id>` with the spec's `budget_usd`; reaching `-max_loss_usd`
-  retires the bucket. Telegram turns on when `TELEGRAM_CHAT_ID` and
-  `TELEGRAM_BOT_TOKEN` are set: fills (with the bucket's PnL and open
-  mark-to-market) and, from `run`/`serve`, a daily report of the previous UTC
+- At `hello`, the trade-runner validates the spec's terms against the mode's
+  policy and trades in bucket `strategy:<spec_id>` with the spec's
+  `budget_usd`; reaching `-max_loss_usd` retires the bucket. `connect
+  --record-ticks FILE` writes every price the bot gets (and the quote's USD) for
+  `backtest --ticks`. Telegram turns on when `TELEGRAM_CHAT_ID` and
+  `TELEGRAM_BOT_TOKEN` are set: fills from `connect` (with the bucket's PnL and
+  open mark-to-market) and, from `serve`, a daily report of the previous UTC
   day (`trader/execution/notification/daily_report.py`, once per day via a
-  `daily_report` ledger event). Ctrl+C stops it (on Windows, a test run is
+  `daily_report` ledger event). Ctrl+C stops them (on Windows, a test run is
   stopped with `taskkill /PID <uv pid> /T /F`).
 - `backtest` prints a short readable summary (errors as `erro: path: msg` on
   stderr, exit 1). `--json` prints one JSON object instead, with every trade
@@ -101,7 +102,8 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
 - Strategies are created as **spec files written from
   [`docs/specs.md`](docs/specs.md)** (the whole contract), kept in
   `docs/examples/`. There is no command to create or submit one, and agents
-  don't use a CLI: write the file, `backtest` it, `run paper` it, iterate.
+  don't use a CLI: write the file, `backtest` it, `/smoke --spec` it (an
+  isolated `serve paper` + `connect`), iterate.
 - Every strategy is a JSON spec run by `SpecStrategy`. Composition is
   `entry.mode`/`exit.mode` (`all`/`any`).
 - Exactly one of `expires_at` or `ttl_days` (counted from the first tick).
@@ -123,7 +125,7 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
 Agent sessions work in paper and backtests only. `.claude/settings.json` denies
 reading `.env` and editing `.env`/`policy.toml`, and the PreToolUse hook
 `.claude/hooks/guard_commands.py` blocks shell commands that start real mode
-(`main.py run real`), use `--env-file`, set `TRADER_POLICY_FILE`, mention `.env`,
+(`main.py serve real`, and the old `run real`), use `--env-file`, set `TRADER_POLICY_FILE`, mention `.env`,
 print `SOLANA_PRIVATE_KEY`/`HELIUS_RPC_URL`, mention `ledger-real.sqlite3` or
 `trader-real` (the real trade-runner's token and lock), or run `serve real`.
 It matches the command text, so edit docs that mention these with the Edit
