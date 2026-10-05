@@ -15,14 +15,14 @@ import argparse
 import sys
 from dataclasses import asdict
 
-from trader.cli.output import dumps
-from trader.execution import TradeGateway
-from trader.ledger import Ledger, ledger_path
-from trader.ledger.store import LedgerFormatError
-from trader.models import SOLANA_MINTS
-from trader.paper import SimulatedWallet
-from trader.policy import Policy
-from trader.wiring import paper_wallet_path
+from trader.api.cli.output import dumps
+from trader.execution.gateway import TradeGateway
+from trader.execution.ledger import Ledger, ledger_path
+from trader.execution.ledger.store import LedgerFormatError
+from trader.execution.policy import Policy
+from trader.execution.venues.paper import SimulatedWallet
+from trader.execution.wiring import paper_wallet_path
+from trader.shared.models import SOLANA_MINTS
 
 
 def _parse_args() -> argparse.Namespace:

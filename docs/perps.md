@@ -92,7 +92,7 @@ the provider all the way to the ledger columns.
 | Pure policy | `policy/policy.py` `evaluate` | New rules are new functions in the tuple |
 | `Executor` protocol | `providers/jupiter/executor.py` | Paper vs real is already pluggable, for swaps |
 | Layer map | `tests/test_architecture.py` | New modules get a layer and stay out of strategy code |
-| Process split and lock | `trader/runners/` | One trade-runner per mode holds every bucket, spot or perp |
+| Process split and lock | `trader/execution/runner.py`, `trader/strategy/runner.py`, `trader/api/cli/lock.py` | One trade-runner per mode holds every bucket, spot or perp |
 
 ### 4.2 Where spot is baked in (fix before perps, or with them)
 
@@ -232,7 +232,7 @@ on 2026-10-03; the rest are the design.
 
 ### 6.2 Paper and backtest engine
 
-`trader/paper/perps.py` (venue layer), shared by paper and backtest:
+`trader/execution/venues/paper/perps.py` (venue layer), shared by paper and backtest:
 - positions kept in `paper-wallet.json` under a `perps` key, under the
   existing file lock;
 - open/close at the feed price plus the Jupiter fee model: 0.06% of size each

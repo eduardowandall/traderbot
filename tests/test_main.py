@@ -13,22 +13,22 @@ from factories import example_spec, make_spec
 from typer.testing import CliRunner
 
 import main as main_module
-from trader.cli import bot as cli_bot
-from trader.cli.output import dumps
-from trader.execution import TradeGateway
-from trader.market.hub import PriceHub
-from trader.models import SOLANA_MINTS, TickerData
-from trader.models.mints import SOL_MINT
-from trader.models.mode import RunningMode
-from trader.notification import (
+from trader.api.cli import bot as cli_bot
+from trader.api.cli.output import dumps
+from trader.execution.gateway import TradeGateway
+from trader.execution.models.mode import RunningMode
+from trader.execution.venues.paper import SimulatedExecutor
+from trader.shared.market.hub import PriceHub
+from trader.shared.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.shared.models import SOLANA_MINTS, TickerData
+from trader.shared.models.mints import SOL_MINT
+from trader.shared.notification import (
     NotificationService,
     TelegramNotificationService,
     notifier_from_env,
 )
-from trader.paper import SimulatedExecutor
-from trader.paths import policy_file
-from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.strategy_spec.strategy import SpecStrategy
+from trader.shared.paths import policy_file
+from trader.strategy.spec.strategy import SpecStrategy
 
 RANDOM_SPEC = example_spec("random")
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
@@ -155,7 +155,7 @@ def test_run_rejects_dry_mode():
 
 
 def test_run_seeds_the_spec():
-    with mock.patch("trader.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
+    with mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
         result = _invoke("run", "paper", RANDOM_SPEC, "--seed", "1")
 
     assert result.exit_code == 0, result.output
@@ -175,7 +175,7 @@ def test_run_seeds_the_spec():
 def test_run_paper_needs_no_private_key(monkeypatch):
     monkeypatch.delenv("SOLANA_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("HELIUS_RPC_URL", raising=False)
-    with mock.patch("trader.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
+    with mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
         result = _invoke("run", "paper", RANDOM_SPEC)
 
     assert result.exit_code == 0, result.output
@@ -192,11 +192,14 @@ def test_run_paper_needs_no_private_key(monkeypatch):
 
 def test_run_real_uses_the_key():
     with (
-        mock.patch("trader.cli.bot.AsyncWebsocketTradingBot") as bot_cls,
+        mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls,
         mock.patch(
-            "trader.wiring.AsyncJupiterProvider.on_chain", return_value=mock.Mock()
+            "trader.execution.wiring.AsyncJupiterProvider.on_chain",
+            return_value=mock.Mock(),
         ),
-        mock.patch("trader.wiring.keypair_from_env", return_value=mock.Mock()) as key,
+        mock.patch(
+            "trader.execution.wiring.keypair_from_env", return_value=mock.Mock()
+        ) as key,
     ):
         result = _invoke("run", "real", example_spec("wma-composer"))
 
@@ -206,7 +209,7 @@ def test_run_real_uses_the_key():
 
 
 def test_run_record_ticks_passes_recorder():
-    with mock.patch("trader.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
+    with mock.patch("trader.api.cli.bot.AsyncWebsocketTradingBot") as bot_cls:
         result = _invoke("run", "paper", RANDOM_SPEC, "--record-ticks", "ticks/sol.csv")
     assert result.exit_code == 0, result.output
     on_tick = bot_cls.call_args.args[0].on_tick

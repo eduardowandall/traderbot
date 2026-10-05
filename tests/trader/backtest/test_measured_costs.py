@@ -6,10 +6,10 @@ import pytest
 from factories import make_spec
 
 from trader.backtest.costs import measure_costs, network_fee_usd
-from trader.models import SOLANA_MINTS
-from trader.models.mints import SOL_MINT
-from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.strategy_spec.models import StrategySpec
+from trader.shared.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.shared.models import SOLANA_MINTS
+from trader.shared.models.mints import SOL_MINT
+from trader.shared.spec.models import StrategySpec
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
 USDC = SOLANA_MINTS.get_by_symbol("USDC")

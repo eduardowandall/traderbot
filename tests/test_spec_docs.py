@@ -8,9 +8,9 @@ import json
 
 import pytest
 
-from trader.paths import PROJECT_ROOT
-from trader.strategy_spec.conditions import PREDICATES
-from trader.strategy_spec.models import StrategySpec
+from trader.shared.paths import PROJECT_ROOT
+from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.conditions import PREDICATES
 
 GUIDE = (PROJECT_ROOT / "docs" / "specs.md").read_text(encoding="utf-8")
 

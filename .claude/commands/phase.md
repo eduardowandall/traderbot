@@ -19,7 +19,7 @@ marked as waiting for the owner, following the stage order the plan gives).
    - layering: add new modules to the map in `tests/test_architecture.py`;
    - ruff complexity is at most 5;
    - strategies use `self.clock()` / `self.rng`;
-   - state paths go through `trader/paths.py`;
+   - state paths go through `trader/shared/paths.py`;
    - test file basenames are unique, and shared helpers go in `tests/factories.py`.
 4. **Verify.** Run `uv run --no-sync python .claude/scripts/check.py` until it
    prints `ALL GREEN`. If the phase touches the run loop, execution or the

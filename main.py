@@ -1,9 +1,9 @@
-"""Ponto de entrada: `uv run main.py <comando>`. Os comandos estão em `trader/cli/`."""
+"""Ponto de entrada: `uv run main.py <comando>`. Os comandos estão em `trader/api/cli/`."""
 
 import sys
 
-from trader import logging_config
-from trader.cli import app
+from trader.api.cli import app
+from trader.shared import logging_config
 
 __all__ = ["app", "main"]
 

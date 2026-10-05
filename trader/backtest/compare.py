@@ -15,14 +15,14 @@ from decimal import Decimal
 from trader.backtest.replay import BacktestTrade
 from trader.backtest.spec import ReplayCosts, result_to_dict, spec_backtester
 from trader.backtest.ticks import Tick
-from trader.indicators import to_utc
-from trader.ledger import Ledger
-from trader.market import MarketData
-from trader.models import SOLANA_MINTS, OrderSide, TickerData
-from trader.models.costs import BPS
-from trader.models.intent import IntentRecord
-from trader.models.order import order_from_json
-from trader.strategy_spec.models import StrategySpec
+from trader.execution.ledger import Ledger
+from trader.execution.models.intent import IntentRecord
+from trader.shared.indicators import to_utc
+from trader.shared.market import MarketData
+from trader.shared.models import SOLANA_MINTS, OrderSide, TickerData
+from trader.shared.models.costs import BPS
+from trader.shared.models.order import order_from_json
+from trader.shared.spec.models import StrategySpec
 
 MAX_CANDLES = 1000  # o que a API de candles devolve por pedido
 

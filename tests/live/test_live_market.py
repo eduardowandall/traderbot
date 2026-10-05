@@ -11,19 +11,19 @@ from solders.keypair import Keypair
 
 from trader.backtest.compare import fetch_warmup
 from trader.backtest.ticks import PATH_STEPS
-from trader.market import JupiterMarketData, JupiterPriceOracle
-from trader.market.hub import PriceHub
-from trader.market.pair import market_for
-from trader.market.prices import usd_snapshot
-from trader.models import SOLANA_MINTS, Interval
-from trader.paths import PROJECT_ROOT
-from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.providers.jupiter.tx_inspection import (
+from trader.execution.venues.jupiter.tx_inspection import (
     JUPITER_V6,
     check_programs,
     programs_of,
 )
-from trader.strategy_spec.validate import parse_spec
+from trader.shared.market import JupiterMarketData, JupiterPriceOracle
+from trader.shared.market.hub import PriceHub
+from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.shared.market.pair import market_for
+from trader.shared.market.prices import usd_snapshot
+from trader.shared.models import SOLANA_MINTS, Interval
+from trader.shared.paths import PROJECT_ROOT
+from trader.shared.spec.validate import parse_spec
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
 JUP = SOLANA_MINTS.get_by_symbol("JUP").mint

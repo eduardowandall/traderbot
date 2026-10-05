@@ -8,10 +8,10 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from trader.ledger import Ledger
-from trader.models import SOLANA_MINTS
-from trader.models.intent import IntentSide, TradeIntent
-from trader.paths import PROJECT_ROOT
+from trader.execution.ledger import Ledger
+from trader.execution.models.intent import IntentSide, TradeIntent
+from trader.shared.models import SOLANA_MINTS
+from trader.shared.paths import PROJECT_ROOT
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
@@ -50,7 +50,7 @@ def make_order(
     output_mint: str = SOL,
 ):
     """Fill de USDC <-> token com valores nativos (custo = quantidade x preço)."""
-    from trader.models import Order, OrderSide
+    from trader.shared.models import Order, OrderSide
 
     return Order(
         order_id=f"{side}-{price}-{timestamp}",
@@ -68,8 +68,8 @@ def make_order(
 
 def record_executed(ledger: Ledger, intent: TradeIntent, order=None, realized=None):
     """Grava `intent` como executada (e a ordem, com PnL em vendas)."""
-    from trader.models import SwapResult
-    from trader.models.intent import PolicyDecision
+    from trader.execution.models.intent import PolicyDecision
+    from trader.shared.models import SwapResult
 
     ledger.record_intent(intent, PolicyDecision(True))
     ledger.mark_executed(
@@ -113,7 +113,7 @@ def open_ledger() -> Ledger:
 
 def memory_gateway(policy=None):
     """`TradeGateway.in_memory()` com o ledger fechado ao fim do teste."""
-    from trader.execution import TradeGateway
+    from trader.execution.gateway import TradeGateway
 
     gateway = TradeGateway.in_memory(policy)
     _OPEN_LEDGERS.append(gateway.ledger)
@@ -166,7 +166,7 @@ def bonk_quote():
 
     `priceImpactPct` é fração (0.005 == 0.5%), não percentual.
     """
-    from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
+    from trader.shared.market.jupiter.jupiter_data import JupiterQuoteResponse
 
     return JupiterQuoteResponse.single_route(
         USDC, 50_000_000, BONK, 5_000_000, price_impact_pct="0.005"
@@ -182,8 +182,8 @@ def mock_provider(**attrs):
     """
     from unittest.mock import AsyncMock
 
-    from trader.models.costs import QUOTE, TradeCosts
-    from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
+    from trader.execution.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
+    from trader.shared.models.costs import QUOTE, TradeCosts
 
     provider = AsyncMock(spec=AsyncJupiterProvider)
     provider.native_fee_reserve = Decimal("0.02")
@@ -213,7 +213,7 @@ class StubStrategy:
         return None
 
     def warmup(self):
-        from trader.models import Interval
+        from trader.shared.models import Interval
 
         return Interval.SECOND_15, 100
 
@@ -240,7 +240,7 @@ def inspection_passes(rpc, lamports: int = 10**9):
     """
     from unittest.mock import AsyncMock
 
-    from trader.providers.jupiter.tx_inspection import WalletState
+    from trader.execution.venues.jupiter.tx_inspection import WalletState
 
     rpc.wallet_state = AsyncMock(return_value=WalletState(lamports, {}))
     rpc.simulate_transaction = AsyncMock(return_value=simulation(lamports))

@@ -7,9 +7,9 @@ from factories import bonk_quote, close_open_ledgers, inspection_passes, open_le
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, VersionedTransaction
 
-from trader.models import SOLANA_MINTS
-from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.providers.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.shared.models import SOLANA_MINTS
 
 
 @pytest.fixture

@@ -12,9 +12,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from trader.indicators import to_utc
-from trader.models import TickerData
-from trader.models.public_data import Interval
+from trader.shared.indicators import to_utc
+from trader.shared.models import TickerData
+from trader.shared.models.public_data import Interval
 
 
 @dataclass(frozen=True, slots=True)

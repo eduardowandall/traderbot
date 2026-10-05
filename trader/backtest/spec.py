@@ -11,13 +11,13 @@ from decimal import Decimal
 
 from trader.backtest.replay import Backtester, BacktestResult
 from trader.backtest.ticks import Tick, ticks_from_candles
-from trader.indicators import to_utc
-from trader.market import MarketData
-from trader.market.pair import ratio_candles
-from trader.models import SOLANA_MINTS, TickerData
-from trader.models.public_data import Interval
-from trader.strategy_spec.models import StrategySpec
-from trader.strategy_spec.strategy import SpecStrategy
+from trader.shared.indicators import to_utc
+from trader.shared.market import MarketData
+from trader.shared.market.pair import ratio_candles
+from trader.shared.models import SOLANA_MINTS, TickerData
+from trader.shared.models.public_data import Interval
+from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.strategy import SpecStrategy
 
 DEFAULT_BACKTEST_CANDLES = 1000
 # barras avaliadas depois do aquecimento, no mínimo

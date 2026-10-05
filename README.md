@@ -97,7 +97,7 @@ override only in that mode.
 - **The circuit breaker** (3 failures in a row) re-arms when you restart the bot.
 - **Starting paper over:** delete `.data/paper-wallet.json` and
   `.data/ledger-paper.sqlite3`.
-- **A new token** goes in `SOLANA_MINTS` (`trader/models/mints.py`).
+- **A new token** goes in `SOLANA_MINTS` (`trader/shared/models/mints.py`).
 
 ## Development
 

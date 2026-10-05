@@ -10,9 +10,9 @@ from trader.backtest import (
     TickRecorder,
     load_ticks,
 )
-from trader.models import OrderSide, OrderSignal
-from trader.strategy_spec.models import StrategySpec
-from trader.strategy_spec.strategy import SpecStrategy
+from trader.shared.models import OrderSide, OrderSignal
+from trader.shared.spec.models import StrategySpec
+from trader.strategy.spec.strategy import SpecStrategy
 
 ONE = Decimal(1)
 

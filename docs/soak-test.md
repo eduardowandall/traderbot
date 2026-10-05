@@ -146,7 +146,7 @@ console only shows WARNING and up for these loggers):
   closes, for whatever reason.
 
 A refused `hello` was already logged (`Pedido recusado: HelloError: ...`).
-Tested in `tests/trader/runners/test_runners.py`
+Tested in `tests/trader/api/cli/test_runners.py`
 (`test_the_log_shows_bucket_opens_connects_and_disconnects`). A running
 trade-runner gets the new lines when it restarts; its `connect`s reconnect on
 their own (§4.2).

@@ -25,16 +25,16 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from trader.api.cli.output import dumps, errors_of
 from trader.backtest import load_ticks
 from trader.backtest.compare import compare_live, fetch_warmup
 from trader.backtest.costs import resolve_costs
 from trader.backtest.spec import ReplayCosts
-from trader.cli.output import dumps, errors_of
-from trader.ledger import Ledger, ledger_path
-from trader.market import JupiterMarketData
-from trader.market.pair import market_for
-from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.strategy_spec.validate import parse_spec
+from trader.execution.ledger import Ledger, ledger_path
+from trader.shared.market import JupiterMarketData
+from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.shared.market.pair import market_for
+from trader.shared.spec.validate import parse_spec
 
 
 def _parse_args() -> argparse.Namespace:

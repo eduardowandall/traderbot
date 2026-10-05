@@ -9,9 +9,9 @@ from pathlib import Path
 
 from factories import example_spec
 
-from trader.ledger import Ledger, ledger_path
-from trader.models.intent import IntentStatus
-from trader.paths import PROJECT_ROOT, data_dir, policy_file
+from trader.execution.ledger import Ledger, ledger_path
+from trader.execution.models.intent import IntentStatus
+from trader.shared.paths import PROJECT_ROOT, data_dir, policy_file
 
 RUN_SECONDS = 35
 POLICY = "[paper.limits]\nmax_daily_notional_usd = 100000\nmax_trades_per_hour = 1000\n"

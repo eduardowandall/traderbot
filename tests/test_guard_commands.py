@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from trader.paths import PROJECT_ROOT
+from trader.shared.paths import PROJECT_ROOT
 
 HOOK = PROJECT_ROOT / ".claude" / "hooks" / "guard_commands.py"
 _spec = importlib.util.spec_from_file_location("guard_commands", HOOK)

@@ -8,9 +8,9 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 
-from trader.models import SOLANA_MINTS
-from trader.paths import PROJECT_ROOT
-from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.shared.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.shared.models import SOLANA_MINTS
+from trader.shared.paths import PROJECT_ROOT
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
 USDC = SOLANA_MINTS.get_by_symbol("USDC")

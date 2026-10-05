@@ -14,7 +14,7 @@
 [trading]
 # Modo real bloqueado até você habilitar explicitamente (padrão: false).
 # real_trading_enabled = false
-# Símbolos permitidos (de trader/models/mints.py). Vazio = todos.
+# Símbolos permitidos (de trader/shared/models/mints.py). Vazio = todos.
 # allowed_symbols = []
 # Permite compras sem estimativa em USD (quando nenhum lado é USDC/USDT e não
 # há preço de mercado). Essas compras não entram no orçamento.

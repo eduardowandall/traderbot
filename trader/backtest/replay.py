@@ -23,16 +23,16 @@ from datetime import datetime
 from decimal import ROUND_CEILING, Decimal
 
 from trader.backtest.ticks import Tick
-from trader.bot.config import Strategy
-from trader.bot.decision import bucket_done, order_for
-from trader.execution import TradeGateway
-from trader.models import SOLANA_MINTS, Mint, OrderSide, TickerData
-from trader.models.costs import BPS, REPLAY, RoundTripCosts
-from trader.paper.provider import paper_provider
-from trader.paper.wallet import SimulatedWallet
-from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.trading_service.local import LocalTradeClient
-from trader.trading_service.service import TradeService
+from trader.execution.gateway import TradeGateway
+from trader.execution.trading_service.local import LocalTradeClient
+from trader.execution.trading_service.service import TradeService
+from trader.execution.venues.paper.provider import paper_provider
+from trader.execution.venues.paper.wallet import SimulatedWallet
+from trader.shared.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.shared.models import SOLANA_MINTS, Mint, OrderSide, TickerData
+from trader.shared.models.costs import BPS, REPLAY, RoundTripCosts
+from trader.strategy.bot.config import Strategy
+from trader.strategy.bot.decision import bucket_done, order_for
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ ONE = Decimal("1")
 
 # loggers das estratégias: silenciados durante o replay (milhares de ticks
 # viram milhares de linhas; o resultado já resume o que aconteceu)
-STRATEGY_LOGGERS = ("trader.strategy_spec",)
+STRATEGY_LOGGERS = ("trader.strategy.spec",)
 
 
 @contextmanager
