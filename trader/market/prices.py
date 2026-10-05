@@ -6,12 +6,16 @@ custos em SOL de pares sem SOL. Camada market: só lê dados públicos.
 Quem executa tira um retrato dos preços **antes** do trade
 (`usd_snapshot`), porque nada depois de EXECUTED pode falhar; e o retrato
 nunca levanta: sem preço, o valor só fica desconhecido.
+
+USDC/USDT valem exatamente 1 USD em todo o código (o valor de um trade pago
+em stablecoin é o valor gasto). A regra mora aqui, em `usd_snapshot` e
+`price_fn`, com ou sem oráculo; os oráculos só devolvem preços de mercado.
 """
 
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection
 from decimal import Decimal
 from typing import Protocol
 
@@ -36,11 +40,7 @@ def _is_stable(mint: str) -> bool:
 
 
 class JupiterPriceOracle:
-    """Price API V3 com cache curto por mint.
-
-    USDC/USDT valem exatamente 1 USD, como no resto do código (o valor de um
-    trade pago em stablecoin é o valor gasto).
-    """
+    """Price API V3 com cache curto por mint (quem não tem um `PriceHub`)."""
 
     def __init__(
         self,
@@ -55,9 +55,9 @@ class JupiterPriceOracle:
 
     async def usd_prices(self, mints: Collection[str]) -> dict[str, Decimal]:
         now = self.monotonic()
-        prices = {mint: ONE for mint in mints if _is_stable(mint)}
+        prices: dict[str, Decimal] = {}
         missing = []
-        for mint in set(mints) - set(prices):
+        for mint in set(mints):
             cached = self._cache.get(mint)
             if cached and now - cached[0] < self.ttl_seconds:
                 prices[mint] = cached[1]
@@ -71,16 +71,31 @@ class JupiterPriceOracle:
         return prices
 
 
+# `price_of(mint)`: o preço USD de um mint, ou None
+PriceOf = Callable[[str], Awaitable[Decimal | None]]
+
+
+def price_fn(oracle: PriceOracle | None) -> PriceOf:
+    """`price_of(mint)`: o preço USD de um mint, ou None (sem preço)."""
+
+    async def price_of(mint: str) -> Decimal | None:
+        return (await usd_snapshot(oracle, [mint])).get(mint)
+
+    return price_of
+
+
 async def usd_snapshot(
     oracle: PriceOracle | None, mints: Collection[str]
 ) -> dict[str, Decimal]:
-    """Preços para um trade; nunca levanta (falha = preços desconhecidos)."""
-    if oracle is None or not mints:
-        return {}
+    """Preços USD (stablecoins a 1); nunca levanta (falha = desconhecidos)."""
+    prices = {mint: ONE for mint in mints if _is_stable(mint)}
+    rest = set(mints) - set(prices)
+    if oracle is None or not rest:
+        return prices
     try:
-        return await asyncio.wait_for(
-            oracle.usd_prices(mints), timeout=SNAPSHOT_TIMEOUT_SECONDS
+        return prices | await asyncio.wait_for(
+            oracle.usd_prices(rest), timeout=SNAPSHOT_TIMEOUT_SECONDS
         )
     except Exception as ex:
-        logger.warning(f"Sem preços em USD para {sorted(mints)}: {ex}")
-        return {}
+        logger.warning(f"Sem preços em USD para {sorted(rest)}: {ex}")
+        return prices

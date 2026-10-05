@@ -36,6 +36,8 @@ class SwapResult:
     costs: TradeCosts | None = field(default=None, compare=False)
     # quote usada (LP fees, impacto)
     quote: Any = field(default=None, compare=False, repr=False)
+    # tentativas anteriores que a rede confirmou como falhas (taxa paga)
+    failed_signatures: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass
@@ -63,6 +65,14 @@ class Order:
     # vendas: False quando a venda foi parcial e o resto segue aberto
     # (ordens antigas, sem o campo, sempre fecharam a posição)
     closes_position: bool = True
+
+    @property
+    def quote_price(self) -> Decimal:
+        """Preço no token de cotação (o que a estratégia vê); `price` é USD.
+
+        Iguais em pares USDC/USDT. Ordens sem `fill_price` usam `price`.
+        """
+        return self.price if self.fill_price is None else self.fill_price
 
     def __eq__(self, value):
         return (

@@ -1,6 +1,6 @@
 # Plan
 
-Status as of 2026-09-29. This is the only roadmap. It replaces the earlier
+Status as of 2026-09-30. This is the only roadmap. It replaces the earlier
 agent-readiness plan, `agent-strategies.md` and `refactoring-backlog.md`;
 everything still open from them is carried over below. For how the code works
 today, read [`architecture.md`](architecture.md).
@@ -12,9 +12,10 @@ implement.
 
 ## 1. End goal
 
-1. **One gateway for humans and agents to create strategies**, which then run
-   automatically. An agent and the owner use the same commands, the same spec
-   format and the same checks.
+1. **Strategies are spec files written from the docs.** The owner or an
+   agent writes a JSON spec following [`specs.md`](specs.md), backtests it,
+   runs it in paper, and iterates on the file and on the code. Nobody needs a
+   command to create, submit or register a strategy.
 2. **Manual trades are possible but rare.** They go through the same gateway,
    policy and ledger as strategy trades.
 3. **A structured way to build strategies:** declarative specs made of vetted
@@ -28,46 +29,44 @@ implement.
 
 ## 2. Where we are
 
-**Overall: about 63% of the end goal** (67% before stage U, which removed
-manual trades and the agent JSON commands to make the code easier to follow;
-58% after the first recheck). The foundations (safety, ledger, execution seam,
+**Overall: about 76% of the end goal** (goal 1 was redefined on 2026-09-30:
+specs are files written from the docs, not submitted through agent commands;
+67% before stage U, 58% after the first recheck). The foundations (safety, ledger, execution seam,
 spec format) are in place and the order path is short. What is missing is
 mostly the part that makes strategies *live*: storing them, running many at
 once, and approving them for real money.
 
 | Goal | Done | Missing | Score |
 |---|---|---|---|
-| 1. One gateway to create strategies that run automatically | Spec format; `run` validates the spec against the mode's policy and runs it in its own capped bucket with a max-loss stop; `backtest` prints JSON | Agent-facing commands (schema, market data), storing specs (`submit`), a registry, runners that start stored specs, real-mode approval | **35%** |
+| 1. Strategies are spec files written from the docs | Spec format; `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `run` validates the spec against the mode's policy and runs it in its own capped bucket with a max-loss stop; `backtest` prints JSON | Running several spec files at once (B3) | **70%** |
 | 2. Manual trades | Removed in stage U (no `swap` command) | Comes back with B2's wallet allocation | deferred |
-| 3. Structured strategy building | Spec v1: 18 condition types, required stop, converged warm-up, re-arm after exits, `ttl_days`; backtests replay direction-aware OHLC paths with slippage and refuse too little data; feed gaps cool the spec down; cooldown, re-arm and expiry survive restarts | One sizer, USDC/USDT inputs only, no expression language or crossovers | **78%** |
+| 3. Structured strategy building | Spec v1: 18 condition types plus a restricted `expr`, `fixed_usd` and `pct_of_bucket` sizing, any registry token as the input (prices in the quote token, money in USD), required stop, converged warm-up, re-arm after exits, `ttl_days`; backtests replay direction-aware OHLC paths with slippage and refuse too little data; feed gaps cool the spec down; cooldown, re-arm and expiry survive restarts | No crossovers (an `expr` compares levels on the current bar, not across bars); ratio candles approximate the bar's high/low | **88%** |
 | 4. One wallet, bucket per strategy | Buckets with budget and max-loss caps; one bucket per spec id; per-bucket ledger account; partial exits kept per bucket; atomic authorization across processes | One strategy per process; no wallet treasury (a bucket without a budget can spend another's tokens, B2); no aggregate reconcile | **50%** |
-| 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; net PnL; USD values on every pair; fills never lost after EXECUTED; partial sells keep their cost basis | No mark-to-market; paper fills are the quote's; failed-tx fees are no longer recorded (no resolve) | **88%** |
-| (Foundations: safety, tests, layering) | Policy, breaker, idempotency, UNCONFIRMED blocking, 466 tests, enforced layering | Key still shares a process with strategies | 85% |
+| 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; net PnL; USD values on every pair; fills never lost after EXECUTED; partial sells keep their cost basis; fees of failed transactions booked per bucket; mark-to-market and a daily report; paper fills below the quote; replays pay a network fee; live vs backtest comparison | Replay network fee is a flat USD estimate and ignores rent; `Order.timestamp` is naive local time (B7) | **94%** |
+| (Foundations: safety, tests, layering) | Policy, breaker, idempotency, UNCONFIRMED blocking, transaction inspection before signing, quotes checked against the Price API, no decisions on stale prices, 717 tests, enforced layering | Key still shares a process with strategies under `run`; no owner approval for large trades | 90% |
 
 The overall figure is the plain average of goals 1, 3, 4 and 5 (goal 2 is
 deferred).
 
 ### 2.1 What has been built
 
-Stages A, R and S are done; their designs and progress notes are in
+Stages A, R, S, U and T are done; their designs and progress notes are in
 [`history.md`](history.md).
 
 ## 3. Target architecture
 
 ```
- owner (CLI)            agent (Claude Code)          <- same commands, same spec format
-      \                      /
-       strategy submit / list / perf / retire         (writes the paper ledger only)
-       strategy approve  (owner only)                 (copies a spec into the real ledger)
+ owner or agent: writes docs/examples/<spec>.json from docs/specs.md,
+                backtests it, runs it in paper, iterates on the file and the code
                  |
- strategy-runner (spec A)   strategy-runner (spec B)   <- no key, no ledger, no mode
+ owner starts:  strategy-runner (spec A)   strategy-runner (spec B)   <- no key, no ledger, no mode
    MarketData (read-only)     MarketData (read-only)
    SpecStrategy               SpecStrategy
    TradeClient --+            TradeClient --+
                  |  hello / get_bucket / submit_order / heartbeat
                  v                          v
         trade-runner (one per mode; the ONLY process with key, wallet and ledger)
-          TradeService: one bucket per spec, plus a `manual` bucket
+          TradeService: one bucket per spec
             -> bucket check (spend cap = budget - losses)
             -> TradeGateway.submit (idempotency -> policy -> ledger -> execute)
             -> Executor (on-chain, or the shared SimulatedWallet in paper)
@@ -76,9 +75,9 @@ Stages A, R and S are done; their designs and progress notes are in
 
 ### 3.1 Principles
 
-- **Agents author strategies; they never trade, touch the key or edit the
-  policy.** Humans use the same path. A manual `swap` is the only other way to
-  trade, and it goes through the same gateway.
+- **Strategies are files.** Agents (and the owner) write spec files from
+  `docs/specs.md`; they never trade, touch the key or edit the policy, and there
+  is no agent-facing command. The owner starts every run.
 - **The policy decides deterministically.** `evaluate()` is pure and owned by
   the owner. It stays wallet-wide; per-strategy budgets are enforced by the
   bucket.
@@ -86,434 +85,531 @@ Stages A, R and S are done; their designs and progress notes are in
   retried after a send.
 - **The ledger is the source of truth** for positions, PnL, budgets and the
   audit trail, and is reconciled against the wallet.
-- **Fail closed.** No kill-switch reading, no ledger, or a broken policy
-  means no trade.
+- **Fail closed.** No ledger or a broken policy means no trade.
 
 ### 3.2 Buckets
 
-- A bucket is `account_id = "<mode>:<name>"`: `strategy:<id>` for a spec, the
-  pair for the legacy `run`, `manual` for manual swaps.
+- A bucket is `account_id = "<mode>:<name>"`: `strategy:<id>` for a spec.
 - With no open position a bucket may spend
   `max(0, budget_usd + min(0, realized_usd))`. Buckets are long-only, one
   position at a time.
 - The bucket check runs before `policy.evaluate`.
-- On activation, the sum of active budgets must be at most
-  `max_total_allocated_usd`. At validation, sizing must be at most
-  `max_trade_usd` (otherwise every buy is silently denied).
+- `run` refuses a spec whose sizing is above the mode's `max_trade_usd`
+  (otherwise every buy would be denied). With B2, the budgets of the open
+  buckets must fit the wallet.
 - **Exits don't depend on the strategy process.** On retire, expiry or
   `max_loss_usd`, the trade-runner sells the bucket's position itself. Sells
   skip budget rules.
 
 ### 3.3 Wire protocol (JSON lines on `127.0.0.1`, token auth)
 
-The trade-runner holds `data_dir()/trader-<mode>.lock` and writes
-`{port, token}` to `data_dir()/trader-<mode>.json` (removed on exit). TCP
-because asyncio on Windows has no Unix sockets.
+One request, one reply, one JSON object per line. TCP because asyncio on
+Windows has no Unix sockets. The trade-runner writes `{port, token, pid}` to
+`data_dir()/trader-<mode>.json` (removed on exit); the token keeps other local
+processes out, and the guard hook keeps agent sessions from reading the real
+one.
 
-| Message | Reply | Notes |
+| Request | Reply | Notes |
 |---|---|---|
-| `hello {spec_id, token}` | `{bucket}` or an error | Rejects a bad token, an inactive spec, or a second connection for the same spec |
-| `get_bucket` | `{available_usd, position, realized_usd, status}` | `status: retiring` tells the strategy-runner to exit |
-| `submit_order {side, quantity, price, rationale, idempotency_key}` | `{filled: order}` / `{denied: reasons}` / `{rejected}` / `{error}` | The strategy-runner creates the key; a resend after reconnect is deduplicated |
-| `heartbeat` | `ok` | A missed heartbeat is only logged; exits never depend on it |
+| `{"op": "hello", "token", "spec"}` | `{"ok": true, "bucket"}` or `{"ok": false, "error"}` | Validates the spec against the trade-runner's policy and opens (or re-attaches to) bucket `strategy:<id>`; rejects a bad token or a second live connection for the same spec |
+| `{"op": "bucket"}` | `{"ok": true, "snapshot"}` | `BucketSnapshot` (position with its orders, PnL, status) |
+| `{"op": "submit", "request"}` | `{"ok": true, "reply"}` | `OrderReply` (filled / denied / rejected / error); the client always sends an idempotency key, so a resend after a reconnect executes once |
+| `{"op": "price", "mint"}` | `{"ok": true, "price", "age"}` | The trade-runner's price hub (B7): USD price and its age in seconds; a price older than 30s is an error, never a value |
 
-The strategy-runner finds the trade-runner with `--trader <file|host:port>`.
-It has no mode argument.
+The strategy-runner finds the trade-runner with `--trader FILE` or, by
+default, the only `trader-*.json` in `data_dir()`. It has no mode argument.
 
 ### 3.4 Layers
 
 Every module belongs to one layer, and `tests/test_architecture.py` fails on
 a disallowed import or an unmapped module. The table is in
-[`architecture.md`](architecture.md) step 11. The rule that matters most:
+[`architecture.md`](architecture.md) §2. The rule that matters most:
 **strategy and strategy-side code never import execution, venue or risk.**
 
 Planned modules and their layers: `trader/trading_service/remote.py`
 (`RemoteTradeClient`, strategy-side), `trader/runners/strategy_runner.py`
-(strategy-side), `trader/runners/trade_runner.py` (app), `trader/cli/` (app).
+(strategy-side), `trader/runners/trade_runner.py` (app).
 
 ### 3.5 Commands
 
-Since stage U only `run` and `backtest` exist; this table is the stage B
-target, and each command comes back with the item that needs it.
+Owner commands only; specs are created as files, never through a command.
 
-Agent and owner commands print one JSON object on stdout
-(`{"ok": true, ...}` or `{"ok": false, "errors": [{"path","msg"}]}` with exit
-code 1; decimals are strings; `ensure_ascii=True`).
-
-| Command | Who | Purpose |
-|---|---|---|
-| `market symbols / price / candles / summary` | both | Registry and market data (done) |
-| `policy show` | both | Limits, strategy caps and remaining budget |
-| `strategy schema / validate / backtest` | both | Local checks, nothing stored (done) |
-| `strategy submit FILE` | both | Validate, run the fixed-window gate, store; auto-activates in paper |
-| `strategy list / show ID / perf ID` | both | Registry state and bucket PnL vs the stored backtest |
-| `strategy retire ID` | both | Mark `retiring`; the trade-runner closes the position |
-| `strategy run ID [--trader FILE]` | both | Start a strategy-runner (no mode) |
-| `wallet show <mode>` | both | Wallet total, allocation per bucket, unallocated funds |
-| `strategy approve ID` | owner | Copy a paper-proven spec into the real ledger |
-| `trader serve <mode>`, `swap`, `halt/resume`, `ledger resolve`, `paper reset`, `policy.toml` edits | owner | Operations |
+| Command | Purpose |
+|---|---|
+| `run <mode> spec.json` | Run one spec (done) |
+| `backtest spec.json` | Replay a spec on candles or recorded ticks, JSON result (done) |
+| `serve <mode>` | The trade-runner: key, wallet, ledger, one bucket per connected spec (B3) |
+| `connect spec.json [--trader FILE]` | A strategy-runner for one spec file, no key (B3) |
 
 ## 4. Decisions that stand
 
 | Topic | Decision |
 |---|---|
 | Strategy form | A **declarative JSON spec** from vetted blocks. A restricted expression language comes later as one more condition type. Never agent-written Python, never `eval`. |
-| Interface | **CLI with JSON output**. Today only `backtest`; the agent commands return with B1. MCP can wrap them later. |
+| Interface | **Files and docs.** Specs are JSON files written from `docs/specs.md`; agents don't use a CLI. The owner runs `run` and `backtest`. |
 | Mints | **Owner registry only** (`SOLANA_MINTS` ∩ `allowed_symbols`). |
-| Activation | **Automatic in paper; the owner approves real.** |
-| Processes | One strategy-runner per spec; one trade-runner per mode holding the gateway, key and ledger. Strategies are mode-agnostic. |
+| Activation | **The owner starts every run**, paper or real; real also needs `real_trading_enabled`. |
+| Processes | One execution process per mode (`run` or `serve`, OS file lock); one strategy-runner per spec connected to `serve`. Strategies are mode-agnostic. |
 | Budgets | Per-strategy budget in the bucket; `policy.evaluate()` stays wallet-wide. |
-| Spec storage | In the ledger (`strategies` table), so nothing an agent runs writes to the real ledger. |
+| Spec storage | **Files in the repo** (`docs/examples/`); the id is the hash of the behaviour, so each version gets its own bucket. |
 | Wallet | One wallet for all strategies for now. Real mode uses a dedicated low-balance hot wallet. |
 
 ## 5. Roadmap
 
-Refactorings that make the features cheaper come first (stages A and U),
-then the features (stage B). Each item ships on its own with the suite green (`ruff
+The refactoring stages (A, R, S, U, T) are done and archived in
+[`history.md`](history.md); what is left is stage B. Each item ships on its own with the suite green (`ruff
 check`, `ruff format --check`, `pyright`, `pytest`). Size: **S** under an hour,
 **M** several modules, **L** a design change.
 
-### Stage U — Simplification (added 2026-09-30)
-
-The owner found the code hard to follow: where a trade goes and where it came
-from. A paper buy went through about 11 objects and 45 calls, of which five do
-real work, and changed shape 9 times; the CLI had 18 commands, with two
-backtests that disagreed on the same spec; dry mode added about 20 mode checks
-and still needed a real key. The owner's decisions for this stage:
-
-- **Two modes:** `real` and `paper`. Dry mode is removed.
-- **Two commands:** `run <real|paper> spec.json` and `backtest spec.json`; the
-  mode has no default. `swap`, `halt`/`resume`, `ledger *`, `pnl`, `paper *`,
-  `market *` and `strategy *` are deleted with the code only they used. Stage
-  B adds commands back when it needs them.
-- **One backtest engine** (the spec's budget, the OHLC path replay, the
-  warm-up check), JSON output.
-- **No kill switch.** Stopping the process stops trading. The circuit breaker
-  counts failures since the process started, so a restart re-arms it.
-- **UNCONFIRMED intents stay blocked**; recovery is moving or deleting the
-  ledger file.
-- **The `events` table stays; the hash chain and `verify` go.**
-- **Order:** U1, then stage T (minus the items U1 makes obsolete), then U2 and
-  U3.
-
-#### U1. Cut and delete — M
-1. Dry mode: `RunningMode.DRY`, the `MODES` tuple (derived from the enum),
-   `is_dryrun` in `OnChainExecutor`/`AsyncRPCClient`/`on_chain`, the `[dry.*]`
-   policy sections.
-2. CLI: only `run` and `backtest`; delete `trader/cli/{swap,safety,ledger,pnl,paper}.py`,
-   `trader/agent_api/`, `trading_service/manual.py` (+ `SwapRequest`,
-   `TradeService.swap`), `execution/resolve.py`. Telegram turns on when
-   `TELEGRAM_CHAT_ID`/`TELEGRAM_BOT_TOKEN` are set (no `--notification-*`).
-3. One backtest engine in `trader/backtest/`; the close-only replay and the
-   no-interval `ticks_from_candles` branch go.
-4. Ledger: no hash chain; delete the queries only the removed commands used;
-   one `_SCHEMA` without the legacy migrations (an old-format file is refused
-   with a "move or delete it" error), after checking that the real ledger
-   holds no trades.
-5. No kill switch; breaker since process start.
-6. Dead code: `botconfigs.example.yaml`, the `spread` and `type_order`
-   parameters, `AsyncJupiterProvider.swap`, `stop_when_error`, unused
-   `TickerData` fields, `PositionType`, `SPEC_VERSION`,
-   `NullNotificationService`, unused re-exports, `wiring.build_gateway`,
-   duplicate helpers.
-7. Defaults: roomy paper limits in code; `policy.toml` untracked
-   (`policy.example.toml` stays).
-8. Dev tooling: `check.py`/`spec_check.py`/`smoke.py` follow the new CLI
-   (`.claude/scripts/ledger_dump.py` replaces the ledger commands for
-   `/smoke` and `/diagnose`); CI drops the redundant `uv python install`;
-   unused dev dependencies go; the bot test that pinned 17 RPC calls in order
-   uses a `FakeTrader`; the architecture map drops modules that don't exist.
-
-#### U2. Straighten the order path — M (after stage T)
-1. `trader/async_account.py` → `trader/execution/account.py`.
-2. The service passes the spend cap to `buy` as a value (no `spend_cap`
-   callback).
-3. One call dispatches on side (no `_place` → `_reply(lambda)` →
-   `place_order`); each exception is logged once.
-4. One balance read per order.
-5. The provider takes the spend amount from the intent instead of
-   recomputing `quantity * price`.
-6. One per-tick decision shared by the bot and the backtester. The backtester
-   then keeps selling a retiring bucket that still holds a position, like the
-   live bot (an intended fix).
-7. One `Strategy` protocol in `bot/config.py` replaces `TradingStrategy`,
-   `WarmsUp`, `Resumes`; `SpecStrategy` owns its clock and rng.
-8. `total_realized_pnl` folds into `pnl_totals` (EXECUTED only); no double
-   `realized_pnl_detail()`.
-
-#### U3. Docs you can follow — S
-- `architecture.md` becomes a tour of one traced paper buy (numbered hops with
-  file:line, what each is for, where state lives), then real mode, backtest
-  and safety.
-- `AGENTS.md` keeps commands and hard rules and points to `architecture.md`
-  for the module map; README leads with paper mode.
-- Example spec rationales match their conditions.
-
-### Stage T — Third recheck findings (added 2026-09-29, NOT implemented)
-
-The third review ran after stage S. Per the owner's instruction, this stage is
-**written down but not implemented**, and waits for the owner's review. The
-first three items are regressions or gaps in stage S itself and should come
-first; I checked the excepthook override and the startup-resume gap in the
-code.
-
-**Approved by the owner on 2026-09-30, to run after U1.** U1 deletes `ledger
-resolve`, so T4's "resolving a partial sell" and T6's two resolve items are
-obsolete, and T6's pruning item no longer applies (the old log files are gone).
-
-#### T1. Regression from S4: a fresh EXECUTING buy no longer blocks the bucket — high
-- **Where:** `ledger/policy_state.py::_unresolved_ids`, together with
-  `gateway.submit` and `AsyncAccount.buy`.
-- **What goes wrong:** R1's fail-closed rule ("a failed `mark_executed`
-  stays EXECUTING and blocks trading") relied on EXECUTING counting as
-  unresolved. S4 exempted EXECUTING intents younger than 300s, so:
-  1. a buy that executed but could not be marked (`database is locked`)
-     returns an `error`;
-  2. on the next tick the book is still empty, the policy passes, and a new
-     random key is minted;
-  3. the bot **buys again**.
-
-  A hard kill mid-swap followed by a restart within 5 minutes does the same.
-  A later `resolve` also reorders `legs_since_last_buy` (it orders by
-  `updated_at`).
-- **Fix:** EXECUTING intents of the **same account** always count as
-  unresolved (a bucket lives in one process); the 300s grace applies only
-  to other accounts. Alternatively, the gateway latches "blocked" in memory
-  after a failed `mark_*`. `legs_since_last_buy` should order by
-  `created_at`, or by execution time, not `updated_at`.
-
-#### T2. Regression from S3: `_close_if_retiring` can recurse without bound — medium-high
-- **Where:** `service.submit_order` → `_close_if_retiring` → `close_bucket`
-  → `submit_order` again.
-- **What goes wrong:** a rejected or failed remainder sell (the SOL
-  reserve, the minimum size, HALT, the breaker, an RPC error) leaves the
-  position open, so the cycle recurses at once: it re-authorizes, writes
-  intents, can trip the breaker, and ends in `RecursionError`.
-- **Fix:** attempt the close at most once per `submit_order` (a `closing`
-  flag on `_Bucket`, or a direct `_place` sell), and retry on later ticks.
-
-#### T3. S5 does not work: Typer replaces the redacting excepthook — high (secrets)
-- **Where:** `main.py` and typer 0.27.1 (`typer/main.py:57`,
-  `1134-1135`).
-- **What goes wrong:** typer saves `sys.excepthook` when it is imported and
-  reinstalls its own hook in `app()`. With pretty exceptions off, that hook
-  calls the **original** (Python's default) hook, so an escaping exception
-  still prints an unredacted traceback, including a chained httpx2 error
-  with the Helius key. The S5 test only calls the hook function directly.
-- **Fix:** in `main.py`, wrap `app()` in try/except and route the exception
-  through `redacted_excepthook` before exiting with code 1 (or patch
-  `typer.main._original_except_hook`). Add a subprocess test that raises a
-  secret-bearing error.
-
-#### T4. Stage S gaps in state and restore — medium
-- **Startup resume.** A transient error on `trader.bucket()` at startup
-  permanently skips `strategy.resume()`, because `_opened` is set first, so
-  the restored cooldown, re-arm and `ttl_days` clock are lost. **Fix:** a
-  separate `_resumed` flag.
-- **Long gaps.** A gap of `history` bars or more (the laptop slept, a long
-  backoff) fills the whole window with flat bars while `_warm` stays true:
-  RSI goes to 0 or 100 and volatility to about 0, which can trigger entries.
-  The same happens at the seams of an appended `--record-ticks` file.
-  **Fix:** a gap longer than a few bars resets warm-up and re-seeds from
-  candles; replays reset the series at a seam.
-- **`ttl_days` for a spec that never traded.** `opened_at` comes from the
-  first intent, so a spec that never fired restarts its clock on each
-  restart. **Fix:** a `bucket_opened` event on the first `open_bucket`
-  (later B1's `strategies.created_at`).
-- **Late `mark_executed` on a resolved row.** `_transition` skips the
-  status change, but the caller still records the fill: `attach_order`
-  writes the order and PnL onto a FAILED row. `total_realized_pnl` doesn't
-  filter on status, and `_add_failed_fees` counts that swap's fee as a
-  failed-transaction fee. **Fix:** `_transition` reports the skip; the
-  gateway raises; `attach_order` requires EXECUTED; `total_realized_pnl`
-  filters on EXECUTED.
-- **Resolving a partial sell.** `resolved_fill` always closes the position,
-  so resolving a partial sell drops the remainder. **Fix:** mirror
-  `AsyncAccount.sell` with `remainder_entry` / `reduce` /
-  `closes_position=False`.
-- **A capped sell whose `record_fill` failed.** Memory closes the position,
-  but restore reopens a remainder over 1% from the intent's quantity, which
-  since S3 happens at the next order. That leaves an unsellable remainder
-  that blocks buys. **Fix:** store the closes-position flag on the intent
-  row.
-
-#### T5. Backtest bias that remains — medium (matters for the B1 gate)
-- The path is always open → low → high → close. That is conservative for
-  stops but **optimistic** for a dip entry followed by a take-profit in the
-  same bar: a probe made 30 round trips, every one inside a single bar.
-- **Fix:** use open → high → low → close when close < open (the usual
-  heuristic), or forbid a non-stop exit in the bar of the entry.
-
-#### T6. Resolve and CI gaps — medium/low
-- **`ledger resolve ... executed` in real mode is not re-runnable.** It uses
-  `fetch_swap_costs`, which never raises, so an RPC failure, a missing
-  transaction or a missing signature silently falls back to the intent's
-  requested amounts, and the intent is then resolved for good. **Fix:**
-  call `executor.fetch_costs` (it raises); abort without writing unless
-  there is `--estimate`.
-- **Status check too late.** Resolving an already-resolved intent does the
-  network work first, then crashes with a traceback. **Fix:** check the
-  status right after `ledger.get` and raise `BadParameter`.
-- **Unclosed ledgers pass the tests.** `-W error::ResourceWarning` does not
-  catch an unclosed sqlite connection, because pytest reports it as a
-  `PytestUnraisableExceptionWarning`, which is only a warning. **Fix:** add
-  `-W error::pytest.PytestUnraisableExceptionWarning`.
-- **Pruning misses the old files.** `prune_logs` only matches `trader-*`, so
-  the 116 older files (231 MB, including the six with the leaked key) stay.
-  **Fix:** widen the pattern, or say so in §9.
-- **Paper wallet on Windows (suspected).** `os.replace` can fail while
-  another process reads the file outside the lock, and the lock wait uses a
-  blocking `time.sleep` inside the event loop. **Fix:** read under the lock
-  (or retry the replace), and use an async wait.
-- **Docs:**
-  - `architecture.md` still says entries wait for "the largest
-    `lookback()`" (it is `spec.history()` now);
-  - README omits `--slippage-bps`.
-
 ### Stage B — Features
 
-#### B1. Strategy registry and `submit` — M
-The unified entry point for humans and agents.
-- **Policy:** a `[strategies]` section plus `[<mode>.strategies]` overrides,
-  parsed into `StrategyLimits`: `max_strategy_budget_usd`,
-  `max_total_allocated_usd`, `max_active_strategies`, `max_strategy_days`,
-  `backtest_candles`, `backtest_fee_bps`, `min_backtest_trades`,
-  `max_backtest_drawdown_pct`, `min_backtest_return_pct`,
-  `min_paper_days_for_approval`. Unknown keys still fail. Update
-  `policy.example.toml` and `policy.toml`. `DEFAULT_MAX_DAYS` moves here.
-- **Ledger:** a `strategies` table (`id`, `status`, `spec_json`,
-  `backtest_json`, `author`, `created_at`, `updated_at`, `approved_by`,
-  `reason`), created in `_SCHEMA`, later columns through `_migrate`. Every
-  status change is also an event (`strategy_submitted`,
-  `_rejected`, `_activated`, `_retiring`, `_retired`, `_approved`).
-- **Statuses:** paper `rejected | active | retiring | retired`; real
-  `approved | retiring | retired`.
-- **`submit`:** validate → fixed-window backtest gate (the policy fixes the
-  window, so backtests can't be cherry-picked) → active-count and
-  total-allocation caps → store as `active` or `rejected` with reasons and
-  the hash of the candle window. Resubmitting the same content is a no-op.
-  Specs are immutable (`id = sha256(canonical JSON)[:12]`); a change is a new
-  spec with `supersedes`.
-- **Also:** `strategy list/show/perf/retire` and `policy show` (limits and
-  remaining budget from `policy_state()`). `author` is the spec's `agent_id`,
-  or `owner`.
-- **Tests:** idempotent resubmit, every gate threshold, the caps, policy parsing with mode overrides and unknown keys.
+Stages A, R, S, U and T are done ([`history.md`](history.md)). The order
+below was set on 2026-09-30, after strategies became spec files written from
+the docs:
 
-#### B2. Wallet allocation and reconciliation — M
-- `wallet show <mode>`: wallet balances, each bucket's budget, open position
-  and realized PnL, and the **unallocated** remainder.
-- Manual swaps may spend only unallocated funds and may not sell a token that
-  an open bucket position holds (unless `--force`, owner only).
-- **Aggregate reconcile:** for each mint, the sum of bucket positions must be
-  at most the wallet balance. A mismatch records an event and blocks buys on
-  that mint until resolved.
-- **Wallet treasury (from the recheck):** one balance cache in
-  `TradeService`, invalidated on every fill; today each account caches the
-  shared wallet separately for up to 3 minutes. Per-bucket reservations of
-  quote allocation, token holdings and the fee reserve, so a bucket without a
-  budget can no longer spend SOL that another bucket holds as its position.
-  Budgets become USD values converted with the A4 oracle; today `_cap` (USD)
-  is compared with input-token amounts, which is only safe for stable
-  inputs. The ATA rent is tracked as refundable.
-- (The `ledger resolve` order fix moved to R1.)
+1. **B4 first**: it is small and it is the one item that guards real money.
+   Agents now only write spec files, so a hook that stops an agent session
+   from starting a real run or reading the key is the cheapest protection
+   before the first real run.
+2. **The owner's paper soak** (a week of `run paper` on a few specs).
+3. **B3 with B2**: several specs at once, the key in one process, and the
+   wallet checks that only matter once buckets share a trade-runner. Today
+   every spec has a `budget_usd` and a stablecoin input, so buckets can't spend
+   each other's tokens; the worst case is a buy failing for lack of funds.
+4. **B5**, then **B6**, then **B8** (perps), then **B7**.
 
-#### B3. Trade-runner and strategy-runners — L
-- **`trader/runners/trade_runner.py`** (`trader serve <mode>`, owner):
-  1. takes the lock and writes the connection file (§3.3);
-  2. serves on `127.0.0.1`;
-  3. on `hello`, re-validates the spec against **its own** policy (submit-time
-     validation is advisory: an agent could point `TRADER_POLICY_FILE` at a
-     looser file) and opens the bucket;
-  4. every 30s closes buckets that are retiring, expired or past
-     `max_loss_usd`, and marks them `retired`;
-  5. runs the aggregate reconcile (B2) at startup;
-  6. sends notifications for every fill (A8), never under the submit lock.
-- **`trader/trading_service/remote.py`:** `RemoteTradeClient` with reconnect
-  and backoff; a resent `submit_order` reuses its idempotency key.
-- **`trader/runners/strategy_runner.py`:** `JupiterMarketData` + `SpecStrategy`
-  + `RemoteTradeClient` in the existing bot loop (the bot code doesn't
-  change).
-- **CLI:** `strategy run <id> [--trader FILE]`, and `strategy run-all` (one
-  subprocess per active spec).
-- **Tests:** socket round trip; bad token, inactive spec and duplicate
-  connection rejected; reconnect + resend executes once; a strategy-runner
-  killed while in a position, then retired, gives exactly one sell by the
-  trade-runner; the strategy-runner works with `SOLANA_PRIVATE_KEY` and
-  `HELIUS_RPC_URL` unset.
+#### B4. Real-mode guardrails for agent sessions — S (next)
+Claude Code rules and hooks are guardrails for agent sessions, not a sandbox:
+the owner still starts real runs from a terminal, on a dedicated low-balance
+hot wallet. Design:
+- **`.claude/settings.json` deny rules:** `Read` of `.env` (not
+  `.env.example`); `Edit`/`Write` of `.env` and `policy.toml`.
+- **`.claude/hooks/guard_commands.py`**, a PreToolUse hook on the Bash and
+  PowerShell tools, blocks a command (with the reason shown to Claude) when
+  it:
+  - starts real mode: `main.py run real ...`, or any `--env-file` (it loads the
+    key);
+  - points the policy elsewhere: `TRADER_POLICY_FILE`;
+  - reads or changes the key file from the shell (`.env`, but not
+    `.env.example`);
+  - touches the real ledger file (`ledger-real.sqlite3`: `sqlite3`, `rm`,
+    `mv`, `del`, `Remove-Item`...), which is also how UNCONFIRMED intents are
+    cleared.
+  Paper runs, backtests, `ledger_dump.py`, and deleting the paper ledger or
+  wallet stay allowed.
+- **Pure checker + tests:** the hook is a pure `blocked(command) -> reason |
+  None` plus a thin stdin/stdout wrapper; `tests/test_guard_commands.py`
+  covers every rule, the allowed commands above, quoting and PowerShell
+  syntax.
+- **Docs:** `AGENTS.md` (what agents can't do and why) and README (the owner
+  runs real mode in a terminal).
 
-#### B4. Real-mode approval and agent guardrails — M
-- **`strategy approve <id>`** (owner): needs a TTY and the owner typing the
-  id; requires minimum paper age and performance; re-validates against
-  `load_policy(mode="real")`; inserts the spec into the real ledger as
-  `approved`. The real trade-runner accepts approved specs only.
-- **`.claude/settings.json`:** allow the agent commands of §3.5; deny
-  `Read(.env)`, `Edit/Write(policy.toml)` and the owner commands.
-- **`.claude/hooks/block_owner_commands.py`:** a PreToolUse hook blocking
-  `strategy approve`, `trader serve real`, `resume`, `ledger resolve`,
-  `paper reset`, `swap real`, `TRADER_POLICY_FILE` and `sqlite`, with unit
-  tests.
-- **Agent guide:** `docs/agent-guide.md` and
-  `.claude/skills/strategy-author/SKILL.md`: `policy show` → `market ...` →
-  write the spec → `validate` → `backtest` → `submit` → later `perf`, then
-  `retire` or a replacement with `supersedes`.
-- Say plainly that Claude Code rules and hooks are guardrails, not a sandbox.
-  Real mode runs on a dedicated low-balance hot wallet.
+#### Owner task: a one-week paper soak
+Run a few specs from `docs/examples/` with `run paper` for a week; check them
+with `ledger_dump.py` and `/diagnose`. Anything that goes wrong becomes an
+item here.
 
-#### B5. Accounting and performance reports — M
-- Mark-to-market: unrealized PnL per bucket at the current price, in
-  `wallet show` and `strategy perf`.
-- `strategy perf` compares live bucket results with the stored backtest.
+#### B3. Trade-runner and strategy-runners — L (with B2)
+Each spec runs as its own **strategy-runner** process (no key, no ledger, no
+mode) talking to one **trade-runner** per mode, the only process with the
+key, the wallet and the ledger (§3.1–3.3). Design:
+- **One execution process per mode.** `trader/runners/lock.py`: an OS file
+  lock on `data_dir()/trader-<mode>.lock` (`msvcrt.locking` / `fcntl.flock`,
+  released by the OS if the process dies), taken by both `run` and `serve`.
+  Two `run` processes in the same mode are no longer possible; several specs
+  at once go through `serve`.
+- **Wire codec** `trader/trading_service/wire.py` (core): `BucketSnapshot`,
+  `OrderRequest`, `OrderReply` and `Position` to and from JSON, reusing the
+  `Order` codec (`order_to_json`); decimals as strings.
+- **`trader/runners/trade_runner.py`** (`main.py serve <mode>`, app):
+  1. takes the lock, builds the `TradeService` (`wiring.build_trade_service`),
+     runs the aggregate reconcile (B2), serves on `127.0.0.1:<free port>` and
+     writes the connection file;
+  2. `hello`: parse and validate the spec against **its own** policy (what a
+     strategy-runner checked is advisory), check the allocation (B2), open the
+     bucket once and keep it open across reconnects;
+  3. every 30s, sells what is left in buckets that are retiring or whose spec
+     expired, at the Price API price (exits don't depend on the
+     strategy-runner);
+  4. on exit (Ctrl+C), removes the connection file and closes the ledger.
+  Notifications stay with the strategy-runner's bot (one per fill, as today).
+- **`trader/trading_service/remote.py`** (strategy-side): `RemoteTradeClient`,
+  a `TradeClient` over the socket. It fills a missing idempotency key before
+  sending, and on a dropped connection reconnects (backoff 1s -> 30s),
+  re-sends `hello`, and resends the pending request with the same key.
+- **`trader/runners/strategy_runner.py`** (strategy-side):
+  `main.py connect spec.json [--trader FILE] [--seed N]` builds the same bot as
+  `run` with a `RemoteTradeClient`; it needs no key and no RPC.
+- **Tests:** codec round trip; socket round trip through a paper trade-runner;
+  bad token, invalid spec and a second live connection rejected; a resend
+  after a dropped connection executes once; the sweep sells a retiring
+  bucket's leftover once; the lock refuses a second process; `connect` works
+  with `SOLANA_PRIVATE_KEY` and `HELIUS_RPC_URL` unset.
+
+#### B2. Wallet allocation and reconciliation — M (with B3)
+Only meaningful once one process holds every bucket of a mode (B3's lock).
+- **One balance cache per `TradeService`**, shared by its accounts and
+  invalidated on every fill (today each account caches the wallet for up to 3
+  minutes, so bucket A doesn't see what bucket B just spent).
+- **Allocation:** opening a bucket fails when the budgets of the open buckets
+  plus the new one exceed the wallet's quote balance (spendable), so budgets
+  always fit the wallet.
+- **Aggregate reconcile at startup:** for each token, the sum of the open
+  positions of every bucket in the ledger must be at most the wallet balance
+  (1% tolerance). A shortfall records a `reconcile_mismatch` event and blocks
+  buys of that token in this process until the owner checks the wallet.
+- **Report:** `ledger_dump.py` adds each open bucket's position and the wallet
+  so the allocation can be read in one place.
+
+#### B5. Accounting and performance — M
+- Mark-to-market: unrealized PnL per bucket at the current price (in the
+  report and the notifications).
 - A daily report (fills, costs, PnL per bucket) through the notifier.
-- Better simulated fills: a slippage model for paper, and the network fee in
-  replays, so paper/backtest PnL is closer to real.
+- Live vs backtest: record ticks with `--record-ticks`, then `backtest --ticks`
+  on the same window and compare with the bucket's PnL.
+- Closer simulated fills: a slippage model for paper, and the network fee in
+  replays.
+- The fee of a transaction that failed on-chain (retried since the gap review)
+  is paid but not recorded: read `meta.fee` for its signature and book it as a
+  cost of the bucket.
+
+Design (2026-10-03). No ledger schema change (paper ledgers from the soak keep
+opening):
+- **Mark-to-market** (core): `Position.unrealized_usd(price)` = value at the
+  price minus the entry's USD cost and its known costs (what selling now would
+  realize, before the exit's own costs). The bot's tick log and the fill
+  notification add the bucket's PnL summary and, with a position, the
+  unrealized value; the daily report prices every open position with the
+  Price API.
+- **Daily report** (`trader/notification/daily_report.py`, app):
+  `DailyReporter` runs next to the execution process (`run` and `serve`, which
+  own the ledger). Every minute it checks whether the previous UTC day was
+  reported (a `daily_report` event with the day in the ledger, so restarts
+  don't resend); if not, it builds per bucket of the mode: fills that day,
+  costs paid (SOL and USD), realized PnL that day and in total, failed-tx
+  fees, the open position with its unrealized PnL, and sends it through the
+  notifier. Nothing to report (no fills, no positions): nothing is sent, the
+  day is still marked. `Reports.pnl_totals(account, start, end)` does the
+  windowed sums (it also sums `costs_usd`).
+- **Paper slippage** (venue): `SimulatedExecutor(slippage_bps=10)` fills
+  `outAmount x (1 - bps)` but never below the quote's `otherAmountThreshold`,
+  so paper records the quoted and the actual amount like real mode
+  (`costs.slippage_raw`). The backtest's executor uses 0 (its slippage is in
+  the replay quote).
+- **Network fee in replays** (app): `Backtester(network_fee_usd=...)`; the
+  replay quote takes it out of each leg's output (buy: `fee / price` tokens;
+  sell: `fee` USD), so equity and realized PnL both pay it. `backtest
+  --network-fee-usd` (default `0.002`: the base fee plus a small priority fee
+  at ~$200/SOL; take a better value from your own ledger's `fee_lamports`).
+  The one-time, refundable rent of a token account is not modelled.
+- **Failed-tx fees** (venue -> execution -> risk): the provider's retry loop
+  collects the signatures of attempts that raised
+  `TransactionFailedOnChainError`; they ride on the `SwapResult`
+  (`failed_signatures`) or on the error that ends the loop (`SwapFailedError`,
+  a `RuntimeError`, for exhausted retries; `SwapRejectedError` and
+  `TransactionSubmittedError` carry them too). `execute_trade` reads each
+  `meta.fee` (`provider.fetch_failed_fees`, never raises, bounded by a
+  timeout), values it with the SOL price of the pre-trade snapshot, and books
+  it on both paths: a `failed_tx_fee` event (account, intent, signatures,
+  lamports, USD), and `PositionBook.charge` (realized USD minus the fee, so the
+  budget and `max_loss_usd` see it). `pnl_totals` subtracts these events from
+  `net_usd`, so a restart restores the same number. A booking failure is
+  logged, never raised.
+- **Live vs backtest** (`trader/backtest/compare.py`, app, and
+  `.claude/scripts/live_vs_backtest.py <spec> --ticks FILE [--mode paper]`):
+  replays the recorded ticks the way the live bot saw them: the strategy is
+  warmed up first with the candles that closed before the first tick
+  (`Backtester(warmup=...)` calls `strategy.setup`, like the bot's startup),
+  then trades on the ticks. It prints, as JSON, the backtest's trades and PnL
+  next to the bucket's executed legs and realized PnL in the same window, and
+  the differences (trade count, PnL, fill prices). It reads the ledger
+  read-only.
+- **Tests:** unrealized PnL (with and without costs/USD rates); the report's
+  windowed sums, its text, idempotency across a restart and the empty day;
+  the paper fill below the quote but not below the threshold; the replay fee
+  lowering PnL; a failed-then-filled swap and an exhausted one booking the fee
+  (event, book, restore); the comparison on a fake market and an in-memory
+  ledger.
 
 #### B6. More expressive strategies — M
-- Sizers: percent of the bucket (now meaningful, since buckets exist).
+- Sizing as a percent of the bucket.
 - The `expr` condition type: a restricted parser that compiles to the same
   comparison nodes.
-- Lift the USDC/USDT-only input rule for specs and backtests (needs A4): feed
-  strategies the output priced in input-token units (`price(out) / price(in)`)
-  and replay two price series.
-- Adding a condition type stays a three-place change (model, union,
-  `PREDICATES`), checked by a test. (Porting the legacy strategies moved to
-  A11.)
+- Non-stable inputs for specs and backtests: prices in input-token units
+  (`price(out) / price(in)`), budgets converted to USD with the Price API, and
+  two price series in replays.
+- A new condition type is four edits: the model and its union in
+  `strategy_spec/models.py`, the predicate in `conditions.PREDICATES`, and a
+  row in `docs/specs.md` (tests check all four).
+
+Design (2026-10-04). No ledger schema change; existing USDC/USDT specs trade
+and backtest exactly as before (same ids, same numbers):
+- **Units rule.** The strategy works in the pair's **quote token** (the
+  input): the price it sees is `price(out) / price(in)`, its balance is what
+  the bucket may spend now in quote units, and positions are judged on
+  `Order.fill_price` (quote per token). For USDC/USDT these are the USD
+  numbers they are today. `Order.price` stays USD per token for the ledger
+  and reports. Budgets, max loss, `fixed_usd` and the policy stay in USD;
+  the bucket converts with the quote's USD price.
+- **Percent sizing** (`models.py`): `sizing` is a union of `fixed_usd` and
+  `{"type": "pct_of_bucket", "pct": 1-100}`, a percent of what the bucket may
+  spend now. `validate` refuses `pct x budget_usd` above `max_trade_usd`.
+- **`expr`** (`trader/strategy_spec/expr.py`, strategy layer):
+  `{"type": "expr", "expr": "rsi(14) < 30 and price < sma(20) * 0.98"}`. Python's
+  `ast.parse` reads it and a whitelist walk (never `eval`) accepts only:
+  numbers, `price`, `entry_price`, `peak`, `last_exit_price`, the indicator calls `sma/ema/wma/rsi/high/low/
+  volatility(n)` (n an integer 2-500), `+ - * /`, unary minus, one comparison
+  (`< <= > >=`) per operand pair, `and/or/not`, parentheses. Max 200
+  characters. Parsed when the spec is validated (a bad expression
+  is a spec error with its position); the text is stored normalized, so
+  whitespace doesn't change the spec id. A missing value (indicator not warm,
+  no position, division by zero) makes the comparison false, like every
+  other condition. `lookback()`/`history()` come from the calls in it. Allowed
+  wherever market conditions are (entry and exit).
+- **The strategy's price feed** (`trader/market/pair.py`, market layer):
+  `market_for(symbol, factory)` returns the usual `MarketData` for a USDC/USDT
+  quote, else a `PairMarketData` over two feeds (one websocket per mint):
+  `get_price(token)` = token USD / quote USD, `get_candles` = the two candle
+  series divided bar by bar (matching open times; high/low widened to cover
+  open and close). The bot, `connect` and `backtest` get it from the CLI, so
+  the bot itself doesn't change.
+- **Strategy protocol:** `on_market_refresh(price, balance, position,
+  quote_usd=1)`; `order_for` passes the snapshot's `quote_usd` (`fixed_usd`
+  needs it). `BucketSnapshot.available_usd` becomes `available` (quote units)
+  plus `quote_usd` (None when unknown: the bucket then offers 0, fail closed).
+- **Execution:** `TradeService` converts the USD cap to quote units with its
+  price oracle (`get_bucket`, `buy(limit=...)`, the allocation check); a
+  non-stable quote without a price can't open a budgeted bucket. A sell's
+  notional is `quantity x price x quote_usd`. `order_from_fill` values the
+  token as `quote_usd x fill_price` (the signal price is in quote units now).
+  The trade-runner's exit sweep prices leftovers as token USD / quote USD.
+- **Replays with two series:** `Tick.quote_usd` (None for USDC/USDT); candles
+  of both mints make ratio ticks carrying the quote's USD close; recorded
+  ticks get a third CSV column when the quote isn't a stablecoin (the bot
+  passes `snapshot.quote_usd` to `on_tick`). The `Backtester` funds the
+  wallet with `budget_usd / quote_usd` of the quote, gives the service a
+  replay price oracle (quote and token USD from the tick, so realized PnL is
+  in USD), takes the network fee in USD, and measures equity in USD.
+- **Validation:** the input may be any registry token except the output; the
+  output still can't be a stablecoin (long-only).
+- **Tests:** percent sizing and its limit; the parser (grammar, precedence,
+  errors with positions, normalization, depth/length limits, lookback/
+  history) and evaluation against the same predicates the typed conditions
+  use; a JUP-SOL spec end to end in a replay with two series (USD budget and
+  PnL); the pair feed and ratio candles; the bucket cap in quote units; the
+  sweep's pair price; every existing USDC number unchanged.
+
+#### B9. Costs that agree across real, paper and backtest — M
+From the soak ([`soak-test.md`](soak-test.md) F7): a 5 USD SOL-USDC round trip
+cost -0.011 USD in paper and about -0.043 in the backtest. Real swaps send no
+priority fee setting (Jupiter decides, uncapped), paper charges none, and the
+backtest assumes a flat 30 bps fee whatever the pair. The owner chose three
+fixes (2026-10-04). No ledger schema change.
+
+Design (2026-10-04):
+- **One priority-fee setting.** `max_priority_fee_lamports` in `policy.toml`
+  (`[trading]`, per-mode override like the other keys; default 100,000 =
+  0.0001 SOL; must be > 0). The owner sets it; agents can't edit the file.
+  - Real: `OnChainExecutor` passes it to `get_swap_transaction`, which sends
+    `prioritizationFeeLamports: {priorityLevelWithMaxLamports: {maxLamports,
+    priorityLevel: "veryHigh", global: false}}`. `veryHigh` because a swap
+    that doesn't land in 30 s becomes UNCONFIRMED and blocks the mode; the
+    cap bounds what that costs. What was paid is still read from the chain.
+  - Paper: `SimulatedExecutor` charges the cap on every leg (conservative):
+    the wallet pays base + cap, `TradeCosts.fee_lamports` = base + cap,
+    `priority_fee_lamports` = cap.
+  - Backtest: the default `network_fee_usd` is (5,000 + the real policy's cap)
+    lamports at the SOL price (Price API) instead of a flat 0.002 USD.
+  - `wiring.build_trade_service` loads the policy once and gives the cap to
+    the provider and the policy to the gateway.
+- **Each pair's fee is measured.** `trader/backtest/costs.py`:
+  `measure_costs` quotes a buy of the spec's trade size
+  (`sizing.max_usd(budget_usd)`, in quote units) and a sell of what it
+  returns, on Jupiter, now. The round-trip loss in bps is spread + pool fees +
+  price impact at that size; `fee_bps` per leg is half of it. The same call
+  gets the SOL price for the network fee. `backtest` (and
+  `live_vs_backtest.py`) measure by default; `--fee-bps` and
+  `--network-fee-usd` given explicitly skip the measurement (offline,
+  repeatable). A failed measurement is an error that names those flags.
+  `--slippage-bps` stays 10 (paper's fill below the quote). The output says
+  which costs were measured and how. With `--ticks`, costs are today's, not
+  the recording's.
+- **Cost per round trip in every report.** For each closed position: the
+  move a costless trade would have made, entry spend x (exit tick price /
+  entry tick price - 1) (the intents' `price` is the strategy's tick price),
+  minus the net realized PnL. That is every cost (spread, pool fees,
+  slippage, network and priority fees) in one number, in USD and in bps of the
+  entry spend, computed the same way everywhere because the backtest replays
+  through the same ledger code. Partial sells count by raw amount. Pairs
+  without a stable are measured in the quote token and converted with the
+  sell's quote USD price. `RoundTripCosts` (core, `models/costs.py`),
+  `Reports.round_trip_costs(account, start, end)` (ledger). Shown in the
+  backtest summary and JSON, the daily report (per bucket, the day's round
+  trips), `live_vs_backtest.py` (both sides) and `ledger_dump.py` (per
+  bucket).
+- **Tests:** policy parsing of the key; the swap request body; paper charges
+  base + cap and records the priority part; the backtest's default network fee
+  from the cap and a SOL price; `measure_costs` on a fake quote client (bps,
+  half per leg, non-stable quote); the CLI measures by default and skips with
+  both flags; round-trip cost on hand-made ledgers (full, partial, a
+  non-stable pair) and in the backtest result; the daily report line. Live:
+  measuring SOL-USDC gives a small positive fee; Jupiter builds a swap
+  transaction with the priority-fee body.
+
+#### B10. Review cleanup — M
+From the `/simplify` review of B5–B9 (2026-10-04). No behaviour change for a
+USDC pair. Items numbered as the owner chose them; 3 (one rule for when orders
+re-read the wallet) and 7 (one round trip per `connect` tick) wait for a
+discussion.
+
+- **C1 Stablecoin = 1 USD, decided once.** `usd_snapshot` and `price_fn`
+  (`market/prices.py`) answer 1 for USDC/USDT with or without an oracle;
+  oracles only return market prices. `priced_mints` always includes the quote.
+  Gone: the stable branches in `TradeService.quote_usd` and
+  `AsyncAccount._notional_usd`, the bot's `quote_is_usd` flag (the tick
+  recorder always writes `quote_usd`, 1 for a stable pair), and the
+  `quote_usd = 1` defaults (`BucketSnapshot`, `Strategy.on_market_refresh`,
+  `log_position`), which become required.
+- **C2 `IntentStatus.REJECTED`.** A provider refusal (`SwapRejectedError`)
+  ends the intent REJECTED instead of FAILED with a `recusado: ` text prefix;
+  the circuit breaker counts `status = FAILED` only. `status` is free text,
+  so no schema change; old rows keep their prefix and the breaker only counts
+  rows since the process started.
+- **C4 Real types from the test fakes.** `mock_provider` and the fakes return
+  `SwapResult` and `TradeCosts`, so `execute_trade` drops its `getattr` and
+  `isinstance` guards.
+- **C5 One base error for failed attempts.** `SwapAttemptsError` carries
+  `failed_signatures`; `SwapRejectedError`, `SwapFailedError` and
+  `TransactionSubmittedError` subclass it, and the provider catches the base.
+- **C6 Every USD price through the hub** (`run` and `serve`). `PriceHub`
+  is a `PriceOracle` (`usd_prices`: its latest prices, a Price API call now
+  for new or stale mints). `build_trade_service(prices=hub)` gives it to the
+  service, the sweep, the daily report and the provider's quote check (the
+  provider reads `usd_prices`, which defaults to its client's). One Price API
+  poller per process instead of three. `JupiterPriceOracle` stays for
+  callers without a hub.
+- **C8 One policy query.** `_account_buys` folds into `_spending` (the same
+  rows; the per-bucket hour count is taken in Python).
+- **C9 Fewer pass-through parameters.** `swap_with_details` and
+  `_do_swap_with_retry` merge; `fail_closed` is keyword-only without a
+  default below the public methods. The priority-fee default lives on
+  `Policy` only: `build_provider`, `AsyncJupiterProvider.on_chain` and
+  `OnChainExecutor` require it.
+- **C10 Background tasks of the trade-runner.** `TradeRunner.background`
+  (like `BotConfig.background`) runs the hub and the daily report beside the
+  server; `_serve` keeps only the closing.
+- **C11 `ledger_dump.py`** takes each bucket's PnL from the restore it
+  already does instead of a second `pnl_totals`.
+
+Tests: the existing suite, adjusted where a fake or a default changes, plus
+the hub as an oracle (fresh, new, stale mints; no API call when fresh) and a
+REJECTED intent not tripping the breaker.
+
+#### B11. Folder layout by process — S
+Moves only, no behaviour change (2026-10-05). `trader/` is split by the process
+that runs the code:
+- `trader/execution/` is the trade-runner: wallet, ledger, policy, venues, swaps.
+- `trader/strategy/` is the strategy-runner: bot loop, spec engine, remote client.
+- `trader/shared/` holds what both sides import: models, market data, the spec
+  contract, the wire protocol, paths.
+- `trader/api/cli/` holds the entry points.
+- `trader/backtest/` composes both.
+
+`execution` and `strategy` never import each other, and `shared` imports
+neither (`tests/test_architecture.py`). Two definitions move so that holds:
+- the `Notifier` Protocol goes to `shared/notification`;
+- spec models, `expr` and validation go to `shared/spec`, because the
+  trade-runner validates specs too.
+
+Tests mirror the new tree.
+
+#### B8. Perpetual futures — L (planned in [`perps.md`](perps.md))
+Long and short perp positions with leverage, on Jupiter Perps, through the
+same gateway, policy, ledger and buckets. The spec sets its leverage, capped
+by `max_leverage` in `policy.toml` (default 3); every real perp position also
+holds a stop-loss on the venue. Starts after B6: a no-behaviour-change
+refactor first (P0: venue and bucket-account seams, direction on the strategy
+context), then the perp model and paper (P1, which bumps the ledger schema and
+so waits for the end of the paper soak), backtest, and the real adapter.
+Design, coupling assessment and phases in [`perps.md`](perps.md).
 
 #### B7. Later
-- An MCP server over the agent commands (once they come back with B1).
 - Transaction inspection in the trade-runner: only Jupiter, Token,
   Token-2022, ATA, ComputeBudget and System programs; the only decreasing
   balance is the wallet's source account, by at most the quoted `inAmount`.
-- Market-sanity checks: quote within 2% of the independent price, reject
+- Market-sanity checks: quote within 2% of the independent price; reject
   market data older than 30s.
 - A shared price-websocket hub for many strategy-runners.
 - Per-bucket hourly limits.
-- Human approval for large trades (Telegram inline buttons), then graduated
-  autonomy.
+- Owner approval for large trades (for example Telegram inline buttons).
 - A service entrypoint (systemd, Docker or a Windows service).
+- `Order.timestamp` in UTC: `AsyncAccount` defaults its clock to the naive
+  `datetime.now` (found in B5; the ledger's own timestamps are UTC).
 
-## 6. Progress
+Design (2026-10-04). The owner chose the safety core and the price hub;
+Telegram approval and a service entrypoint stay open. No ledger schema change:
+- **Transaction inspection** (`trader/providers/jupiter/tx_inspection.py`,
+  venue; called by `OnChainExecutor` after signing, before sending, in place of
+  the plain simulation): (1) every top-level instruction's program is one of
+  Jupiter v6, Token, Token-2022, ATA, ComputeBudget, System (checked live on
+  real swap transactions); (2) one simulation that returns the wallet and all
+  its token accounts (`AsyncRPCClient.simulate_with_accounts`, a solders
+  request: solana-py's `simulate_transaction` can't ask for accounts) must show
+  no token account of the wallet decreasing except the input mint's, by at most
+  the quote's `inAmount`, and the wallet's lamports falling by at most the
+  input (if SOL) plus `MAX_NATIVE_SPEND_LAMPORTS` (fees, rent of new accounts).
+  A failure is `TransactionInspectionError` (a `SwapRejectedError`: nothing
+  was sent, not retried). Paper and replays don't build transactions.
+- **Quote sanity** (`AsyncJupiterProvider`): the quote's output, valued with
+  the Price API, must be at least 98% of the input's value
+  (`max_quote_deviation_pct = 2`; `None` in replays). Without prices a buy is
+  refused (fail closed) and a sell goes on with a warning (an exit is never
+  stuck on the Price API).
+- **Stale market data**: a price older than 30s is never used. The hub
+  (below) raises `StalePriceError` instead of returning one, so the bot's tick
+  fails and backs off; orders don't go out on old data.
+- **Price hub** (`trader/market/hub.py`, market layer): `PriceHub` keeps the
+  latest `(price, received_at)` of every mint asked for, from one websocket
+  subscription for all of them (reconnects with the new list when a mint is
+  added) plus the Price API, polled every 2s in one batched call for mints the
+  websocket hasn't updated for 5s (this also fixes the soak's F2: a quiet
+  mint no longer costs a 30s timeout per tick). `HubMarketData` is a
+  `MarketData` over it (candles still from `JupiterMarketData`). `serve` runs
+  one hub and answers a new wire op `{"op": "price", "mint"}` (after `hello`)
+  with `{price, age}`; `connect` builds its feed from `RemoteTradeClient.price`
+  (`trader/trading_service/remote.py`), so N strategy-runners share one
+  websocket and one Price API poller. `run` uses an in-process hub as a bot
+  background task. `PairMarketData` composes two hub feeds as before.
+- **Per-bucket hourly limit** (policy): `max_trades_per_hour_per_bucket`
+  (default 6; paper 60), counting the bucket's buys in the last hour, next to
+  the wallet-wide `max_trades_per_hour`. `PolicyState.account_trades_last_hour`.
+- **`Order.timestamp` in UTC**: `AsyncAccount` and `TradeService` default to
+  `datetime.now(UTC)` (`to_utc` already reads old naive values as local).
+- **Tests:** program allow-list and balance rules on built transactions and
+  faked simulations (including a drain of another token and SOL over the
+  allowance); quote deviation on both sides and without prices; the hub (one
+  subscription for several mints, the REST poll of quiet mints, staleness,
+  resubscribe on a new mint) with a fake stream; the `price` op over the
+  socket; the per-bucket limit; UTC order timestamps. Live: the hub serves SOL
+  and a quiet token; a real swap transaction passes the program check.
+
 
 | Item | Status | Notes |
 |---|---|---|
 | A0–A12, R0–R9, S1–S8 | **done** (2026-09-23 → 30) | See [`history.md`](history.md) |
-| U1 Cut and delete | **done** (2026-09-30) | 456 tests (was 540). CLI is `run` + `backtest`; dry mode, kill switch, hash chain, manual swap, agent/ledger/pnl/paper commands gone; `trader/` 8,989 -> 7,722 lines, `tests/` 8,739 -> 7,564. The old ledgers in `.data/` are refused (old format) |
-| T1 EXECUTING blocks own bucket (S4 regression) | **done** (2026-09-30) | An EXECUTING intent of the same account always blocks (`policy_state(account=)`); legs ordered by `created_at` |
-| T2 Bounded remainder close (S3 regression) | **done** (2026-09-30) | `_Bucket.closing`: one remainder sell per order (the test hit `RecursionError` without it) |
-| T3 Excepthook overridden by Typer (S5 gap) | **done** (2026-09-30) | `main.main()` routes an escaping error through `redacted_excepthook`; subprocess test with a fake api-key |
-| T4 State/restore gaps | **done** (2026-09-30) | `_resumed` retried apart from `_opened`; gaps over `MAX_GAP_BARS` restart the series and cool the spec; `bucket_opened` event starts `ttl_days`; late marks are reported and `attach_order` needs EXECUTED; `closes_position` on the intent row. The resolve item is obsolete (U1) |
-| T5 Same-bar entry+exit bias | **done** (2026-09-30) | Falling bars replay open -> high -> low -> close |
-| T6 Resolve/CI/docs gaps | **done** (2026-09-30) | `-W error::pytest.PytestUnraisableExceptionWarning`; wallet reads under the lock, `os.replace` retried on `PermissionError` (the lock wait stays synchronous: it is held for milliseconds). Resolve and log-pruning items obsolete; docs items in U3 |
-| U2 Straighten the order path | **done** (2026-09-30) | `trader/execution/account.py`; the cap is `buy(limit_usd=)` (no callback); `TradeService._place`/`_execute` classify and dispatch, errors logged once; one balance read per buy; `provider.buy(spend_amount)`; `trader/bot/decision.py` shared by the bot and the backtester (a retiring bucket with a leftover keeps being replayed); one `Strategy` protocol (no `TradingStrategy`, `WarmsUp`, `Resumes`); `pnl_totals` replaces `total_realized_pnl`. Also removed the per-order `sync_with_ledger` (it only followed manual resolutions). Paper wallet file re-reads kept (only on cache misses) |
-| U3 Docs you can follow | **done** (2026-09-30) | `architecture.md` (424 -> 174 lines) follows one paper buy hop by hop with file:line; README (192 -> 94) leads with paper; AGENTS.md (120 dense lines -> 113 short ones); example rationales fixed; `.env.example` lists every variable. Stage U total: `trader/` 8,989 -> 7,788 lines, 466 tests |
-| B1 Registry + submit | not started | |
-| B2 Wallet allocation + reconcile | not started | |
-| B3 Trade-runner / strategy-runners | not started | |
-| B4 Approval + guardrails | not started | |
-| B5 Accounting reports | not started | |
-| B6 More expressive strategies | not started | |
-| B7 Later | not started | |
+| U1–U3, T1–T6 | **done** (2026-09-30) | See [`history.md`](history.md) |
+| B4 Real-mode guardrails for agent sessions | **done** (2026-09-30) | 546 tests (43 new). `.claude/settings.json` denies Read `.env` and Edit `.env`/`policy.toml`; `.claude/hooks/guard_commands.py` (PreToolUse, Bash/PowerShell) denies real runs, `--env-file`, `TRADER_POLICY_FILE`, `.env`, printing the key/RPC URL and the real ledger. Checked live: it blocked this session's own command. It matches command text, so docs that mention these are edited with the Edit tool |
+| Owner: one-week paper soak | in progress (since 2026-10-03) | `serve paper` + 3 `connect`s. First review (2026-10-04, 12.5 h) in [`soak-test.md`](soak-test.md): execution path clean; candle warm-up collapses on thin tokens (F1), a quiet websocket costs 30 s per tick (F2), SOL `connect` logs keep only ~2.5 h (F3). F4 fixed (2026-10-04): the trade-runner logs bucket opens, connects and disconnects |
+| B3 Trade-runner / strategy-runners | **done** (2026-09-30) | `serve <mode>` / `connect spec.json`; `trader/runners/{lock,trade_runner,strategy_runner}.py`, `trading_service/{wire,remote}.py`; one execution process per mode (OS lock, `run` too); exit sweep every 30s. 12 new tests plus a live test (a separate `connect` process trades through `serve paper`). The guard also blocks `serve real` and `trader-real.json` |
+| B2 Wallet allocation + reconcile | **done** (2026-09-30) | `WalletBalances` shared by the service's accounts; budgets must fit the wallet (positions at cost); startup reconcile of every bucket's positions blocks buys of a missing token; per-account `reconcile_position` removed; `ledger_dump.py` shows each bucket's position |
+| Gap review after B3/B2 | **done** (2026-09-30) | 575 tests. A transaction the chain confirmed as failed is retried with the slippage escalation and ends FAILED (was UNCONFIRMED: the mode was blocked); RPC reads at Confirmed (was Finalized: stale balances right after a swap) and sells re-read the wallet; provider rejections (`recusado: ...`) don't count toward the breaker; a balance read that overlaps a fill isn't cached; a leg without a SOL price uses the other leg's; sells keep a client-given idempotency key; `connect` re-reads the connection file after a trade-runner restart and gives up after 5 reconnects so the bot loop backs off |
+| B5 Accounting and performance | **done** (2026-10-03) | 603 tests (28 new) plus 2 live checks. `Position.unrealized_usd`, in fill notifications and the tick log; `trader/notification/daily_report.py` (`DailyReporter`, run beside `run` via `BotConfig.background` and beside `serve`; a `daily_report` event per UTC day); paper fills `slippage_bps=10` below the quote, floored at `otherAmountThreshold`; `backtest --network-fee-usd` (0.002) taken from each replay leg; failed-on-chain attempts ride on `SwapResult.failed_signatures` / `SwapFailedError`, and `execute_trade` books their `meta.fee` (`failed_tx_fee` event, `PositionBook.charge`, subtracted by `pnl_totals`); `trader/backtest/compare.py` + `.claude/scripts/live_vs_backtest.py`. No ledger schema change. Checked live: the warm-up candles end right before the first tick; a real-quote paper fill lands below the quote |
+| B6 More expressive strategies | **done** (2026-10-04) | 663 tests (60 new) plus 2 live checks. `pct_of_bucket` sizing; `expr` (`trader/strategy_spec/expr.py`: `ast` plus a whitelist, three-valued logic, normalized text); prices in the quote token everywhere on the strategy side (`Order.quote_price`, `BucketSnapshot.available` + `quote_usd`, `on_market_refresh(..., quote_usd)`); `trader/market/pair.py` (`market_for`, `PairMarketData`, `ratio_candles`); `TradeService` converts USD caps with the quote's price (fail closed without it); replays with two series (`Tick.quote_usd`, a third CSV column, `ReplayPrices`, USD equity); `docs/examples/spec-jup-sol-expr.json`. No ledger schema change; USDC numbers unchanged. Checked live: a JUP-SOL backtest on two real candle series, the pair feed against the Price API, and a JUP-SOL paper smoke run |
+| B7 Later | **safety core and price hub done** (2026-10-04); owner approval and a service entrypoint open | 717 tests (34 new) plus 2 live checks. `trader/providers/jupiter/tx_inspection.py` (program allow-list; simulated balances: only the input leaves, up to `inAmount`) in `OnChainExecutor` before sending; `AsyncJupiterProvider` quote check (2% vs the Price API, on in `wiring.py`; buys fail closed, sells warn); `trader/market/hub.py` (`PriceHub`: one websocket for all mints + batched Price API for quiet ones, `StalePriceError` after 30s; `HubMarketData` paces the bot at 1 price/s) used by `run` in-process and by `serve`/`connect` through the new `price` op (fixes the soak's F2); policy `max_trades_per_hour_per_bucket` (6, paper 60); `Order.timestamp` in UTC. Checked live: one websocket subscription carries several mints; the hub keeps SOL and NOBODY fresh; real swap transactions use only allowed programs; the whole live suite (a `connect` trading through `serve paper`) passes. The B6/B7 wire changes mean a `serve` and a `connect` from before B6 can't talk to these: restart all of them together |
+| B10 Review cleanup | **done** (2026-10-04) except C3 and C7 (wait for the owner) | 722 tests (4 new, 1 dropped with the mock guard it tested) plus the live suite. `PriceHub.usd_prices` (the process oracle in `run`/`serve`, `build_trade_service(prices=)`, `AsyncJupiterProvider.usd_prices`); stable = 1 in `usd_snapshot`/`price_fn` only (the backtest always uses `ReplayPrices`, identical output); `IntentStatus.REJECTED`; `SwapAttemptsError`; `swap_with_details` merged with the retry loop; priority-fee cap required below `Policy`; `TradeRunner.background`; one policy query; one `restore` per bucket in `ledger_dump.py`. No ledger schema change |
+| B8 Perps | planned (2026-10-03) | Phases P0–P5 and their progress in [`perps.md`](perps.md) |
+| B9 Costs across modes | **done** (2026-10-04) | `max_priority_fee_lamports` (policy, default 100,000): real's Jupiter `maxLamports` (`veryHigh`), charged by paper, in the backtest's network fee; `trader/backtest/costs.py` measures the pair fee and network fee on Jupiter unless `--fee-bps`/`--network-fee-usd` are given (`measured_costs`); `RoundTripCosts` + `Ledger.round_trip_costs` in the backtest, daily report, `live_vs_backtest.py`, `ledger_dump.py`. No ledger schema change. Checked live: Jupiter keeps a real swap's priority fee under the cap; SOL-USDC measures ~0 bps at 5 USD |
 
-Owner task, outside the code: a one-week paper soak run.
 
 ## 7. Known issues and limitations
 
@@ -523,10 +619,14 @@ Owner task, outside the code: a one-week paper soak run.
   - After each swap the costs actually paid are recorded: the network fee
     (base + priority, from `meta.fee`), rent for token accounts the wallet
     opened (a cost, marked refundable), and other SOL the route charged.
-    Fees of failed transactions are recorded too.
+    Attempts the chain confirmed as failed paid a fee too: it is a
+    `failed_tx_fee` event and comes off the bucket's realized PnL (an
+    unreadable fee counts as the 5000-lamport base fee). An UNCONFIRMED
+    intent's fee is still not recorded (there is no resolve step).
   - Real mode reads the confirmed transaction, including the real in/out
     amounts from the token-balance deltas. Paper simulates the base fee and
-    first-time rent, and uses the quote's amounts.
+    first-time rent, and fills 10 bps below the quote (never below its
+    `otherAmountThreshold`).
   - LP/AMM fees, price impact and slippage are already in the actual amounts
     and are never subtracted again; they are logged for information.
   - PnL is kept in native units (the quote token, plus costs in SOL) with a
@@ -538,15 +638,29 @@ Owner task, outside the code: a one-week paper soak run.
     value is denied unless `allow_unknown_notional = true`.
   - Costs are fetched only after the ledger marks the intent EXECUTED, and a
     failure there never retries or fails the swap.
-- **Prices are USD, balances are in the input token.** `Order.price` is the
-  real fill only for USDC/USDT inputs; `Order.fill_price` keeps the raw
-  input-per-token price. Strategy sizing is only meaningful for stable
-  inputs, which is why specs and backtests require them (B6 lifts this).
+- **Two units since B6.** The strategy side works in the pair's quote token
+  (prices, the bucket's `available`, `Order.quote_price`); `Order.price`,
+  budgets, PnL and the policy are USD. On a non-stable quote, the USD side
+  needs the quote's Price API price: without it a budgeted bucket offers 0 and
+  can't open. A backtest's return on such a pair includes the quote token's
+  own USD move (the wallet holds SOL, valued in USD).
 - **No commands to inspect or repair the ledger** (stage U). An UNCONFIRMED
   intent (a process killed mid-swap) blocks the mode's ledger until the file
   is moved or deleted; `.claude/scripts/ledger_dump.py` prints it read-only.
-- **Paper fills use the quoted `outAmount`**, with no slippage model; replays
-  ignore the network fee (B5).
+- **Replays model costs, they don't measure them.** `fee_bps` +
+  `slippage_bps` per leg and a flat `--network-fee-usd` (default 0.002);
+  the one-time rent of a token account is not modelled. Compare with a live
+  bucket (`live_vs_backtest.py`) to calibrate them; the comparison assumes the
+  bucket started the window flat and with its whole budget.
+- **`Order.timestamp` is naive local time** (the account clock is
+  `datetime.now`), unlike the UTC intent and event timestamps; the comparison
+  uses the intent's `created_at` (B7).
+- **One tick per second.** Bots take prices from a hub (B7) at one per
+  second, where before they ticked on every websocket message (several a
+  second for SOL, one per 30s for a quiet token). Conditions that count
+  ticks, like `random_chance`, now fire at a steady rate (soak F5).
+- **The daily report needs Telegram** (`TELEGRAM_*`); without it the day is
+  still marked as reported in the ledger.
 - Policy budgets are wallet-wide by design; per-bucket limits are the
   bucket's job.
 
@@ -567,30 +681,34 @@ Owner task, outside the code: a one-week paper soak run.
 - **Keyless rate limit.** Without `JUPITER_API_KEY`, `api.jup.ag` answers
   `429 Too Many Requests` under bursts (seen in the live suite: quote calls
   right after candle and price calls). The live suite pauses 5s between
-  tests. Many strategy-runners on one keyless IP (B3) will need an API key
-  or the shared price hub (B7).
+  tests. Since B7, strategy-runners take prices from the trade-runner's hub
+  (one websocket and one batched Price API poll for all of them), so only
+  their warm-up candles and the trade-runner's quotes, quote checks and Price
+  API snapshots hit the API.
 
 ### 7.3 Security
 
-- The private key lives in the same process as strategy code until B3.
+- With `run`, the private key lives in the same process as the strategy;
+  `serve` + `connect` keeps it in the trade-runner only (B3).
 - `repr(Keypair)` is safe, but **`str(Keypair)` is the base58 secret**. Never
   format a keypair with `str()` or `{keypair!s}`.
 
 ## 8. Top risks
 
-1. **A runaway or prompt-injected agent.** Mitigated: agents only author
-   specs; policy and bucket budgets bound every trade; real
-   needs owner approval.
+1. **A runaway or prompt-injected agent.** Mitigated: agents only write
+   spec files; policy and bucket budgets bound every trade; the owner starts
+   every run, and real mode needs `real_trading_enabled`.
 2. **Double execution or lost confirmations.** Mitigated by idempotency
    keys, no re-send after broadcast, UNCONFIRMED blocking and reconciliation.
 3. **Key compromise through agent-reachable code.** Mitigated by the
    trade-runner split (B3) and a low-balance hot wallet.
 4. **Jupiter changes to undocumented endpoints.** Mitigated by the Price API
    fallback (A4) and configurable hosts.
-5. **Buckets drifting from the wallet** (manual trades, hand-resolved
-   intents). Mitigated by the aggregate reconcile and allocation rules (B2).
-6. **Strategy quality.** Mitigated by the backtest gate, paper first, and
-   `perf` against the backtest.
+5. **Buckets drifting from the wallet** (several buckets on one wallet,
+   paper wallet edits). Mitigated by the aggregate reconcile and allocation
+   rules (B2).
+6. **Strategy quality.** Mitigated by backtests on real candles, paper runs
+   before real, and iterating on the spec file.
 
 ## 9. Open questions for the owner
 
@@ -598,10 +716,6 @@ Owner task, outside the code: a one-week paper soak run.
   files are gone.
 - Which pairs, and what maximum notional per trade and per day, are you
   comfortable with in real mode?
-- May a manual swap spend funds allocated to a bucket, or only unallocated
-  funds (the B2 default)?
-- Approval channel for large trades later: Telegram inline buttons, CLI, or
-  both?
 - Real mode: one hot wallet for every strategy (the current plan), or one per
   strategy later?
 
@@ -647,3 +761,48 @@ Owner task, outside the code: a one-week paper soak run.
   blocked (move or delete the ledger to recover). The events table stays
   without the hash chain. `policy.toml` is untracked and
   `botconfigs.example.yaml` deleted. Order: U1, stage T, U2, U3.
+- **2026-09-30:** strategies are created as **spec files written from the
+  docs** (`docs/specs.md`, kept in step with the code by
+  `tests/test_spec_docs.py`), and we iterate on the files and the code. Agents
+  don't interact through a CLI, so the agent commands, the registry and
+  `submit` (B1), the registry-based approval (B4) and the MCP server (B7) are
+  dropped. Goal 1 is redefined accordingly.
+- **2026-09-30:** stage B reordered: B4 (guardrails for agent sessions) first,
+  then the owner's paper soak, then B3 with B2, then B5, B6, B7. B1 is removed
+  (specs are files); B2 loses the manual-swap rules; stages U and T are
+  archived in `history.md`.
+- **2026-10-03 (B5):** no ledger schema change, so the soak's paper ledgers
+  keep opening: failed-tx fees and sent daily reports are events, not
+  columns. Background work of the execution process (the daily report) runs
+  through `BotConfig.background` in `run`, so the bot stays unaware of the
+  ledger.
+- **2026-10-04 (B7):** the owner chose the safety core and the price hub;
+  Telegram approval and a service entrypoint wait. The transaction check runs
+  on the signed transaction in the executor (one simulation that also returns
+  the wallet's accounts) rather than in the trade-runner, so `run` gets it too.
+  The quote check fails closed for buys and open for sells, so an exit never
+  waits on the Price API. `run` uses the hub in-process too, so there is one
+  price path.
+- **2026-10-04 (B6):** the strategy works in the pair's quote token and money
+  stays in USD, rather than converting everything to USD: a JUP-SOL spec
+  should judge the JUP/SOL ratio, since its gains are paid in SOL. The `expr`
+  language is read by Python's `ast` and checked against a whitelist (the
+  hand-written parser first used redid what `ast` already does), with
+  three-valued logic so a warming indicator never fires a `not`.
+- **2026-10-04 (B9):** the priority fee is one owner setting in `policy.toml`
+  (a cap), used by real as Jupiter's `maxLamports`, charged in full by paper,
+  and priced into the backtest's network fee. The backtest's fee is measured
+  per pair from a live round-trip quote at the spec's size, not a flat 30 bps;
+  explicit flags keep it offline and repeatable. Cost per round trip is
+  "costless move minus net PnL" against the strategy's tick prices, so it
+  reads the same in real, paper and backtest.
+- **2026-10-04 (B10):** the price hub is the one Price API client of an
+  execution process: its oracle refreshes a mint only when the hub's own loop
+  let it pass `max_age` (the hub not running yet), so the per-tick budget
+  check and every trade's USD snapshot cost no request. A provider refusal is
+  its own status (REJECTED) rather than a text prefix on FAILED; old rows keep
+  the prefix, and the breaker only counts rows since the process started.
+- **2026-10-03:** perps planned as B8 in [`perps.md`](perps.md). The owner
+  chose Jupiter Perps, long and short, leverage set by the spec and capped by
+  `max_leverage` (default 3), a venue-side stop on every real perp position,
+  and B8 after B6. Its ledger schema bump waits for the end of the paper soak.

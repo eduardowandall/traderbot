@@ -222,10 +222,10 @@ async def test_buy_with_sol_keeps_fee_reserve():
     assert provider.buy.await_args.args[2] == Decimal("0.98")
 
 
-async def test_pnl_uses_usd_price_when_input_is_not_a_stablecoin():
+async def test_pnl_uses_quote_units_when_input_is_not_a_stablecoin():
     # caso real do log dry-run-random-USDC-SOL: comprou USDC gastando SOL.
-    # o fill é 0.0086 SOL/USDC, mas o feed cota USDC a ~1 USD; misturar os dois
-    # mostrava PNL de 11509%
+    # o fill é 0.0086 SOL/USDC e o USDC vale 1 USD; misturar as duas unidades
+    # mostrava PNL de 11509%. Desde B6 o sinal vem em SOL por USDC.
     provider = mock_provider()
     provider.get_account_balance = AsyncMock(
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("0.059077338"))]
@@ -234,16 +234,16 @@ async def test_pnl_uses_usd_price_when_input_is_not_a_stablecoin():
         return_value=SwapResult("sig", SOL.mint, USDC.mint, 39077338, 4537732)
     )
     acc = AsyncAccount(provider, SOL.pubkey, USDC.pubkey, memory_gateway())
-    market_price = Decimal("0.9997936921282948")
+    fill = Decimal("0.039077338") / Decimal("4.537732")
 
-    order = await acc.buy(market_price, Decimal("0.059085"))
+    order = await acc.buy(Decimal("0.0086"), Decimal("4.54"))
 
     assert order.quantity == Decimal("4.537732")
-    assert order.price == market_price
-    assert order.fill_price == Decimal("0.039077338") / Decimal("4.537732")
+    assert order.price == Decimal("1")  # USD por USDC
+    assert order.fill_price == order.quote_price == fill
     assert acc.book.position
-    pnl = acc.book.position.unrealized_pnl_percent(Decimal("0.999787081"))
-    assert abs(pnl) < Decimal("0.01")
+    pnl = acc.book.position.unrealized_pnl_percent(fill * Decimal("1.0001"))
+    assert abs(pnl) < Decimal("0.02")
 
 
 async def test_stablecoin_input_uses_real_fill_price():

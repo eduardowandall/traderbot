@@ -5,11 +5,11 @@ o `TradeClient` do bucket dele. Não recebe modo, chave, provider nem ledger:
 isso fica do lado da execução (`trader/wiring.py` monta).
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from trader.market import MarketData
 from trader.models import Interval, OrderSignal, Position, TickerData
@@ -19,8 +19,14 @@ from trader.trading_service.client import TradeClient
 class Strategy(Protocol):
     """O que o bot e o backtester pedem de uma estratégia (`SpecStrategy`)."""
 
+    # preço e saldo no token de cotação do par (USD em USDC/USDT);
+    # `quote_usd` converte valores em USD (ex: `fixed_usd`)
     def on_market_refresh(
-        self, price: Decimal, balance: Decimal, current_position: Position | None
+        self,
+        price: Decimal,
+        balance: Decimal,
+        current_position: Position | None,
+        quote_usd: Decimal | None,
     ) -> OrderSignal | None: ...
 
     # timeframe e quantidade de candles para aquecer os indicadores
@@ -59,5 +65,9 @@ class BotConfig:
     market: MarketData
     trader: TradeClient
     notifier: Notifier
-    # chamado a cada preço recebido (ex: `TickRecorder.record`)
-    on_tick: Callable[[datetime, Decimal], None] | None = None
+    # chamado a cada preço recebido (ex: `TickRecorder.record`): horário,
+    # preço em cotação e, num par sem stablecoin, o USD da cotação
+    on_tick: Callable[[datetime, Decimal, Decimal | None], None] | None = None
+    # tarefas que rodam junto com o loop e param com ele (ex: o relatório
+    # diário do `run`); o bot não sabe o que fazem
+    background: Sequence[Callable[[], Coroutine[Any, Any, None]]] = ()

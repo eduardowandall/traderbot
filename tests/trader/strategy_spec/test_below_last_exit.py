@@ -39,7 +39,9 @@ def _position(price) -> Position:
 
 
 def _tick(strategy, price, position=None):
-    return strategy.on_market_refresh(Decimal(str(price)), Decimal(100), position)
+    return strategy.on_market_refresh(
+        Decimal(str(price)), Decimal(100), position, Decimal(1)
+    )
 
 
 def test_the_first_buy_comes_from_the_explicit_no_last_exit():

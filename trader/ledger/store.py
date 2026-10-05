@@ -121,6 +121,19 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _window(
+    column: str, start: datetime | None, end: datetime | None
+) -> tuple[str, tuple[str, ...]]:
+    """Cláusula `[start, end)` sobre uma coluna ISO em UTC (vazia sem limites)."""
+    sql, params = "", ()
+    if start is not None:
+        sql, params = f" AND {column} >= ?", (start.astimezone(UTC).isoformat(),)
+    if end is not None:
+        sql = f"{sql} AND {column} < ?"
+        params = (*params, end.astimezone(UTC).isoformat())
+    return sql, params
+
+
 def _open_schema(conn: sqlite3.Connection, path: str) -> None:
     """Cria o esquema num banco vazio; recusa um de outra versão."""
     has_tables = conn.execute(

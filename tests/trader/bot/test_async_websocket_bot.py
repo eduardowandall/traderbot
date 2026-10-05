@@ -26,6 +26,8 @@ from trader.trading_service.protocol import (
 )
 from trader.trading_service.service import TradeService
 
+ONE = Decimal(1)
+
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 BONK = SOLANA_MINTS.get_by_symbol("BONK")
 
@@ -40,6 +42,7 @@ class FakeStrategy(StubStrategy):
         price: Decimal,
         balance: Decimal,
         current_position: Position | None,
+        quote_usd: Decimal | None = Decimal(1),
     ) -> OrderSignal | None:
         if self.count == 2:
             # encerra o bot após uma compra e uma venda
@@ -99,6 +102,55 @@ async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
     market_client.aclose.assert_awaited_once()
 
 
+class Inbox(NotificationService):
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def send_message(self, message: str) -> None:
+        self.messages.append(message)
+
+
+async def test_fills_report_the_bucket_and_background_tasks_stop_with_the_bot(
+    mock_sleep,
+):
+    quotes = ReplayQuoteClient(USDC, Decimal(0))
+    quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
+    wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
+    trader = LocalTradeClient(
+        TradeService(paper_provider(wallet, jupiter_client=quotes), memory_gateway()),
+        "BONK-USDC",
+        USDC.mint,
+        BONK.mint,
+        owns_service=True,
+    )
+
+    async def background():
+        await asyncio.Event().wait()  # para sempre, até o bot cancelar
+
+    inbox = Inbox()
+    bot = AsyncWebsocketTradingBot(
+        BotConfig(
+            name="e2e",
+            symbol="BONK-USDC",
+            strategy=FakeStrategy(),
+            market=JupiterMarketData(_market_client()),
+            trader=trader,
+            notifier=inbox,
+            background=(background,),
+        )
+    )
+
+    await bot.arun()
+
+    # criada com o loop e cancelada com ele: nenhuma task sobra
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+    fills = [m for m in inbox.messages if m.startswith("Ordem executada")]
+    # a compra mostra a posição marcada a mercado; a venda, o PnL realizado
+    assert "aberto ~$" in fills[0] and "PNL líquido" in fills[0]
+    assert "aberto" not in fills[1] and "PNL líquido" in fills[1]
+
+
 class FakeTrader:
     """`TradeClient` falso: bucket fixo e respostas programadas."""
 
@@ -113,7 +165,9 @@ class FakeTrader:
         self.opened = True
 
     async def bucket(self):
-        return BucketSnapshot("b", Decimal("100"), None, Decimal(0), status=self.status)
+        return BucketSnapshot(
+            "b", Decimal("100"), None, Decimal(0), ONE, status=self.status
+        )
 
     async def submit(self, request):
         self.requests.append(request)
@@ -170,7 +224,7 @@ async def test_stop_ends_the_loop():
     market.get_price = AsyncMock(return_value=Decimal("1"))
     strategy = mock.Mock(wraps=StubStrategy())
     bot = _bot(market, strategy)
-    strategy.on_market_refresh.side_effect = lambda *a: bot.stop()
+    strategy.on_market_refresh.side_effect = lambda *a, **k: bot.stop()
 
     await bot.arun()
 
@@ -226,7 +280,7 @@ def _buy_strategy():
 
 
 def _snapshot(status=BucketStatus.ACTIVE):
-    return BucketSnapshot("b", Decimal("100"), None, Decimal(0), status=status)
+    return BucketSnapshot("b", Decimal("100"), None, Decimal(0), ONE, status=status)
 
 
 async def test_denied_order_pauses_orders_but_not_the_strategy():
@@ -272,12 +326,18 @@ async def test_warmup_and_tick_callback():
         def warmup(self):
             return Interval.HOUR_1, 24
 
-        def on_market_refresh(self, price, balance, current_position):
+        def on_market_refresh(
+            self,
+            price,
+            balance,
+            current_position,
+            quote_usd: Decimal | None = Decimal(1),
+        ):
             raise KeyboardInterrupt()
 
     market = _market([Decimal("2")])
     ticks = []
-    bot = _bot(market, Warm(), on_tick=lambda ts, price: ticks.append(price))
+    bot = _bot(market, Warm(), on_tick=lambda ts, price, quote_usd: ticks.append(price))
 
     await bot.arun()
 

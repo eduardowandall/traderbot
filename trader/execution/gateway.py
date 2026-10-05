@@ -18,9 +18,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from trader.ledger import AccountPnL, Ledger, ledger_path
+from trader.ledger.reports import FAILED_TX_FEE
 from trader.models.book import remainder_entry
-from trader.models.costs import PnLResult
-from trader.models.errors import TransactionSubmittedError
+from trader.models.costs import FailedTxFee, PnLResult
+from trader.models.errors import SwapRejectedError, TransactionSubmittedError
 from trader.models.intent import IntentRecord, IntentSide, TradeIntent
 from trader.models.mints import SOLANA_MINTS
 from trader.models.mode import RunningMode
@@ -190,6 +191,16 @@ class TradeGateway:
             last_exit_price=None if entry else self.ledger.last_exit_price(account_id),
         )
 
+    def open_positions(self, prefix: str = "") -> dict[str, Decimal]:
+        """Tokens em posições abertas, somados por mint, nas contas do prefixo."""
+        held: dict[str, Decimal] = {}
+        for account in self.ledger.accounts(prefix):
+            entry = _open_entry(self.ledger.legs_since_last_buy(account))
+            if entry is not None:
+                mint = entry.output_mint
+                held[mint] = held.get(mint, Decimal("0")) + entry.quantity
+        return held
+
     def open_account(self, account_id: str) -> None:
         """Marca a abertura da conta (a primeira vez que um bucket abre)."""
         self.ledger.mark_account_opened(account_id)
@@ -210,6 +221,24 @@ class TradeGateway:
 
     def add_event(self, type_: str, payload: dict) -> None:
         self.ledger.add_event(type_, payload)
+
+    def record_failed_fee(self, intent: TradeIntent, fee: FailedTxFee) -> None:
+        """Taxas de tentativas que falharam na rede: custo do bucket, sem trade.
+
+        Um evento (não uma coluna da intenção): vale para intenções que
+        terminaram EXECUTED, FAILED ou REJECTED, e `pnl_totals` o desconta do PnL.
+        """
+        self.ledger.add_event(
+            FAILED_TX_FEE,
+            {
+                "account": intent.account,
+                "intent_id": intent.intent_id,
+                "signatures": list(fee.signatures),
+                "fee_lamports": fee.lamports,
+                "fee_usd": fee.usd,
+            },
+            intent_id=intent.intent_id,
+        )
 
     async def submit(
         self,
@@ -262,8 +291,13 @@ class TradeGateway:
         except TransactionSubmittedError as ex:
             self.ledger.mark_unconfirmed(intent.intent_id, str(ex), ex.signature)
             raise
+        except SwapRejectedError as ex:
+            # recusa antes do envio (impacto de preço, saldo simulado): nada
+            # quebrou, então não conta para o circuit breaker
+            self.ledger.mark_rejected(intent.intent_id, str(ex))
+            raise
         except Exception as ex:
-            # erros antes do envio (quote, simulação, política do provider)
+            # erros antes do envio (quote, simulação, RPC) ou falha na rede
             self.ledger.mark_failed(intent.intent_id, f"{type(ex).__name__}: {ex}")
             raise
         except BaseException as ex:

@@ -11,7 +11,8 @@ execução a um `Executor`:
 
 Regra que vale para qualquer executor: depois que a transação foi enviada,
 qualquer falha vira `TransactionSubmittedError` (nunca re-tentada, para não
-duplicar o swap).
+duplicar o swap), exceto uma transação que a rede confirmou como falha
+(`TransactionFailedOnChainError`): nada foi trocado, pode ser re-tentada.
 """
 
 import asyncio
@@ -29,7 +30,10 @@ from solders.transaction import VersionedTransaction
 from trader.models import SOLANA_MINTS, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.costs import TradeCosts
-from trader.models.errors import TransactionSubmittedError
+from trader.models.errors import (
+    TransactionFailedOnChainError,
+    TransactionSubmittedError,
+)
 from trader.models.mints import SOL_MINT
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.providers.jupiter.async_rpc_client import (
@@ -38,6 +42,11 @@ from trader.providers.jupiter.async_rpc_client import (
 )
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.providers.jupiter.swap_costs import SwapLegs, parse_swap_costs
+from trader.providers.jupiter.tx_inspection import (
+    check_balances,
+    check_programs,
+    state_after,
+)
 
 # SOL mínimo mantido na carteira para taxas de transação e rent
 DEFAULT_SOL_FEE_RESERVE = Decimal("0.02")
@@ -58,6 +67,9 @@ class Executor(Protocol):
 
     async def fetch_costs(self, result: SwapResult) -> TradeCosts | None: ...
 
+    # `meta.fee` de uma transação que falhou na rede; None se não achou
+    async def fetch_fee(self, signature: str) -> int | None: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -69,12 +81,15 @@ class OnChainExecutor:
     def __init__(
         self,
         keypair: Keypair,
-        rpc_client: AsyncRPCClient | None = None,
-        jupiter_client: AsyncJupiterClient | None = None,
+        rpc_client: AsyncRPCClient | None,  # None: o do ambiente
+        jupiter_client: AsyncJupiterClient | None,
+        # teto da priority fee (`max_priority_fee_lamports` da política)
+        max_priority_fee_lamports: int,
     ):
         if keypair is None:
             raise ValueError("execução on-chain precisa da chave da carteira")
         self.keypair = keypair
+        self.max_priority_fee_lamports = max_priority_fee_lamports
         self.rpc_client = rpc_client or AsyncRPCClient()
         # compartilhado com o provider (quem fecha é o provider)
         self.jupiter_client = jupiter_client or AsyncJupiterClient()
@@ -104,7 +119,9 @@ class OnChainExecutor:
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
     ) -> SwapResult:
         tx = await self._get_swap_transaction(quote)
+        check_programs(tx)  # antes de assinar: só programas conhecidos
         new_tx = await self._get_signed_transaction(tx)
+        await self._inspect_balances(new_tx, quote)  # simula, antes de enviar
         resp = await self._send_transaction_and_wait_for_confirmation(new_tx)
         # valores da quote; os efetivos (e os custos) vêm de `fetch_costs`,
         # chamado só depois que o ledger marcou a intenção como executada
@@ -120,18 +137,33 @@ class OnChainExecutor:
     async def _get_swap_transaction(
         self, quote: JupiterQuoteResponse
     ) -> VersionedTransaction:
-        return await self.jupiter_client.get_swap_transaction(quote, self.pubkey)
+        return await self.jupiter_client.get_swap_transaction(
+            quote, self.pubkey, self.max_priority_fee_lamports
+        )
 
     async def _get_signed_transaction(
         self, tx: VersionedTransaction
     ) -> VersionedTransaction:
         return await self.rpc_client.sign_transaction(tx, self.keypair)
 
+    async def _inspect_balances(
+        self, new_tx: VersionedTransaction, quote: JupiterQuoteResponse
+    ) -> None:
+        """Simula devolvendo a carteira: só a entrada sai, até o `inAmount`.
+
+        Uma simulação que falha (nada saiu) pode ser re-tentada; uma
+        transação que gastaria o que não devia é `TransactionInspectionError`.
+        """
+        before = await self.rpc_client.wallet_state(self.pubkey)
+        simulation = await self.rpc_client.simulate_transaction(
+            new_tx, before.addresses(self.pubkey)
+        )
+        after = state_after(before, simulation.value.accounts)
+        check_balances(before, after, quote.inputMint, int(quote.inAmount))
+
     async def _send_signed_transaction(
         self, new_tx: VersionedTransaction
     ) -> SendTransactionResp:
-        # simulação: nada saiu ainda, uma falha aqui pode ser re-tentada
-        await self.rpc_client.simulate_transaction(new_tx)
         try:
             return await self.rpc_client.send_transaction(new_tx)
         except Exception as ex:
@@ -172,6 +204,11 @@ class OnChainExecutor:
         signature = resp.value
         try:
             await self._wait_for_confirmation(signature)
+        except TransactionFailedError as ex:
+            # confirmada com erro: a rede garante que nada foi trocado
+            raise TransactionFailedOnChainError(
+                f"Transação {signature} falhou na rede: {ex}", signature=str(signature)
+            ) from ex
         except Exception as ex:
             raise TransactionSubmittedError(
                 f"Transação {signature} enviada mas não confirmada: {ex}",
@@ -197,6 +234,11 @@ class OnChainExecutor:
                 result.out_amount,
             ),
         )
+
+    async def fetch_fee(self, signature: str) -> int | None:
+        """A taxa paga por uma transação (inclusive uma que falhou)."""
+        tx = await self.rpc_client.get_confirmed_transaction(signature)
+        return None if tx is None or tx.meta is None else int(tx.meta.fee)
 
     async def aclose(self) -> None:
         # só o RPC é exclusivo do executor; o cliente Jupiter é do provider

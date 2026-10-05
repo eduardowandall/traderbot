@@ -8,7 +8,7 @@
 #
 # Camadas, da mais fraca para a mais forte: os padrões do código; em paper,
 # limites folgados (max_trade_usd 1000, max_daily_notional_usd 10000,
-# max_trades_per_hour 60), porque não há dinheiro de verdade; [trading] e
+# max_trades_per_hour 60 e 60 por bucket), porque não há dinheiro de verdade; [trading] e
 # [limits] (todos os modos); [paper.*] e [real.*] (só naquele modo).
 
 [trading]
@@ -19,6 +19,10 @@
 # Permite compras sem estimativa em USD (quando nenhum lado é USDC/USDT e não
 # há preço de mercado). Essas compras não entram no orçamento.
 # allow_unknown_notional = false
+# Teto da priority fee por transação, em lamports (padrão: 100000 = 0.0001
+# SOL). No real vai para a Jupiter como `maxLamports` (nível veryHigh); em
+# paper é cobrado inteiro em cada perna; o backtest o usa no custo de rede.
+# max_priority_fee_lamports = 100000
 
 [limits]
 # Os valores comentados são os padrões. Definir um aqui vale também para o
@@ -29,6 +33,8 @@
 # max_daily_notional_usd = 100
 # Máximo de compras na última hora.
 # max_trades_per_hour = 10
+# Máximo de compras de um bucket (uma spec) na última hora.
+# max_trades_per_hour_per_bucket = 6
 # Perda realizada nas últimas 24h que bloqueia novas compras, em USD.
 # max_daily_loss_usd = 20
 # Falhas seguidas que disparam o circuit breaker (reiniciar o bot rearma).

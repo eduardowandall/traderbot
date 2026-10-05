@@ -2,6 +2,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import inspection_passes
 from solders.keypair import Keypair
 
 from trader.models import SwapResult
@@ -24,8 +25,9 @@ def _quote(price_impact_pct="0.001"):
 def _provider(**kwargs):
     return AsyncJupiterProvider.on_chain(
         Keypair(),
-        rpc_client=AsyncMock(spec=AsyncRPCClient),
+        rpc_client=inspection_passes(AsyncMock(spec=AsyncRPCClient)),
         jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+        max_priority_fee_lamports=100_000,
         **kwargs,
     )
 
@@ -87,7 +89,7 @@ async def test_do_swap_returns_quote_amounts():
         return_value=resp
     )
 
-    result = await provider._do_swap("in", "out", 1000)
+    result = await provider._do_swap("in", "out", 1000, 50, fail_closed=True)
 
     assert result == SwapResult("sig", "in", "out", 1000, 990)
 

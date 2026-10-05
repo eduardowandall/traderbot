@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -5,7 +6,8 @@ import pytest
 
 from trader.models import SOLANA_MINTS, Order, OrderSide
 from trader.models.book import PositionBook
-from trader.models.costs import TradeCosts
+from trader.models.costs import FailedTxFee, TradeCosts
+from trader.models.position import Position
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
@@ -94,3 +96,35 @@ def test_restored_reopens_the_entry_and_keeps_totals():
         "PNL líquido -3.000000 USDC (~$-3.0000); bruto -2.000000, "
         "custos 0.010000000 SOL [!] 1 trade(s) incompleto(s)"
     )
+
+
+class TestMarkToMarket:
+    def test_unrealized_is_value_minus_cost_and_entry_costs(self):
+        fee = TradeCosts("onchain", fee_lamports=10_000_000)  # 0.01 SOL a 100
+        position = Position(_buy(costs=fee))
+        assert position.unrealized_usd(Decimal("110")) == Decimal("110") - 100 - 1
+
+    def test_without_rates_it_uses_the_entry_price(self):
+        position = Position(_order(OrderSide.BUY, "2", "100"))  # sem quote_amount
+        assert position.unrealized_usd(Decimal("90")) == Decimal("-20")
+
+    def test_unknown_sol_price_skips_the_costs(self):
+        fee = TradeCosts("onchain", fee_lamports=10_000_000)
+        entry = replace(_buy(costs=fee), sol_usd=None)
+        assert Position(entry).unrealized_usd(Decimal("100")) == Decimal("0")
+
+
+class TestFailedTxFees:
+    def test_charge_reduces_realized_usd_and_shows_in_summary(self):
+        book = PositionBook("USDC")
+        book.charge(FailedTxFee(("sig",), 15_000, Decimal("0.003")))
+
+        assert book.realized_usd == Decimal("-0.003")
+        assert book.failed_fee_sol == Decimal("0.000015")
+        assert "tx falhas 0.000015000 SOL" in book.summary()
+
+    def test_a_fee_without_usd_only_counts_in_sol(self):
+        book = PositionBook("USDC")
+        book.charge(FailedTxFee(("sig",), 5_000, None))
+        assert book.realized_usd == Decimal("0")
+        assert book.failed_fee_sol == Decimal("0.000005")

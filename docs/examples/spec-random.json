@@ -7,7 +7,7 @@
   "timeframe": "15_SECOND",
   "entry": {
     "mode": "all",
-    "conditions": [{"type": "random_chance", "pct": 5}, {"type": "random_chance", "pct": 10}]
+    "conditions": [{"type": "random_chance", "pct": 5}, {"type": "random_chance", "pct": 20}]
   },
   "exit": {
     "stop": {"type": "stop_loss", "pct": 50},

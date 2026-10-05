@@ -31,14 +31,20 @@ def test_valid_spec_has_no_errors():
     ("symbol", "fragment"),
     [
         ("NOPE-USDC", "não existe"),
-        ("SOL-JUP", "USDC ou USDT"),
+        ("SOL-SOL", "mesmo token"),
         ("USDT-USDC", "não pode ser stablecoin"),
+        ("USDC-SOL", "não pode ser stablecoin"),
     ],
 )
 def test_symbol_rules(symbol, fragment):
     errors = _errors(symbol=symbol)
     assert errors and all(path == "symbol" for path, _ in errors)
     assert any(fragment in msg for _, msg in errors)
+
+
+def test_any_registry_token_can_be_the_input():
+    # B6: o preço é no token de cotação e o orçamento em USD é convertido
+    assert _errors(symbol="JUP-SOL") == []
 
 
 def test_allow_list_applies_to_both_legs():

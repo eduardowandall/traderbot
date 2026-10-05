@@ -17,12 +17,13 @@ def _on_chain(rpc=None, client=None):
         Keypair(),
         rpc_client=rpc or AsyncMock(spec=AsyncRPCClient),
         jupiter_client=client or AsyncMock(spec=AsyncJupiterClient),
+        max_priority_fee_lamports=100_000,
     )
 
 
 def test_on_chain_execution_requires_the_key():
     with pytest.raises(ValueError, match="chave"):
-        OnChainExecutor(None)  # type: ignore[arg-type]
+        OnChainExecutor(None, None, None, 0)  # type: ignore[arg-type]
 
 
 def test_on_chain_reserves_sol_for_fees():
@@ -51,7 +52,7 @@ async def test_on_chain_execution_order(mock_rpc_client, mock_jupiter_client):
     # monta, assina, simula, envia e confirma; os custos vêm depois, da
     # transação confirmada (só quando o ledger já marcou EXECUTED)
     keypair = Keypair()
-    executor = OnChainExecutor(keypair, mock_rpc_client, mock_jupiter_client)
+    executor = OnChainExecutor(keypair, mock_rpc_client, mock_jupiter_client, 100_000)
     quote = bonk_quote()
 
     result = await executor.execute(quote.inputMint, quote.outputMint, quote)
@@ -60,6 +61,7 @@ async def test_on_chain_execution_order(mock_rpc_client, mock_jupiter_client):
     assert [c[0] for c in mock_jupiter_client.mock_calls] == ["get_swap_transaction"]
     assert [c[0] for c in mock_rpc_client.mock_calls if c[0].isidentifier()] == [
         "sign_transaction",
+        "wallet_state",
         "simulate_transaction",
         "send_transaction",
         "check_signature_is_confirmed",

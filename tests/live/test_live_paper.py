@@ -59,6 +59,10 @@ def test_a_paper_round_trip_records_fills_and_costs():
     sell = next(r for r in executed if r.intent.spend_mint == TOKEN.mint)
     assert sell.realized_pnl_usd is not None
     assert sell.order_json and order_from_json(sell.order_json).sol_usd
+    # o fill de paper sai abaixo da quote real (B5), dentro da tolerância dela
+    buy = next(r for r in executed if r.intent.spend_mint == QUOTE.mint)
+    costs = order_from_json(buy.order_json or "").costs
+    assert costs is not None and (costs.slippage_raw or 0) > 0, costs
 
 
 async def _round_trip():

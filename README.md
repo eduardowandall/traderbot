@@ -17,21 +17,37 @@ uv run main.py run paper docs/examples/spec-random.json --seed 1
 `paper` trades a **simulated wallet** (`.data/paper-wallet.json`, created with
 100 USDC and 0.5 SOL) at real Jupiter prices and quotes. Stop it with Ctrl+C.
 
-## The two commands
+## Commands
 
 ```bash
 uv run main.py run <paper|real> <spec.json> [--seed N] [--record-ticks FILE]
-uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps 30] [--slippage-bps 10]
+uv run main.py serve <paper|real>
+uv run main.py connect <spec.json> [--trader FILE] [--seed N]
+uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--json]
 ```
+
+- **Several specs at once:** start `serve <mode>` (the only process with the
+  key, the wallet and the ledger), then one `connect spec.json` per spec in its
+  own terminal (no key needed). Only one `run` or `serve` per mode can run at a
+  time; each spec's budget must fit the wallet together with the others.
 
 - **run**: the mode is required. The spec's `symbol` (`OUTPUT-INPUT`:
   `SOL-USDC` buys SOL with USDC) is the pair. The spec trades in its own
   bucket with its `budget_usd`; losing `max_loss_usd` retires it.
-  `--record-ticks` saves the prices for a later backtest.
+  `--record-ticks` saves the prices for a later backtest, and
+  `.claude/scripts/live_vs_backtest.py SPEC --ticks FILE` compares that
+  backtest with what the bucket actually did. With Telegram set up, `run` and
+  `serve` also send a daily report (fills, costs, PnL, open positions marked
+  to market) for the previous UTC day.
 - **backtest**: replays recent candles (or recorded ticks) with the spec's
-  budget and prints one JSON object. The input token must be USDC or USDT.
+  budget and prints a short summary (return, drawdown, trades); `--json`
+  prints the full result as one JSON object. Any registry token can be the
+  input (JUP-SOL replays the JUP/SOL ratio and still reports USD). Each leg pays `--fee-bps`, `--slippage-bps` and
+  `--network-fee-usd`; the fee and network fee are measured on Jupiter now
+  unless you pass them, and the summary shows the cost per round trip.
   It refuses fewer bars than the spec needs to warm up.
-- Examples are in `docs/examples/` (`spec-sol-dip.json` is the reference).
+- Specs are files: write one from [`docs/specs.md`](docs/specs.md) (every
+  field and condition type), next to the examples in `docs/examples/`.
 
 ## Real mode
 
@@ -41,8 +57,12 @@ cp policy.example.toml policy.toml   # set real_trading_enabled = true
 uv run --env-file .env main.py run real <spec.json>
 ```
 
-Use a dedicated low-balance wallet. Real mode stays denied until the policy
-enables it.
+Use a dedicated low-balance wallet. Before a swap is signed, its quote is checked
+against the Price API and its transaction is simulated: only the token being
+spent may leave the wallet, by at most the quoted amount. Real mode stays denied until the policy
+enables it. Run it yourself from a terminal: Claude Code sessions in this repo
+are blocked from real mode, the key and the real ledger
+(`.claude/hooks/guard_commands.py`).
 
 ## Configuration
 

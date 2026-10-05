@@ -2,7 +2,7 @@
 
 Cuida do que depende da carteira e do par: saldos (com cache), a reserva de
 SOL para taxas, as intenções de compra e venda e a conversão do fill em
-`Order`. O teto do bucket chega pronto em `buy(limit_usd=...)` (o
+`Order`. O teto do bucket chega pronto em `buy(limit=...)`, no token de cotação (o
 `TradeService` calcula). A posição e o PnL ficam no `PositionBook`
 (`self.book`, camada core); a execução passa por `execute_trade`.
 """
@@ -10,25 +10,26 @@ SOL para taxas, as intenções de compra e venda e a conversão do fill em
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 
 from solders.pubkey import Pubkey
 
+from trader.execution.balances import WalletBalances
 from trader.execution.fills import Fill, execute_trade
 from trader.execution.gateway import AccountState, TradeGateway
 from trader.execution.orders import order_from_fill, priced_mints
 from trader.market.prices import PriceOracle, usd_snapshot
 from trader.models import SOLANA_MINTS, Order, OrderSide
 from trader.models.book import PositionBook, remainder_entry
+from trader.models.costs import LAMPORTS_PER_SOL, FailedTxFee
 from trader.models.intent import IntentSide, TradeIntent, with_idempotency_key
 from trader.models.mints import SOL_MINT
 from trader.models.order import SwapResult, order_to_json
 from trader.models.position import Position
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
 
-# saldos lidos do provider valem por este tempo (invalidados a cada ordem)
-BALANCE_CACHE_TTL = timedelta(minutes=3)
 SOL = SOLANA_MINTS[SOL_MINT].pubkey
 
 
@@ -41,10 +42,12 @@ class AsyncAccount:
         gateway: TradeGateway,
         account_id: str | None = None,
         source: str = "strategy",
-        clock: Callable[[], datetime] = datetime.now,
+        clock: Callable[[], datetime] = partial(datetime.now, UTC),
         # preços USD (Price API) para pares sem stablecoin ou sem SOL;
         # None: esses valores ficam desconhecidos (backtest, testes)
         prices: PriceOracle | None = None,
+        # o saldo da carteira, dividido pelos buckets do mesmo serviço
+        wallet: WalletBalances | None = None,
     ):
         self.provider = provider
         self.prices = prices
@@ -60,17 +63,13 @@ class AsyncAccount:
         self.output_mint = output_mint
         self.logger = logging.getLogger(self.__module__)
 
-        # o feed de preços é em USD: fills e valores só batem com ele quando
-        # o input_mint é uma stablecoin de dólar
         self._quote = SOLANA_MINTS[input_mint]
         self._token = SOLANA_MINTS[output_mint]
-        self._quote_is_usd = self._quote.is_usd_stable
         self.book = PositionBook(self._quote.symbol)
         # o que o trade não precifica sozinho (Price API, antes do trade)
         self._priced_mints = priced_mints(self._quote, self._token)
 
-        self.balances = None
-        self.balances_last_update: datetime | None = None
+        self.wallet = wallet or WalletBalances(provider, clock)
         # do ledger (restore): para a estratégia retomar depois de reiniciar
         self.opened_at: datetime | None = None
         self.last_exit_at: datetime | None = None
@@ -82,24 +81,7 @@ class AsyncAccount:
     # --- saldos ------------------------------------------------------------
 
     async def get_balance(self, mint: Pubkey) -> Decimal:
-        # Cache para evitar chamadas repetidas ao RPC; expira após
-        # BALANCE_CACHE_TTL e é invalidado a cada ordem executada
-        # (`_execute_order`)
-        if self._balances_stale():
-            self.balances = await self.provider.get_account_balance()
-            self.balances_last_update = self.clock()
-        for balance in self.balances or []:
-            if balance.mint == mint:
-                self.logger.debug(
-                    f"get_balance: {str(balance.mint)=} {balance.available=}"
-                )
-                return balance.available
-        return Decimal("0.0")
-
-    def _balances_stale(self) -> bool:
-        if not self.balances or self.balances_last_update is None:
-            return True
-        return self.balances_last_update < self.clock() - BALANCE_CACHE_TTL
+        return await self.wallet.get(mint)
 
     async def get_spendable_balance(self, mint: Pubkey) -> Decimal:
         return self._spendable(mint, await self.get_balance(mint))
@@ -137,37 +119,12 @@ class AsyncAccount:
             costs_sol=totals.costs_sol,
             incomplete=totals.incomplete,
             entry=state.open_entry,
+            failed_fee_sol=Decimal(totals.failed_fee_lamports) / LAMPORTS_PER_SOL,
         )
         self.opened_at = state.opened_at
         self.last_exit_at = state.last_exit_at
         self.last_exit_price = state.last_exit_price
         return state
-
-    async def reconcile_position(self) -> bool:
-        """Confere a posição do ledger contra o saldo da carteira.
-
-        Retorna False (e registra no ledger) se a carteira tem menos do que a
-        posição registrada; a posição não é alterada automaticamente.
-        """
-        if self.book.position is None:
-            return True
-        expected = self.book.position.entry_order.quantity
-        balance = await self.get_balance(self.output_mint)
-        # tolerância para taxas/arredondamento
-        if balance >= expected * Decimal("0.99"):
-            return True
-        self.logger.warning(
-            f"Carteira tem {balance} mas o ledger registra posição de {expected}"
-        )
-        self.gateway.add_event(
-            "reconcile_mismatch",
-            {
-                "account": self.account_id,
-                "expected": expected,
-                "wallet_balance": balance,
-            },
-        )
-        return False
 
     # --- fill -> Order -----------------------------------------------------
 
@@ -225,11 +182,22 @@ class AsyncAccount:
         pode falhar, então nenhum preço é buscado aqui. Erros sobem sem log:
         quem classifica e registra é o `TradeService`.
         """
-        fill = await execute_trade(self.gateway, self.provider, intent, call)
+        fill = await execute_trade(
+            self.gateway,
+            self.provider,
+            intent,
+            call,
+            sol_usd=usd.get(SOL_MINT),
+            # tentativas que falharam na rede: a taxa sai do PnL do bucket
+            on_failed_fee=self._charge_failed_fee,
+        )
         # a carteira mudou: o próximo get_balance relê
-        self.balances = None
+        self.wallet.invalidate()
         requested = intent.quantity or Decimal("0")
         return self._to_order(fill, side, requested, price, usd)
+
+    def _charge_failed_fee(self, fee: FailedTxFee) -> None:
+        self.book.charge(fee)
 
     # --- intenções ---------------------------------------------------------
 
@@ -243,18 +211,15 @@ class AsyncAccount:
     ) -> Decimal | None:
         """Valor do trade em USD, quando dá para saber.
 
-        Venda: quantidade x preço do sinal (o feed é em USD em todo par).
-        Compra: valor gasto x preço USD do token gasto. As estratégias
-        dimensionam a compra pelo saldo do input_mint, então só o valor gasto
-        está na unidade certa; sem preço do input (Price API fora) fica
-        desconhecido, e a política recusa (`allow_unknown_notional`).
+        O preço do sinal é no token de cotação, então os dois lados viram um
+        valor em cotação (venda: quantidade x preço; compra: o valor gasto) e
+        depois USD pelo preço do token de cotação. Sem esse preço (Price API
+        fora) fica desconhecido, e a política recusa compras
+        (`allow_unknown_notional`).
         """
-        if side == IntentSide.SELL:
-            return quantity * price
-        if self._quote_is_usd:
-            return spend_amount
+        in_quote = quantity * price if side == IntentSide.SELL else spend_amount
         rate = usd.get(str(self.input_mint))
-        return None if rate is None else spend_amount * rate
+        return None if rate is None else in_quote * rate
 
     async def _usd_snapshot(self) -> dict[str, Decimal]:
         return await usd_snapshot(self.prices, self._priced_mints)
@@ -308,7 +273,7 @@ class AsyncAccount:
             )
         return position
 
-    async def _buy_limit(self, limit_usd: Decimal | None) -> Decimal:
+    async def _buy_limit(self, cap: Decimal | None) -> Decimal:
         """Quanto uma compra pode gastar: saldo gastável, limitado pelo bucket.
 
         Uma leitura de saldo só. Com teto (bucket), a leitura é nova: buckets
@@ -318,14 +283,14 @@ class AsyncAccount:
             raise ValueError(
                 "Não é possível executar compra no momento. Já existe posicão"
             )
-        if limit_usd is not None:
-            self.balances = None
+        if cap is not None:
+            self.wallet.invalidate()
         spendable = self._spendable_input(await self.get_balance(self.input_mint))
-        if limit_usd is None:
+        if cap is None:
             return spendable
-        if limit_usd <= 0:
+        if cap <= 0:
             raise ValueError("Não é possível executar compra: orçamento esgotado")
-        return min(spendable, limit_usd)
+        return min(spendable, cap)
 
     def _spendable_input(self, balance: Decimal) -> Decimal:
         if balance < Decimal("0.01"):  # mínimo para operar
@@ -345,14 +310,14 @@ class AsyncAccount:
         quantity: Decimal,
         rationale: str | None = None,
         idempotency_key: str | None = None,
-        limit_usd: Decimal | None = None,
+        limit: Decimal | None = None,
     ) -> Order:
         """Compra `quantity` do token, gastando `quantity * price` do input.
 
-        `limit_usd` é o que o bucket ainda pode gastar (None: só a carteira
+        `limit` é o que o bucket ainda pode gastar, no token de cotação (None: só a carteira
         limita). O valor gasto é calculado uma vez e vai na intenção.
         """
-        limit = await self._buy_limit(limit_usd)
+        limit = await self._buy_limit(limit)
         spend = quantity * price
         if spend > limit:
             self.logger.warning(
@@ -384,8 +349,19 @@ class AsyncAccount:
         return order
 
     async def sell(
-        self, price: Decimal, quantity: Decimal, rationale: str | None = None
+        self,
+        price: Decimal,
+        quantity: Decimal,
+        rationale: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Order:
+        """Vende até `quantity` da posição (nunca mais que ela nem que a carteira).
+
+        A chave padrão é uma por posição (`<conta>:sell:<entrada>:<qtd>`); quem
+        pede pode fixar outra (o strategy-runner, para um reenvio não repetir).
+        """
+        # o saldo em cache pode ser de antes da compra: a venda confere de novo
+        self.wallet.invalidate()
         position = await self.can_sell()
         entry = position.entry_order
         # nunca mais do que a posição: o pedido vem do cliente, e vendas não
@@ -415,9 +391,8 @@ class AsyncAccount:
             quantity,
             usd,
             # uma venda por posição: evita vender duas vezes a mesma entrada
-            idempotency_key=(
-                f"{self.account_id}:sell:{entry.order_id}:{entry.quantity}"
-            ),
+            idempotency_key=idempotency_key
+            or f"{self.account_id}:sell:{entry.order_id}:{entry.quantity}",
             rationale=rationale,
             closes_position=capped_by_wallet
             or remainder_entry(entry, quantity) is None,

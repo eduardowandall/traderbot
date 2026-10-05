@@ -28,6 +28,7 @@ from tenacity import (
 )
 
 from trader.providers.jupiter.logging_utils import logger_wrapper
+from trader.providers.jupiter.tx_inspection import WalletState, token_amount
 
 TRANSPORT_ERRORS = (httpx.TransportError, httpx2.TransportError)
 
@@ -68,7 +69,9 @@ class AsyncRPCClient:
             if not rpc_url:
                 # `assert` some com `python -O`
                 raise ValueError("HELIUS_RPC_URL não definida")
-            self.client = AsyncClient(rpc_url)
+            # Confirmed, como a confirmação dos swaps: em Finalized (o padrão
+            # do solana-py) o saldo logo após um swap ainda é o de antes
+            self.client = AsyncClient(rpc_url, commitment=Confirmed)
         self._client_connected = False
 
     async def aclose(self) -> None:
@@ -148,12 +151,47 @@ class AsyncRPCClient:
         return new_tx
 
     @logger_wrapper
-    async def simulate_transaction(self, new_tx: VersionedTransaction):
+    async def simulate_transaction(
+        self, new_tx: VersionedTransaction, addresses: list[Pubkey] | None = None
+    ):
+        """Simula; com `addresses`, a resposta traz essas contas como ficariam."""
         await self.is_connected()
-        simulation = await self.client.simulate_transaction(new_tx)
+        simulation = await self.client.simulate_transaction(
+            new_tx, accounts_addresses=addresses
+        )
         if simulation.value.err:
             raise Exception(f"Erro ao simular transação: {str(simulation.value.err)}")
         return simulation
+
+    @logger_wrapper
+    @_READ_RETRY
+    async def wallet_state(self, owner: Pubkey) -> WalletState:
+        """Lamports e todas as contas de token da carteira (Token e Token-2022)."""
+        await self.is_connected()
+        info, accounts = await asyncio.gather(
+            self.client.get_account_info(owner), self._token_accounts(owner)
+        )
+        tokens = {
+            str(keyed.pubkey): (
+                str(Pubkey(bytes(keyed.account.data)[0:32])),
+                token_amount(bytes(keyed.account.data)),
+            )
+            for keyed in accounts
+        }
+        lamports = info.value.lamports if info.value is not None else 0
+        return WalletState(lamports, tokens)
+
+    async def _token_accounts(self, owner: Pubkey) -> list:
+        """As contas de token da carteira, dos dois programas (Token e 2022)."""
+        responses = await asyncio.gather(
+            *(
+                self.client.get_token_accounts_by_owner(
+                    owner, TokenAccountOpts(program_id=program)
+                )
+                for program in (TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID)
+            )
+        )
+        return [keyed for resp in responses for keyed in resp.value]
 
     @logger_wrapper
     async def send_transaction(
@@ -183,16 +221,9 @@ class AsyncRPCClient:
         """Saldos raw por mint; uma leitura que falha levanta (nunca vira zero)."""
         await self.is_connected()
         balances: dict[Pubkey, Decimal] = {}
-
-        for token in [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]:
-            token_accounts = await self.client.get_token_accounts_by_owner(
-                owner, TokenAccountOpts(program_id=token)
-            )
-            for token_acc in token_accounts.value:
-                decoded = bytes(token_acc.account.data)
-                mint = Pubkey(decoded[0:32])
-                amount = int.from_bytes(decoded[64:72], "little")
-                # a mesma mint pode estar em mais de uma conta de token
-                balances[mint] = balances.get(mint, Decimal(0)) + Decimal(amount)
-
+        for keyed in await self._token_accounts(owner):
+            data = bytes(keyed.account.data)
+            mint = Pubkey(data[0:32])
+            # a mesma mint pode estar em mais de uma conta de token
+            balances[mint] = balances.get(mint, Decimal(0)) + token_amount(data)
         return balances

@@ -145,6 +145,8 @@ class TestLoadPolicy:
             "[trading]\nreal_trading_enabled = 1\n",
             '[trading]\nallowed_symbols = ["NOPE"]\n',
             "[limits]\ntypo_limit = 1\n",
+            "[trading]\nmax_priority_fee_lamports = 0\n",
+            "[trading]\nmax_priority_fee_lamports = -5\n",
         ],
     )
     def test_rejects_invalid_files(self, tmp_path, content):
@@ -162,6 +164,18 @@ def test_example_policy_file_is_valid_and_documents_the_defaults(mode):
     expected = Policy(**PAPER_DEFAULTS) if mode == "paper" else Policy()
     assert load_policy(example, mode=mode) == expected
     assert load_policy(PROJECT_ROOT / "missing.toml", mode=mode) == expected
+
+
+def test_the_priority_fee_cap_has_a_default_and_a_per_mode_override(tmp_path):
+    path = tmp_path / "policy.toml"
+    path.write_text(
+        "[trading]\nmax_priority_fee_lamports = 20000\n"
+        "[paper.trading]\nmax_priority_fee_lamports = 50000\n",
+        encoding="utf-8",
+    )
+    assert Policy().max_priority_fee_lamports == 100_000  # 0.0001 SOL
+    assert load_policy(path, mode="real").max_priority_fee_lamports == 20_000
+    assert load_policy(path, mode="paper").max_priority_fee_lamports == 50_000
 
 
 def test_dry_mode_is_gone():

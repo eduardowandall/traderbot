@@ -29,7 +29,7 @@ class FakeSolanaClient:
         signature = result.signature()
         return SendTransactionResp(value=signature)
 
-    async def simulate_transaction(self, tx: VersionedTransaction):
+    async def simulate_transaction(self, tx: VersionedTransaction, **config):
         result = FakeSolanaClient.client.simulate_transaction(tx)
         if isinstance(result, FailedTransactionMetadata):
             return SimulateTransactionResp(

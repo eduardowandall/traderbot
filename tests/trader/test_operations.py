@@ -73,6 +73,7 @@ async def test_no_new_swap_attempt_after_the_deadline(monkeypatch):
         Keypair(),
         rpc_client=mock.AsyncMock(spec=AsyncRPCClient),
         jupiter_client=mock.AsyncMock(spec=AsyncJupiterClient),
+        max_priority_fee_lamports=100_000,
     )
     provider._do_swap = mock.AsyncMock(side_effect=OSError("quote lenta"))
     clock = iter([0.0, svc.SWAP_DEADLINE_SECONDS + 1, svc.SWAP_DEADLINE_SECONDS + 2])
@@ -80,7 +81,7 @@ async def test_no_new_swap_attempt_after_the_deadline(monkeypatch):
     monkeypatch.setattr(svc, "time", SimpleNamespace(monotonic=lambda: next(clock)))
 
     with pytest.raises(RuntimeError):
-        await provider._do_swap_with_retry("a", "b", 1000)
+        await provider.swap_with_details("a", "b", 1000)
 
     provider._do_swap.assert_awaited_once()  # o prazo acabou: sem 2a tentativa
 

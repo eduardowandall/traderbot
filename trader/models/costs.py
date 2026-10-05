@@ -19,6 +19,9 @@ from decimal import Decimal
 
 LAMPORTS_PER_SOL = Decimal(10**9)
 BASE_FEE_LAMPORTS = 5000  # por assinatura
+# teto padrão da priority fee por transação (0.0001 SOL); o dono muda em
+# `policy.toml` (`max_priority_fee_lamports`)
+DEFAULT_MAX_PRIORITY_FEE_LAMPORTS = 100_000
 
 # origem dos custos
 ONCHAIN = "onchain"  # lidos da transação confirmada
@@ -61,6 +64,19 @@ class TradeCosts:
         if self.quoted_out_amount is None or self.actual_out_amount is None:
             return None
         return self.quoted_out_amount - self.actual_out_amount
+
+
+@dataclass(frozen=True)
+class FailedTxFee:
+    """Taxas de transações que a rede confirmou como falhas: custo sem trade."""
+
+    signatures: tuple[str, ...]
+    lamports: int
+    usd: Decimal | None  # None: sem preço do SOL
+
+    @property
+    def sol(self) -> Decimal:
+        return Decimal(self.lamports) / LAMPORTS_PER_SOL
 
 
 def costs_from_dict(data: dict | None) -> TradeCosts | None:
@@ -147,7 +163,7 @@ class PnLResult:
         )
 
 
-def _sol(lamports: int) -> str:
+def sol_text(lamports: int) -> str:
     return f"{Decimal(lamports) / LAMPORTS_PER_SOL:.9f}"
 
 
@@ -157,11 +173,61 @@ def describe_costs(costs: TradeCosts | None, sol_usd: Decimal | None = None) -> 
         return "custos: desconhecidos (valores da quote)"
     usd = f" (~${costs.native_cost_sol * sol_usd:.4f})" if sol_usd else ""
     text = (
-        f"custos [{costs.source}]: taxa {_sol(costs.fee_lamports)} SOL "
-        f"(priority {_sol(costs.priority_fee_lamports)}), "
-        f"rent {_sol(costs.rent_lamports)} SOL, "
-        f"outros {_sol(costs.other_lamports)} SOL{usd}"
+        f"custos [{costs.source}]: taxa {sol_text(costs.fee_lamports)} SOL "
+        f"(priority {sol_text(costs.priority_fee_lamports)}), "
+        f"rent {sol_text(costs.rent_lamports)} SOL, "
+        f"outros {sol_text(costs.other_lamports)} SOL{usd}"
     )
     if costs.slippage_raw:
         text += f"; slippage {costs.slippage_raw} raw"
     return text
+
+
+BPS = Decimal(10_000)
+
+
+@dataclass
+class RoundTripCosts:
+    """Quanto as idas e voltas fechadas custaram, tudo somado.
+
+    Por perna de venda: o movimento que um trade sem custo teria feito com o
+    que a entrada gastou (gasto x (preço do tick na saída / preço do tick na
+    entrada - 1)) menos o PnL líquido realizado. Sobra spread, taxas de pool,
+    slippage e taxas de rede (base + priority) num número só, igual no real,
+    no paper e no backtest (todos gravam o preço do tick na intenção).
+    """
+
+    count: int = 0  # posições fechadas
+    notional_usd: Decimal = Decimal("0")  # gasto na entrada das pernas somadas
+    cost_usd: Decimal = Decimal("0")
+
+    def add(self, cost_usd: Decimal, notional_usd: Decimal, closes: bool) -> None:
+        self.cost_usd += cost_usd
+        self.notional_usd += notional_usd
+        self.count += closes
+
+    @property
+    def per_trip_usd(self) -> Decimal | None:
+        return self.cost_usd / self.count if self.count else None
+
+    @property
+    def bps(self) -> Decimal | None:
+        """Em bps do que as entradas gastaram (pesado pelo valor)."""
+        return self.cost_usd / self.notional_usd * BPS if self.notional_usd else None
+
+    def describe(self) -> str:
+        if self.per_trip_usd is None or self.bps is None:
+            return "custo por ida e volta: sem idas e voltas fechadas"
+        return (
+            f"custo por ida e volta ~${self.per_trip_usd:.4f} "
+            f"({self.bps:.1f} bps) em {self.count}"
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "count": self.count,
+            "notional_usd": self.notional_usd,
+            "cost_usd": self.cost_usd,
+            "per_trip_usd": self.per_trip_usd,
+            "bps": self.bps,
+        }

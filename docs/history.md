@@ -3,7 +3,8 @@
 Finished roadmap stages, moved out of [`plan.md`](plan.md) on 2026-09-30 so the
 plan only carries open work. The text is kept as written at the time; later
 stages changed some of it (stage U removed dry mode, the manual swap, the
-`ledger`/`pnl`/`paper`/agent commands and the kill switch). For how the code
+`ledger`/`pnl`/`paper`/agent commands and the kill switch). Stages U and T
+are at the end. For how the code
 works today, read [`architecture.md`](architecture.md).
 
 ## What was built (short)
@@ -992,3 +993,214 @@ for the same reason as stage R.
 | S6 Resolve last + retry deadline | **done** (2026-09-29) | 561 tests. `ledger resolve` reads the chain first (`_prepare`), writes last (`_apply`), so a failed RPC leaves it re-runnable; `_READ_RETRY` on `get_confirmed_transaction`; no new swap attempt after 60s; `Retry-After` capped at 10s |
 | S7 Paper wallet lock | **done** (2026-09-29) | 562 tests. `reset` under the lock, pid-unique `.tmp`, stale-lock break re-checks the mtime before unlinking |
 | S8 Ops leftovers | **done** (2026-09-29) | 564 tests. Logs pruned after 14 days and named `trader-<ts>-<pid>.log`; `-W error::ResourceWarning` in addopts; `permissions: contents: read` on both workflows; smoke isolates `TRADER_LOG_DIR`; architecture doc updated; one alert after 5 startup failures |
+
+### Stage U — Simplification (added 2026-09-30)
+
+The owner found the code hard to follow: where a trade goes and where it came
+from. A paper buy went through about 11 objects and 45 calls, of which five do
+real work, and changed shape 9 times; the CLI had 18 commands, with two
+backtests that disagreed on the same spec; dry mode added about 20 mode checks
+and still needed a real key. The owner's decisions for this stage:
+
+- **Two modes:** `real` and `paper`. Dry mode is removed.
+- **Two commands:** `run <real|paper> spec.json` and `backtest spec.json`; the
+  mode has no default. `swap`, `halt`/`resume`, `ledger *`, `pnl`, `paper *`,
+  `market *` and `strategy *` are deleted with the code only they used. Stage
+  B adds commands back when it needs them.
+- **One backtest engine** (the spec's budget, the OHLC path replay, the
+  warm-up check), JSON output.
+- **No kill switch.** Stopping the process stops trading. The circuit breaker
+  counts failures since the process started, so a restart re-arms it.
+- **UNCONFIRMED intents stay blocked**; recovery is moving or deleting the
+  ledger file.
+- **The `events` table stays; the hash chain and `verify` go.**
+- **Order:** U1, then stage T (minus the items U1 makes obsolete), then U2 and
+  U3.
+
+#### U1. Cut and delete — M
+1. Dry mode: `RunningMode.DRY`, the `MODES` tuple (derived from the enum),
+   `is_dryrun` in `OnChainExecutor`/`AsyncRPCClient`/`on_chain`, the `[dry.*]`
+   policy sections.
+2. CLI: only `run` and `backtest`; delete `trader/cli/{swap,safety,ledger,pnl,paper}.py`,
+   `trader/agent_api/`, `trading_service/manual.py` (+ `SwapRequest`,
+   `TradeService.swap`), `execution/resolve.py`. Telegram turns on when
+   `TELEGRAM_CHAT_ID`/`TELEGRAM_BOT_TOKEN` are set (no `--notification-*`).
+3. One backtest engine in `trader/backtest/`; the close-only replay and the
+   no-interval `ticks_from_candles` branch go.
+4. Ledger: no hash chain; delete the queries only the removed commands used;
+   one `_SCHEMA` without the legacy migrations (an old-format file is refused
+   with a "move or delete it" error), after checking that the real ledger
+   holds no trades.
+5. No kill switch; breaker since process start.
+6. Dead code: `botconfigs.example.yaml`, the `spread` and `type_order`
+   parameters, `AsyncJupiterProvider.swap`, `stop_when_error`, unused
+   `TickerData` fields, `PositionType`, `SPEC_VERSION`,
+   `NullNotificationService`, unused re-exports, `wiring.build_gateway`,
+   duplicate helpers.
+7. Defaults: roomy paper limits in code; `policy.toml` untracked
+   (`policy.example.toml` stays).
+8. Dev tooling: `check.py`/`spec_check.py`/`smoke.py` follow the new CLI
+   (`.claude/scripts/ledger_dump.py` replaces the ledger commands for
+   `/smoke` and `/diagnose`); CI drops the redundant `uv python install`;
+   unused dev dependencies go; the bot test that pinned 17 RPC calls in order
+   uses a `FakeTrader`; the architecture map drops modules that don't exist.
+
+#### U2. Straighten the order path — M (after stage T)
+1. `trader/async_account.py` → `trader/execution/account.py`.
+2. The service passes the spend cap to `buy` as a value (no `spend_cap`
+   callback).
+3. One call dispatches on side (no `_place` → `_reply(lambda)` →
+   `place_order`); each exception is logged once.
+4. One balance read per order.
+5. The provider takes the spend amount from the intent instead of
+   recomputing `quantity * price`.
+6. One per-tick decision shared by the bot and the backtester. The backtester
+   then keeps selling a retiring bucket that still holds a position, like the
+   live bot (an intended fix).
+7. One `Strategy` protocol in `bot/config.py` replaces `TradingStrategy`,
+   `WarmsUp`, `Resumes`; `SpecStrategy` owns its clock and rng.
+8. `total_realized_pnl` folds into `pnl_totals` (EXECUTED only); no double
+   `realized_pnl_detail()`.
+
+#### U3. Docs you can follow — S
+- `architecture.md` becomes a tour of one traced paper buy (numbered hops with
+  file:line, what each is for, where state lives), then real mode, backtest
+  and safety.
+- `AGENTS.md` keeps commands and hard rules and points to `architecture.md`
+  for the module map; README leads with paper mode.
+- Example spec rationales match their conditions.
+
+### Stage T — Third recheck findings (added 2026-09-29, NOT implemented)
+
+The third review ran after stage S. Per the owner's instruction, this stage is
+**written down but not implemented**, and waits for the owner's review. The
+first three items are regressions or gaps in stage S itself and should come
+first; I checked the excepthook override and the startup-resume gap in the
+code.
+
+**Approved by the owner on 2026-09-30, to run after U1.** U1 deletes `ledger
+resolve`, so T4's "resolving a partial sell" and T6's two resolve items are
+obsolete, and T6's pruning item no longer applies (the old log files are gone).
+
+#### T1. Regression from S4: a fresh EXECUTING buy no longer blocks the bucket — high
+- **Where:** `ledger/policy_state.py::_unresolved_ids`, together with
+  `gateway.submit` and `AsyncAccount.buy`.
+- **What goes wrong:** R1's fail-closed rule ("a failed `mark_executed`
+  stays EXECUTING and blocks trading") relied on EXECUTING counting as
+  unresolved. S4 exempted EXECUTING intents younger than 300s, so:
+  1. a buy that executed but could not be marked (`database is locked`)
+     returns an `error`;
+  2. on the next tick the book is still empty, the policy passes, and a new
+     random key is minted;
+  3. the bot **buys again**.
+
+  A hard kill mid-swap followed by a restart within 5 minutes does the same.
+  A later `resolve` also reorders `legs_since_last_buy` (it orders by
+  `updated_at`).
+- **Fix:** EXECUTING intents of the **same account** always count as
+  unresolved (a bucket lives in one process); the 300s grace applies only
+  to other accounts. Alternatively, the gateway latches "blocked" in memory
+  after a failed `mark_*`. `legs_since_last_buy` should order by
+  `created_at`, or by execution time, not `updated_at`.
+
+#### T2. Regression from S3: `_close_if_retiring` can recurse without bound — medium-high
+- **Where:** `service.submit_order` → `_close_if_retiring` → `close_bucket`
+  → `submit_order` again.
+- **What goes wrong:** a rejected or failed remainder sell (the SOL
+  reserve, the minimum size, HALT, the breaker, an RPC error) leaves the
+  position open, so the cycle recurses at once: it re-authorizes, writes
+  intents, can trip the breaker, and ends in `RecursionError`.
+- **Fix:** attempt the close at most once per `submit_order` (a `closing`
+  flag on `_Bucket`, or a direct `_place` sell), and retry on later ticks.
+
+#### T3. S5 does not work: Typer replaces the redacting excepthook — high (secrets)
+- **Where:** `main.py` and typer 0.27.1 (`typer/main.py:57`,
+  `1134-1135`).
+- **What goes wrong:** typer saves `sys.excepthook` when it is imported and
+  reinstalls its own hook in `app()`. With pretty exceptions off, that hook
+  calls the **original** (Python's default) hook, so an escaping exception
+  still prints an unredacted traceback, including a chained httpx2 error
+  with the Helius key. The S5 test only calls the hook function directly.
+- **Fix:** in `main.py`, wrap `app()` in try/except and route the exception
+  through `redacted_excepthook` before exiting with code 1 (or patch
+  `typer.main._original_except_hook`). Add a subprocess test that raises a
+  secret-bearing error.
+
+#### T4. Stage S gaps in state and restore — medium
+- **Startup resume.** A transient error on `trader.bucket()` at startup
+  permanently skips `strategy.resume()`, because `_opened` is set first, so
+  the restored cooldown, re-arm and `ttl_days` clock are lost. **Fix:** a
+  separate `_resumed` flag.
+- **Long gaps.** A gap of `history` bars or more (the laptop slept, a long
+  backoff) fills the whole window with flat bars while `_warm` stays true:
+  RSI goes to 0 or 100 and volatility to about 0, which can trigger entries.
+  The same happens at the seams of an appended `--record-ticks` file.
+  **Fix:** a gap longer than a few bars resets warm-up and re-seeds from
+  candles; replays reset the series at a seam.
+- **`ttl_days` for a spec that never traded.** `opened_at` comes from the
+  first intent, so a spec that never fired restarts its clock on each
+  restart. **Fix:** a `bucket_opened` event on the first `open_bucket`
+  (later B1's `strategies.created_at`).
+- **Late `mark_executed` on a resolved row.** `_transition` skips the
+  status change, but the caller still records the fill: `attach_order`
+  writes the order and PnL onto a FAILED row. `total_realized_pnl` doesn't
+  filter on status, and `_add_failed_fees` counts that swap's fee as a
+  failed-transaction fee. **Fix:** `_transition` reports the skip; the
+  gateway raises; `attach_order` requires EXECUTED; `total_realized_pnl`
+  filters on EXECUTED.
+- **Resolving a partial sell.** `resolved_fill` always closes the position,
+  so resolving a partial sell drops the remainder. **Fix:** mirror
+  `AsyncAccount.sell` with `remainder_entry` / `reduce` /
+  `closes_position=False`.
+- **A capped sell whose `record_fill` failed.** Memory closes the position,
+  but restore reopens a remainder over 1% from the intent's quantity, which
+  since S3 happens at the next order. That leaves an unsellable remainder
+  that blocks buys. **Fix:** store the closes-position flag on the intent
+  row.
+
+#### T5. Backtest bias that remains — medium (matters for the B1 gate)
+- The path is always open → low → high → close. That is conservative for
+  stops but **optimistic** for a dip entry followed by a take-profit in the
+  same bar: a probe made 30 round trips, every one inside a single bar.
+- **Fix:** use open → high → low → close when close < open (the usual
+  heuristic), or forbid a non-stop exit in the bar of the entry.
+
+#### T6. Resolve and CI gaps — medium/low
+- **`ledger resolve ... executed` in real mode is not re-runnable.** It uses
+  `fetch_swap_costs`, which never raises, so an RPC failure, a missing
+  transaction or a missing signature silently falls back to the intent's
+  requested amounts, and the intent is then resolved for good. **Fix:**
+  call `executor.fetch_costs` (it raises); abort without writing unless
+  there is `--estimate`.
+- **Status check too late.** Resolving an already-resolved intent does the
+  network work first, then crashes with a traceback. **Fix:** check the
+  status right after `ledger.get` and raise `BadParameter`.
+- **Unclosed ledgers pass the tests.** `-W error::ResourceWarning` does not
+  catch an unclosed sqlite connection, because pytest reports it as a
+  `PytestUnraisableExceptionWarning`, which is only a warning. **Fix:** add
+  `-W error::pytest.PytestUnraisableExceptionWarning`.
+- **Pruning misses the old files.** `prune_logs` only matches `trader-*`, so
+  the 116 older files (231 MB, including the six with the leaked key) stay.
+  **Fix:** widen the pattern, or say so in §9.
+- **Paper wallet on Windows (suspected).** `os.replace` can fail while
+  another process reads the file outside the lock, and the lock wait uses a
+  blocking `time.sleep` inside the event loop. **Fix:** read under the lock
+  (or retry the replace), and use an async wait.
+- **Docs:**
+  - `architecture.md` still says entries wait for "the largest
+    `lookback()`" (it is `spec.history()` now);
+  - README omits `--slippage-bps`.
+
+### Progress of stages U and T
+
+| Item | Status | Notes |
+|---|---|---|
+| U1 Cut and delete | **done** (2026-09-30) | 456 tests (was 540). CLI is `run` + `backtest`; dry mode, kill switch, hash chain, manual swap, agent/ledger/pnl/paper commands gone; `trader/` 8,989 -> 7,722 lines, `tests/` 8,739 -> 7,564. The old ledgers in `.data/` are refused (old format) |
+| T1 EXECUTING blocks own bucket (S4 regression) | **done** (2026-09-30) | An EXECUTING intent of the same account always blocks (`policy_state(account=)`); legs ordered by `created_at` |
+| T2 Bounded remainder close (S3 regression) | **done** (2026-09-30) | `_Bucket.closing`: one remainder sell per order (the test hit `RecursionError` without it) |
+| T3 Excepthook overridden by Typer (S5 gap) | **done** (2026-09-30) | `main.main()` routes an escaping error through `redacted_excepthook`; subprocess test with a fake api-key |
+| T4 State/restore gaps | **done** (2026-09-30) | `_resumed` retried apart from `_opened`; gaps over `MAX_GAP_BARS` restart the series and cool the spec; `bucket_opened` event starts `ttl_days`; late marks are reported and `attach_order` needs EXECUTED; `closes_position` on the intent row. The resolve item is obsolete (U1) |
+| T5 Same-bar entry+exit bias | **done** (2026-09-30) | Falling bars replay open -> high -> low -> close |
+| T6 Resolve/CI/docs gaps | **done** (2026-09-30) | `-W error::pytest.PytestUnraisableExceptionWarning`; wallet reads under the lock, `os.replace` retried on `PermissionError` (the lock wait stays synchronous: it is held for milliseconds). Resolve and log-pruning items obsolete; docs items in U3 |
+| U2 Straighten the order path | **done** (2026-09-30) | `trader/execution/account.py`; the cap is `buy(limit_usd=)` (no callback); `TradeService._place`/`_execute` classify and dispatch, errors logged once; one balance read per buy; `provider.buy(spend_amount)`; `trader/bot/decision.py` shared by the bot and the backtester (a retiring bucket with a leftover keeps being replayed); one `Strategy` protocol (no `TradingStrategy`, `WarmsUp`, `Resumes`); `pnl_totals` replaces `total_realized_pnl`. Also removed the per-order `sync_with_ledger` (it only followed manual resolutions). Paper wallet file re-reads kept (only on cache misses) |
+| U3 Docs you can follow | **done** (2026-09-30) | `architecture.md` (424 -> 174 lines) follows one paper buy hop by hop with file:line; README (192 -> 94) leads with paper; AGENTS.md (120 dense lines -> 113 short ones); example rationales fixed; `.env.example` lists every variable. Stage U total: `trader/` 8,989 -> 7,788 lines, 466 tests |

@@ -22,6 +22,7 @@ from tenacity import (
 from websockets.asyncio.client import ClientConnection
 
 # `Interval` mora em models (camada core); reexportado por compatibilidade
+from trader.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
 from trader.models.public_data import Interval as Interval
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.providers.jupiter.logging_utils import logger_wrapper
@@ -90,6 +91,22 @@ def _quote_params(
     if max_accounts is not None:
         params["maxAccounts"] = str(max_accounts)
     return params
+
+
+def priority_fee(max_lamports: int) -> dict[str, Any]:
+    """`prioritizationFeeLamports` do /swap: a estimativa da Jupiter, com teto.
+
+    `veryHigh` (percentil 75): um swap que não entra em 30s vira UNCONFIRMED e
+    bloqueia o modo; o teto (`max_priority_fee_lamports` da política) limita o
+    custo disso.
+    """
+    return {
+        "priorityLevelWithMaxLamports": {
+            "maxLamports": max_lamports,
+            "priorityLevel": "veryHigh",
+            "global": False,
+        }
+    }
 
 
 def _add_response_notes(ex: Exception, url: str, response) -> None:
@@ -267,7 +284,10 @@ class AsyncJupiterClient:
     @logger_wrapper
     @_HTTP_RETRY
     async def get_swap_transaction(
-        self, quote: JupiterQuoteResponse, pubkey: Pubkey
+        self,
+        quote: JupiterQuoteResponse,
+        pubkey: Pubkey,
+        max_priority_fee_lamports: int = DEFAULT_MAX_PRIORITY_FEE_LAMPORTS,
     ) -> VersionedTransaction:
         response = None
         try:
@@ -276,6 +296,9 @@ class AsyncJupiterClient:
                 json={
                     "quoteResponse": asdict(quote),
                     "userPublicKey": str(pubkey),
+                    "prioritizationFeeLamports": priority_fee(
+                        max_priority_fee_lamports
+                    ),
                 },
             )
             response.raise_for_status()

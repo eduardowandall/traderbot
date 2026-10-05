@@ -80,7 +80,7 @@ class TestAsyncJupiterClient:
                 client = AsyncJupiterClient(
                     base_url="https://my-proxy.example.com", api_key="k"
                 )
-                result = await client.get_swap_transaction(quote, pubkey)
+                result = await client.get_swap_transaction(quote, pubkey, 7_000)
 
             assert result == tx
             mock_post.assert_called_once_with(
@@ -88,6 +88,14 @@ class TestAsyncJupiterClient:
                 json={
                     "quoteResponse": mock.ANY,
                     "userPublicKey": str(pubkey),
+                    # o teto da política vai como `maxLamports` da Jupiter
+                    "prioritizationFeeLamports": {
+                        "priorityLevelWithMaxLamports": {
+                            "maxLamports": 7_000,
+                            "priorityLevel": "veryHigh",
+                            "global": False,
+                        }
+                    },
                 },
             )
 

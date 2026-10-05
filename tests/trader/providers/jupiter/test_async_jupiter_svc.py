@@ -3,6 +3,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import simulation
 from solana.rpc.async_api import AsyncClient as SolanaClient
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -18,9 +19,7 @@ from solders.solders import (
     MessageV0,
     RpcKeyedAccount,
     RpcResponseContext,
-    RpcSimulateTransactionResult,
     SendTransactionResp,
-    SimulateTransactionResp,
     to_bytes_versioned,
     transfer,
 )
@@ -28,6 +27,7 @@ from solders.transaction import VersionedTransaction
 
 from trader.models import SOLANA_MINTS
 from trader.models.account_data import MintBalance
+from trader.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
 from trader.providers import JupiterQuoteResponse, JupiterRoutePlan, JupiterSwapInfo
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
@@ -76,11 +76,10 @@ def fake_solana_client():
             context=RpcResponseContext(slot=0),
         )
     )
+    # a inspeção (B7) pede a carteira e as contas de token: nada muda
+    token = bytes(client.get_token_accounts_by_owner.return_value.value[0].account.data)
     client.simulate_transaction = AsyncMock(
-        return_value=SimulateTransactionResp(
-            RpcSimulateTransactionResult(),
-            RpcResponseContext(slot=123),  # type: ignore
-        )
+        return_value=simulation(lamports=123456789, tokens=[token])
     )
     client.send_raw_transaction = AsyncMock(
         return_value=SendTransactionResp(value=Signature.new_unique())
@@ -94,7 +93,10 @@ class TestAsyncJupiterProvider:
         rpc_client = AsyncMock(spec=AsyncRPCClient)
         jupiter_client = AsyncMock(spec=AsyncJupiterClient)
         api = AsyncJupiterProvider.on_chain(
-            keypair, rpc_client=rpc_client, jupiter_client=jupiter_client
+            keypair,
+            rpc_client=rpc_client,
+            jupiter_client=jupiter_client,
+            max_priority_fee_lamports=100_000,
         )
 
         assert isinstance(api.executor.keypair, Keypair)
@@ -107,6 +109,7 @@ class TestAsyncJupiterProvider:
             Keypair(),
             rpc_client=AsyncRPCClient(client=fake_solana_client),
             jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+            max_priority_fee_lamports=100_000,
         )
 
         balance = await api.get_account_balance()
@@ -126,6 +129,7 @@ class TestPlaceOrder:
             Keypair(),
             rpc_client=AsyncMock(spec=AsyncRPCClient),
             jupiter_client=self.jupiter_client,
+            max_priority_fee_lamports=100_000,
         )
 
     async def test_buy_forwards_slippage(self):
@@ -148,35 +152,37 @@ class TestPlaceOrder:
         result = await self.api.sell(usdc, sol, Decimal("1"), slippage_bps=100)
         assert result == "sig"
         swap.assert_awaited_once_with(
-            str(sol), str(usdc), 1_000_000_000, slippage_bps=100
+            str(sol), str(usdc), 1_000_000_000, slippage_bps=100, fail_closed=False
         )
 
-    async def test_do_swap_with_retry_escalates_slippage(self):
+    async def test_swap_with_details_escalates_slippage(self):
         self.api.max_slippage_bps = 200
         do_swap = AsyncMock(
             side_effect=[Exception("erro 1"), Exception("erro 2"), "sig"]
         )
         self.api._do_swap = do_swap
 
-        result = await self.api._do_swap_with_retry(
+        result = await self.api.swap_with_details(
             "mint_in", "mint_out", 1000, slippage_bps=100
         )
         assert result == "sig"
         do_swap.assert_has_calls(
             [
-                mock.call("mint_in", "mint_out", 1000, 100),
-                mock.call("mint_in", "mint_out", 1000, 100),
-                mock.call("mint_in", "mint_out", 1000, 125),
+                mock.call("mint_in", "mint_out", 1000, 100, fail_closed=True),
+                mock.call("mint_in", "mint_out", 1000, 100, fail_closed=True),
+                mock.call("mint_in", "mint_out", 1000, 125, fail_closed=True),
             ]
         )
 
-    async def test_do_swap_with_retry_default_slippage(self):
+    async def test_swap_with_details_default_slippage(self):
         do_swap = AsyncMock(return_value="sig")
         self.api._do_swap = do_swap
 
-        result = await self.api._do_swap_with_retry("mint_in", "mint_out", 1000)
+        result = await self.api.swap_with_details("mint_in", "mint_out", 1000)
         assert result == "sig"
-        do_swap.assert_awaited_once_with("mint_in", "mint_out", 1000, 50)
+        do_swap.assert_awaited_once_with(
+            "mint_in", "mint_out", 1000, 50, fail_closed=True
+        )
 
     async def test_get_quote_with_route(self):
         quote_response = JupiterQuoteResponse(
@@ -285,7 +291,10 @@ class TestPlaceOrder:
 
         tx = await self.api.executor._get_swap_transaction(quote=quote)
         assert isinstance(tx, VersionedTransaction)
-        get_swap_transaction.assert_called_once_with(quote, self.api.executor.pubkey)
+        # sem teto dado, o padrão (o de `policy.toml` vem pela `wiring`)
+        get_swap_transaction.assert_called_once_with(
+            quote, self.api.executor.pubkey, DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
+        )
 
     async def test_get_signed_transaction(self, fake_solana_client):
         keypair = Keypair()
@@ -295,6 +304,7 @@ class TestPlaceOrder:
             keypair=keypair,
             rpc_client=AsyncRPCClient(client=fake_solana_client),
             jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+            max_priority_fee_lamports=100_000,
         )
         ixs = [
             transfer(
@@ -331,6 +341,7 @@ class TestPlaceOrder:
             keypair=keypair,
             rpc_client=AsyncRPCClient(client=fake_solana_client),
             jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+            max_priority_fee_lamports=100_000,
         )
         ixs = [
             transfer(

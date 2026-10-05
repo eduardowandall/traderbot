@@ -19,7 +19,7 @@ from decimal import Decimal
 from pydantic import ValidationError
 
 from trader.models import SOLANA_MINTS, Mint
-from trader.strategy_spec.models import StrategySpec
+from trader.strategy_spec.models import FixedUsd, StrategySpec
 
 # prazo máximo de uma spec; vai para a seção [strategies] da política (B1)
 DEFAULT_MAX_DAYS = 30
@@ -70,13 +70,12 @@ def _symbol(spec: StrategySpec, limits: SpecLimits, now: datetime):
 
 
 def _legs(token: Mint, quote: Mint) -> Iterator[SpecError]:
-    # o feed de preços é em USD: só dá para operar gastando stablecoin de dólar
-    if not quote.is_usd_stable:
-        yield SpecError(
-            "symbol",
-            f"entrada {quote.symbol} precisa ser USDC ou USDT (par TOKEN-USDC)",
-        )
+    # qualquer entrada do registro: preços e saldos ficam no token de cotação,
+    # e orçamentos em USD são convertidos pelo preço dele (Price API)
+    if token.mint == quote.mint:
+        yield SpecError("symbol", f"entrada e saída são o mesmo token {token.symbol}")
     if token.is_usd_stable:
+        # só compras (long): comprar stablecoin seria vender o outro token
         yield SpecError("symbol", f"saída {token.symbol} não pode ser stablecoin")
 
 
@@ -89,16 +88,16 @@ def _allowed(token: Mint, quote: Mint, limits: SpecLimits) -> Iterator[SpecError
 
 
 def _sizing(spec: StrategySpec, limits: SpecLimits, now: datetime):
-    usd = spec.sizing.usd
+    sizing = spec.sizing
+    path = "sizing.usd" if isinstance(sizing, FixedUsd) else "sizing.pct"
+    usd = sizing.max_usd(spec.budget_usd)
     if usd > limits.max_trade_usd:
         # acima do limite por trade toda compra seria recusada pela política
         yield SpecError(
-            "sizing.usd", f"{usd} USD acima do limite por trade {limits.max_trade_usd}"
+            path, f"{usd} USD acima do limite por trade {limits.max_trade_usd}"
         )
     if usd > spec.budget_usd:
-        yield SpecError(
-            "sizing.usd", f"{usd} USD acima do budget_usd {spec.budget_usd}"
-        )
+        yield SpecError(path, f"{usd} USD acima do budget_usd {spec.budget_usd}")
 
 
 def _expiry(spec: StrategySpec, limits: SpecLimits, now: datetime):

@@ -22,6 +22,9 @@ class IntentStatus(StrEnum):
     EXECUTING = auto()  # aprovada, em execução
     EXECUTED = auto()  # swap confirmado
     FAILED = auto()  # falhou antes do envio; nada foi executado
+    # recusada pelo provider antes do envio (impacto de preço, conferência da
+    # quote, saldo simulado): nada quebrou, então fica fora do circuit breaker
+    REJECTED = auto()
     # enviada à rede mas sem confirmação: pode ou não ter sido executada.
     # bloqueia novos trades do modo até o dono mover ou apagar o ledger.
     UNCONFIRMED = auto()

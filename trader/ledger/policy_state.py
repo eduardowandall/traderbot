@@ -25,28 +25,36 @@ class PolicyStateQueries(LedgerStore):
         now = now or datetime.now(UTC)
         day_ago = (now - timedelta(hours=24)).isoformat()
         hour_ago = (now - timedelta(hours=1)).isoformat()
-        daily_notional, trades_last_hour = self._spending(day_ago, hour_ago)
+        daily_notional, trades_last_hour, account_trades = self._spending(
+            day_ago, hour_ago, account
+        )
         return PolicyState(
             daily_notional_usd=daily_notional,
             trades_last_hour=trades_last_hour,
+            account_trades_last_hour=account_trades,
             daily_realized_pnl_usd=self._realized_pnl_since(day_ago),
             consecutive_failures=self._consecutive_failures(failures_since),
             unresolved_intent_ids=self._unresolved_ids(now, account),
         )
 
-    def _spending(self, day_ago: str, hour_ago: str) -> tuple[Decimal, int]:
-        """Compras/swaps que moveram fundos: valor em 24h e contagem em 1h."""
+    def _spending(
+        self, day_ago: str, hour_ago: str, account: str | None
+    ) -> tuple[Decimal, int, int]:
+        """Compras/swaps que moveram fundos: valor em 24h, contagem em 1h, e
+        contagem em 1h só do bucket (0 sem conta)."""
         placeholders, statuses = _in(MOVED_FUNDS_STATUSES)
         rows = self.conn.execute(
-            f"SELECT notional_usd, created_at FROM intents WHERE created_at >= ? "
-            f"AND side != ? AND status IN ({placeholders})",
+            f"SELECT notional_usd, created_at, account FROM intents "
+            f"WHERE created_at >= ? AND side != ? AND status IN ({placeholders})",
             (day_ago, str(IntentSide.SELL), *statuses),
         ).fetchall()
         notional = sum(
             (Decimal(r["notional_usd"]) for r in rows if r["notional_usd"]),
             Decimal("0"),
         )
-        return notional, sum(1 for r in rows if r["created_at"] >= hour_ago)
+        last_hour = [r for r in rows if r["created_at"] >= hour_ago]
+        mine = sum(1 for r in last_hour if account and r["account"] == account)
+        return notional, len(last_hour), mine
 
     def _realized_pnl_since(self, since: str) -> Decimal:
         rows = self.conn.execute(
@@ -57,7 +65,12 @@ class PolicyStateQueries(LedgerStore):
         return sum((Decimal(r["realized_pnl_usd"]) for r in rows), Decimal("0"))
 
     def _consecutive_failures(self, since: datetime | None) -> int:
-        """Falhas desde o último sucesso (e desde `since`, se dado)."""
+        """Falhas desde o último sucesso (e desde `since`, se dado).
+
+        Recusas do provider (REJECTED: impacto de preço etc.) ficam de fora:
+        repeti-las ao tentar sair de um mercado ralo não pode travar o stop de
+        outros buckets.
+        """
         row = self.conn.execute(
             "SELECT COUNT(*) AS n FROM intents WHERE status = ? AND updated_at > "
             "MAX(?, COALESCE((SELECT MAX(updated_at) FROM intents "

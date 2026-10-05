@@ -10,6 +10,7 @@ from trader.models.costs import SIMULATED
 from trader.paper.executor import (
     DEFAULT_ACCOUNT_RENT_LAMPORTS,
     DEFAULT_FEE_LAMPORTS,
+    DEFAULT_SLIPPAGE_BPS,
     SimulatedExecutor,
 )
 from trader.paper.wallet import SimulatedWallet
@@ -28,10 +29,24 @@ def paper_provider(
     fee_lamports: int = DEFAULT_FEE_LAMPORTS,
     account_rent_lamports: int = DEFAULT_ACCOUNT_RENT_LAMPORTS,
     cost_source: str = SIMULATED,
+    # o fill sai abaixo da quote (no mínimo o `otherAmountThreshold` dela)
+    slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
+    max_quote_deviation_pct: Decimal | None = None,
+    # o teto da política, cobrado inteiro em cada perna (0 nos replays)
+    priority_fee_lamports: int = 0,
 ) -> AsyncJupiterProvider[SimulatedExecutor]:
     executor = SimulatedExecutor(
-        wallet, fee_lamports, account_rent_lamports, cost_source
+        wallet,
+        fee_lamports,
+        account_rent_lamports,
+        cost_source,
+        slippage_bps,
+        priority_fee_lamports,
     )
     return AsyncJupiterProvider(
-        executor, jupiter_client, max_price_impact_pct, max_slippage_bps
+        executor,
+        jupiter_client,
+        max_price_impact_pct,
+        max_slippage_bps,
+        max_quote_deviation_pct,
     )

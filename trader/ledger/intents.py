@@ -13,7 +13,7 @@ from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 
-from trader.ledger.store import LedgerStore, _dec, _in, _int, _now, _str
+from trader.ledger.store import LedgerStore, _dec, _in, _int, _now, _str, _window
 from trader.models.costs import PnLResult
 from trader.models.intent import (
     ACTIVE_STATUSES,
@@ -153,6 +153,9 @@ class IntentStore(LedgerStore):
     def mark_failed(self, intent_id: str, error: str) -> None:
         self._mark_error(intent_id, IntentStatus.FAILED, error)
 
+    def mark_rejected(self, intent_id: str, error: str) -> None:
+        self._mark_error(intent_id, IntentStatus.REJECTED, error)
+
     def mark_unconfirmed(
         self, intent_id: str, error: str, signature: str | None = None
     ) -> None:
@@ -233,6 +236,15 @@ class IntentStore(LedgerStore):
         ).fetchall()
         return [_record(r) for r in rows]
 
+    def accounts(self, prefix: str = "") -> list[str]:
+        """Contas com alguma intenção (as de um modo: prefixo `"<modo>:"`)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT account FROM intents WHERE substr(account, 1, ?) = ? "
+            "ORDER BY account",
+            (len(prefix), prefix),
+        ).fetchall()
+        return [r["account"] for r in rows]
+
     def legs_since_last_buy(self, account: str) -> list[IntentRecord]:
         """A última compra executada da conta e as vendas depois dela.
 
@@ -256,6 +268,18 @@ class IntentStore(LedgerStore):
                 str(IntentSide.SELL),
                 buy["created_at"],
             ),
+        ).fetchall()
+        return [_record(r) for r in rows]
+
+    def executed_between(
+        self, account: str, start: datetime, end: datetime
+    ) -> list[IntentRecord]:
+        """Pernas executadas da conta criadas em `[start, end)`, em ordem."""
+        window, params = _window("created_at", start, end)
+        rows = self.conn.execute(
+            f"SELECT * FROM intents WHERE account = ? AND status = ?{window} "
+            "ORDER BY created_at, rowid",
+            (account, str(IntentStatus.EXECUTED), *params),
         ).fetchall()
         return [_record(r) for r in rows]
 
@@ -295,7 +319,7 @@ class IntentStore(LedgerStore):
                 self._add_event("bucket_opened", None, {"account": account})
 
     def last_exit_price(self, account: str) -> Decimal | None:
-        """Preço (`Order.price`) da última venda executada; None sem ordem."""
+        """Preço da última venda, no token de cotação; None sem ordem."""
         row = self.conn.execute(
             "SELECT order_json FROM intents WHERE account = ? AND status = ? "
             "AND side = ? ORDER BY updated_at DESC LIMIT 1",
@@ -303,7 +327,7 @@ class IntentStore(LedgerStore):
         ).fetchone()
         if row is None or not row["order_json"]:
             return None
-        return order_from_json(row["order_json"]).price
+        return order_from_json(row["order_json"]).quote_price
 
 
 def _dt(value: str | None) -> datetime | None:

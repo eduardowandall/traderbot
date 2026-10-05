@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # barras guardadas no mínimo (o aquecimento é `spec.history()`)
 MIN_HISTORY = 50
+ONE = Decimal(1)
 
 
 class SpecStrategy:
@@ -97,7 +98,9 @@ class SpecStrategy:
         price: Decimal,
         balance: Decimal,
         current_position: Position | None,
+        quote_usd: Decimal | None,
     ) -> OrderSignal | None:
+        """Preço e saldo no token de cotação; `quote_usd` converte o `fixed_usd`."""
         now = to_utc(self.clock())
         self.bank.update(now, price)
         self._track(current_position, now, price)
@@ -107,7 +110,7 @@ class SpecStrategy:
             # primeiro tick (inclusive posição restaurada após reinício);
             # condições de mercado sem dados só ficam falsas
             return self._exit(ctx, current_position)
-        return self._entry(ctx, balance)
+        return self._entry(ctx, balance, quote_usd)
 
     # --- estado da posição ---------------------------------------------------
 
@@ -126,9 +129,9 @@ class SpecStrategy:
             # ordem, que usa o relógio da conta (tick no backtest); o pico
             # começa na entrada, para o trailing stop respeitar a perda máxima
             self._entry_id = entry.order_id
-            self._entry_px = entry.price
+            self._entry_px = entry.quote_price
             self._entry_time = to_utc(entry.timestamp)
-            self._peak = entry.price
+            self._peak = self._entry_px
         self._peak = max(self._peak or price, price)
 
     def _forget_position(self) -> None:
@@ -170,17 +173,19 @@ class SpecStrategy:
         self._sell_px = ctx.price
         return self._signal(OrderSide.SELL, position.entry_order.quantity, labels)
 
-    def _entry(self, ctx: TickContext, balance: Decimal) -> OrderSignal | None:
+    def _entry(
+        self, ctx: TickContext, balance: Decimal, quote_usd: Decimal | None
+    ) -> OrderSignal | None:
         if not self._may_enter(ctx.now):
             return None
         labels = fired(self.spec.entry.mode, self.spec.entry.conditions, ctx)
         if not self._armed:
             self._armed = not labels  # rearma quando a entrada deixa de valer
             return None
-        usd = min(self.spec.sizing.usd, balance)
-        if not labels or usd <= 0 or ctx.price <= 0:
+        spend = self.spec.sizing.spend(balance, quote_usd)  # em cotação
+        if not labels or spend <= 0 or ctx.price <= 0:
             return None
-        return self._signal(OrderSide.BUY, usd / ctx.price, labels)
+        return self._signal(OrderSide.BUY, spend / ctx.price, labels)
 
     def _may_enter(self, now: datetime) -> bool:
         if self._expires_at is None:

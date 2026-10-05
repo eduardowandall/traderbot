@@ -13,11 +13,15 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
 from trader.execution import TradeGateway
-from trader.market.prices import JupiterPriceOracle
+from trader.market.prices import JupiterPriceOracle, PriceOracle
 from trader.models.mode import RunningMode
 from trader.paper import DEFAULT_PAPER_BALANCES, SimulatedWallet, paper_provider
 from trader.paths import data_dir
-from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
+from trader.policy import load_policy
+from trader.providers.jupiter.async_jupiter_svc import (
+    DEFAULT_MAX_QUOTE_DEVIATION_PCT,
+    AsyncJupiterProvider,
+)
 from trader.trading_service.service import TradeService
 
 
@@ -53,26 +57,48 @@ def open_paper_wallet(
 
 def build_provider(
     mode: RunningMode,
+    max_priority_fee_lamports: int,  # da política do modo
     on_wallet_created: Callable[[str], None] = lambda message: None,
     **limits,
 ) -> AsyncJupiterProvider:
-    """Provider real (com chave) ou paper (carteira simulada, sem chave)."""
+    """Provider real (com chave) ou paper (carteira simulada, sem chave).
+
+    Os dois conferem cada quote contra a Price API (`max_quote_deviation_pct`).
+    O teto da priority fee vai para a Jupiter no real e é cobrado inteiro em
+    paper, por perna.
+    """
+    limits.setdefault("max_quote_deviation_pct", DEFAULT_MAX_QUOTE_DEVIATION_PCT)
     if mode == RunningMode.PAPER:
-        return paper_provider(open_paper_wallet(on_wallet_created), **limits)
-    return AsyncJupiterProvider.on_chain(keypair=keypair_from_env(), **limits)
+        return paper_provider(
+            open_paper_wallet(on_wallet_created),
+            priority_fee_lamports=max_priority_fee_lamports,
+            **limits,
+        )
+    return AsyncJupiterProvider.on_chain(
+        keypair=keypair_from_env(),
+        max_priority_fee_lamports=max_priority_fee_lamports,
+        **limits,
+    )
 
 
 def build_trade_service(
     mode: RunningMode,
     on_wallet_created: Callable[[str], None] = lambda message: None,
+    prices: PriceOracle | None = None,
     **limits,
 ) -> TradeService:
     """O serviço que executa as ordens dos buckets deste modo.
 
-    Quem cria fecha: `service.aclose()` (provider) e o ledger do gateway.
+    `prices`: o oráculo USD do processo (o `PriceHub` no `run`/`serve`), para
+    o serviço e a conferência das quotes; sem ele, a Price API no cliente
+    Jupiter das quotes. Quem cria fecha: `service.aclose()` (provider) e o
+    ledger do gateway.
     """
-    provider = build_provider(mode, on_wallet_created, **limits)
-    # preços USD pela Price API, no mesmo cliente Jupiter das quotes
-    prices = JupiterPriceOracle(provider.jupiter_client)
-    gateway = TradeGateway.for_mode(mode)  # política + ledger do modo
+    policy = load_policy(mode=str(mode))
+    provider = build_provider(
+        mode, policy.max_priority_fee_lamports, on_wallet_created, **limits
+    )
+    prices = prices or JupiterPriceOracle(provider.jupiter_client)
+    provider.usd_prices = prices.usd_prices
+    gateway = TradeGateway.for_mode(mode, policy)  # política + ledger do modo
     return TradeService(provider, gateway, mode=str(mode), prices=prices)

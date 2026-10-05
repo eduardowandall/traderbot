@@ -3,7 +3,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import bonk_quote, close_open_ledgers, open_ledger
+from factories import bonk_quote, close_open_ledgers, inspection_passes, open_ledger
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, VersionedTransaction
 
@@ -49,6 +49,7 @@ def mock_rpc_client():
         ]
     )
     _mock.check_signature_is_confirmed = AsyncMock(return_value=True)
+    inspection_passes(_mock)
     _mock.sign_transaction = AsyncMock(side_effect=lambda tx, keypair: tx)
     _mock.send_transaction = AsyncMock(
         return_value=SendTransactionResp(value=Signature.new_unique())

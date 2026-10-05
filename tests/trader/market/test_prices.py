@@ -50,13 +50,6 @@ class TestClientPriceApi:
 
 
 class TestOracle:
-    async def test_stables_are_exactly_one_dollar_without_a_request(self):
-        client = _client()
-        oracle = JupiterPriceOracle(client)
-
-        assert await oracle.usd_prices([USDC]) == {USDC: Decimal("1")}
-        client.get_usd_prices.assert_not_awaited()
-
     async def test_caches_until_the_ttl_expires(self):
         now = [0.0]
         client = _client({SOL: Decimal("150")})
@@ -64,10 +57,7 @@ class TestOracle:
 
         await oracle.usd_prices([SOL])
         now[0] = 9.9
-        assert await oracle.usd_prices([SOL, USDC]) == {
-            SOL: Decimal("150"),
-            USDC: Decimal("1"),
-        }
+        assert await oracle.usd_prices([SOL]) == {SOL: Decimal("150")}
         assert client.get_usd_prices.await_count == 1
         now[0] = 10.0
         await oracle.usd_prices([SOL])
@@ -80,8 +70,16 @@ class TestOracle:
 
 
 class TestSnapshot:
-    async def test_without_an_oracle_everything_is_unknown(self):
-        assert await usd_snapshot(None, [SOL]) == {}
+    async def test_without_an_oracle_only_stables_are_known(self):
+        assert await usd_snapshot(None, [SOL, USDC]) == {USDC: Decimal("1")}
+
+    async def test_stables_are_exactly_one_dollar_without_a_request(self):
+        client = _client({USDC: Decimal("0.9998")})
+
+        snapshot = await usd_snapshot(JupiterPriceOracle(client), [USDC])
+
+        assert snapshot == {USDC: Decimal("1")}
+        client.get_usd_prices.assert_not_awaited()
 
     async def test_never_raises(self):
         oracle = JupiterPriceOracle(_client())

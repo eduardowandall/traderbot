@@ -5,6 +5,7 @@
 `-W error::ResourceWarning` continua limpo.
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from trader.ledger import Ledger
@@ -39,6 +40,68 @@ def make_intent(
         notional_usd=None if notional is None else Decimal(notional),
         **overrides,
     )
+
+
+def make_order(
+    side: str = "buy",
+    quantity: str = "0.1",
+    price: str = "100",
+    timestamp: datetime | None = None,
+    output_mint: str = SOL,
+):
+    """Fill de USDC <-> token com valores nativos (custo = quantidade x preço)."""
+    from trader.models import Order, OrderSide
+
+    return Order(
+        order_id=f"{side}-{price}-{timestamp}",
+        input_mint=USDC,
+        output_mint=output_mint,
+        quantity=Decimal(quantity),
+        price=Decimal(price),
+        side=OrderSide(side),
+        timestamp=timestamp or datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
+        fill_price=Decimal(price),
+        quote_amount=Decimal(quantity) * Decimal(price),
+        quote_usd=Decimal("1"),
+    )
+
+
+def record_executed(ledger: Ledger, intent: TradeIntent, order=None, realized=None):
+    """Grava `intent` como executada (e a ordem, com PnL em vendas)."""
+    from trader.models import SwapResult
+    from trader.models.intent import PolicyDecision
+
+    ledger.record_intent(intent, PolicyDecision(True))
+    ledger.mark_executed(
+        intent.intent_id,
+        SwapResult(
+            f"sig-{intent.intent_id}", intent.spend_mint, intent.receive_mint, 1, 2
+        ),
+    )
+    if order is not None:
+        realized = None if realized is None else Decimal(realized)
+        ledger.attach_order(intent.intent_id, order, realized)
+
+
+def executed_leg(
+    ledger: Ledger, account: str, side: str, at: datetime, realized=None, **order
+):
+    """Uma perna executada de `account` (SOL-USDC) criada em `at`."""
+    order.setdefault("timestamp", at)
+    fill = make_order(side, **order)
+    buy = side == "buy"
+    intent = make_intent(
+        IntentSide.BUY if buy else IntentSide.SELL,
+        account=account,
+        created_at=at,
+        spend_mint=USDC if buy else fill.output_mint,
+        receive_mint=fill.output_mint if buy else USDC,
+        quantity=fill.quantity,
+        price=fill.price,
+        closes_position=None if buy else True,
+    )
+    record_executed(ledger, intent, fill, realized)
+    return intent
 
 
 def open_ledger() -> Ledger:
@@ -113,15 +176,19 @@ def bonk_quote():
 def mock_provider(**attrs):
     """`AsyncMock(spec=AsyncJupiterProvider)` com os fatos do local de execução.
 
-    Um mock com spec devolve Mock para propriedades; a conta faz contas com
-    `native_fee_reserve`, então ela precisa ser um Decimal de verdade.
+    Um mock com spec devolve Mock para propriedades e métodos; o que a conta
+    usa em contas devolve tipos de verdade: `native_fee_reserve` (Decimal) e
+    `fetch_swap_costs` (custos desconhecidos, como o provider sem leitura).
     """
     from unittest.mock import AsyncMock
 
+    from trader.models.costs import QUOTE, TradeCosts
     from trader.providers.jupiter.async_jupiter_svc import AsyncJupiterProvider
 
     provider = AsyncMock(spec=AsyncJupiterProvider)
     provider.native_fee_reserve = Decimal("0.02")
+    provider.fetch_swap_costs.return_value = TradeCosts(source=QUOTE)
+    provider.fetch_failed_fees.return_value = 0
     for name, value in attrs.items():
         setattr(provider, name, value)
     return provider
@@ -140,7 +207,9 @@ class StubStrategy:
         self.clock = datetime.now
         self.rng = random.Random()
 
-    def on_market_refresh(self, price, balance, current_position):
+    def on_market_refresh(
+        self, price, balance, current_position, quote_usd: Decimal | None = Decimal(1)
+    ):
         return None
 
     def warmup(self):
@@ -161,3 +230,27 @@ class StubStrategy:
         import random
 
         self.rng = random.Random(seed)
+
+
+def inspection_passes(rpc, lamports: int = 10**9):
+    """Um RPC falso cuja inspeção da transação passa (B7).
+
+    Carteira sem contas de token e uma simulação que não gasta nada: a
+    transação de teste só precisa chegar ao envio.
+    """
+    from unittest.mock import AsyncMock
+
+    from trader.providers.jupiter.tx_inspection import WalletState
+
+    rpc.wallet_state = AsyncMock(return_value=WalletState(lamports, {}))
+    rpc.simulate_transaction = AsyncMock(return_value=simulation(lamports))
+    return rpc
+
+
+def simulation(lamports: int = 10**9, tokens=()):
+    """Resposta de simulação com a carteira e as contas de token pedidas."""
+    from types import SimpleNamespace
+
+    accounts = [SimpleNamespace(lamports=lamports)]
+    accounts += [SimpleNamespace(data=data) for data in tokens]
+    return SimpleNamespace(value=SimpleNamespace(accounts=accounts, err=None))

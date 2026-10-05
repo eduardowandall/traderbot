@@ -85,8 +85,10 @@ class TestGetAccountBalance:
             await rpc.get_account_balance(OWNER)
 
     async def test_a_transient_failure_is_retried(self, mock_sleep):
+        # os dois programas são lidos juntos: a tentativa que falha gasta dois
         rpc = _rpc(
             _wrapped(httpx2.ReadTimeout("slow")),
+            _accounts(),
             _accounts(_token_account(USDC, 1_000_000)),
             _accounts(),
         )

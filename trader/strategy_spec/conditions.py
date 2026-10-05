@@ -16,6 +16,7 @@ from typing import Any
 
 from trader import indicators as ind
 from trader.models.public_data import Interval, TickerData
+from trader.strategy_spec import expr as expr_lang
 
 HUNDRED = Decimal(100)
 
@@ -144,6 +145,10 @@ def _no_last_exit(c, ctx: TickContext) -> bool:
     return ctx.last_exit_at is None
 
 
+def _expr(c, ctx: TickContext) -> bool:
+    return expr_lang.holds(c.tree(), ctx)
+
+
 def _take_profit(c, ctx: TickContext) -> bool:
     target = _scaled(ctx.entry_price, c.pct)
     return target is not None and ctx.price >= target
@@ -188,6 +193,7 @@ PREDICATES: dict[str, Callable[[Any, TickContext], bool]] = {
     "volatility_below": _volatility_below,
     "below_last_exit": _below_last_exit,
     "no_last_exit": _no_last_exit,
+    "expr": _expr,
     "take_profit": _take_profit,
     "trailing_take_profit": _trailing_take_profit,
     "max_hold": _max_hold,

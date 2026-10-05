@@ -3,10 +3,18 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import (
+    bonk_quote,
+    inspection_passes,
+    make_intent,
+    memory_gateway,
+    simulation,
+)
 from solders.keypair import Keypair
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, TransactionConfirmationStatus
 
+from trader.models.intent import IntentStatus
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.providers.jupiter.async_jupiter_svc import (
     AsyncJupiterProvider,
@@ -63,8 +71,9 @@ class TestCheckSignatureIsConfirmed:
 def provider():
     return AsyncJupiterProvider.on_chain(
         Keypair(),
-        rpc_client=AsyncMock(spec=AsyncRPCClient),
+        rpc_client=inspection_passes(AsyncMock(spec=AsyncRPCClient)),
         jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+        max_priority_fee_lamports=100_000,
     )
 
 
@@ -119,7 +128,7 @@ class TestNoRetryAfterBroadcast:
         do_swap = AsyncMock(side_effect=TransactionSubmittedError("sent"))
         provider._do_swap = do_swap
         with pytest.raises(TransactionSubmittedError):
-            await provider._do_swap_with_retry("mint_in", "mint_out", 1000)
+            await provider.swap_with_details("mint_in", "mint_out", 1000)
         do_swap.assert_awaited_once()
 
     async def test_timeout_after_send_sends_only_once(self, provider, mock_sleep):
@@ -136,13 +145,13 @@ class TestNoRetryAfterBroadcast:
             mock.patch("time.time", side_effect=[0, 100]),
             pytest.raises(TransactionSubmittedError),
         ):
-            await provider._do_swap_with_retry("mint_in", "mint_out", 1000)
+            await provider.swap_with_details("mint_in", "mint_out", 1000)
         provider.executor.rpc_client.send_transaction.assert_awaited_once()
 
     async def test_pre_broadcast_errors_are_still_retried(self, provider):
         do_swap = AsyncMock(side_effect=[Exception("quote falhou"), "sig"])
         provider._do_swap = do_swap
-        assert await provider._do_swap_with_retry("a", "b", 1000) == "sig"
+        assert await provider.swap_with_details("a", "b", 1000) == "sig"
         assert do_swap.await_count == 2
 
 
@@ -163,7 +172,7 @@ class TestSendErrorsCountAsSubmitted:
         provider.executor.rpc_client.send_transaction = send
 
         with pytest.raises(TransactionSubmittedError) as ex:
-            await provider._do_swap_with_retry("mint_in", "mint_out", 1000)
+            await provider.swap_with_details("mint_in", "mint_out", 1000)
 
         send.assert_awaited_once()
         provider._get_quote_with_route.assert_awaited_once()  # nenhuma nova quote
@@ -173,7 +182,7 @@ class TestSendErrorsCountAsSubmitted:
     async def test_a_failed_simulation_is_still_retried(self, provider, mock_sleep):
         self._ready(provider)
         provider.executor.rpc_client.simulate_transaction = AsyncMock(
-            side_effect=[Exception("simulação falhou"), None]
+            side_effect=[Exception("simulação falhou"), simulation()]
         )
         provider.executor.rpc_client.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
@@ -182,7 +191,50 @@ class TestSendErrorsCountAsSubmitted:
             return_value=True
         )
 
-        await provider._do_swap_with_retry("mint_in", "mint_out", 1000)
+        await provider.swap_with_details("mint_in", "mint_out", 1000)
 
         assert provider._get_quote_with_route.await_count == 2
         provider.executor.rpc_client.send_transaction.assert_awaited_once()
+
+
+class TestFailedOnChain:
+    """Confirmada com erro (ex: slippage): re-tentável, e termina FAILED."""
+
+    def _failing_executor(self, provider):
+        rpc = provider.executor.rpc_client
+        rpc.sign_transaction = AsyncMock(side_effect=lambda tx, keypair: tx)
+        rpc.send_transaction = AsyncMock(
+            return_value=SendTransactionResp(value=Signature.new_unique())
+        )
+        rpc.check_signature_is_confirmed = AsyncMock(
+            side_effect=TransactionFailedError("Transação falhou: slippage")
+        )
+        provider.jupiter_client.get_quote = AsyncMock(return_value=bonk_quote())
+        provider.jupiter_client.get_swap_transaction = AsyncMock()
+        return rpc
+
+    async def test_it_is_retried_with_the_slippage_escalation(
+        self, provider, mock_sleep
+    ):
+        rpc = self._failing_executor(provider)
+        with pytest.raises(RuntimeError, match="falhou na rede"):
+            await provider.swap_with_details("in", "out", 1000, slippage_bps=50)
+        assert rpc.send_transaction.await_count == 3  # nunca UNCONFIRMED
+        slippages = [
+            c.args[3] for c in provider.jupiter_client.get_quote.await_args_list
+        ]
+        assert slippages == [50, 50, 75]
+
+    async def test_the_intent_ends_failed_and_trading_goes_on(
+        self, provider, mock_sleep
+    ):
+        self._failing_executor(provider)
+        gateway = memory_gateway()
+        intent = make_intent()
+        with pytest.raises(RuntimeError):
+            await gateway.submit(
+                intent, lambda: provider.swap_with_details("in", "out", 1000)
+            )
+        record = gateway.ledger.get(intent.intent_id)
+        assert record is not None and record.status == IntentStatus.FAILED
+        assert gateway.ledger.policy_state().unresolved_intent_ids == ()

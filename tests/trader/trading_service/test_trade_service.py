@@ -24,6 +24,7 @@ LOOSE = Policy(
     max_trade_usd=Decimal(1000),
     max_daily_notional_usd=Decimal(100000),
     max_trades_per_hour=100000,
+    max_trades_per_hour_per_bucket=100000,
     max_daily_loss_usd=Decimal(100000),
 )
 
@@ -80,7 +81,7 @@ class TestBudget:
         service = _service(tmp_path, _wallet("100"), market)
         await _open(service, "a", budget=Decimal(30))
 
-        assert (await service.get_bucket("a")).available_usd == Decimal(30)
+        assert (await service.get_bucket("a")).available == Decimal(30)
         reply = await service.submit_order("a", _buy(market, "1"))  # pediu 100 USD
         assert reply.filled and reply.order is not None
         assert reply.order.quantity == Decimal("0.3")  # 30 USD a 100
@@ -98,20 +99,47 @@ class TestBudget:
         assert sell.filled
         snapshot = await service.get_bucket("a")
         assert snapshot.realized_usd == Decimal(-3)
-        assert snapshot.available_usd == Decimal(27)
+        assert snapshot.available == Decimal(27)
 
     async def test_bucket_without_budget_uses_the_wallet(self, tmp_path):
         market = Market("100")
         service = _service(tmp_path, _wallet("100"), market)
         await _open(service, "a")
-        assert (await service.get_bucket("a")).available_usd == Decimal(100)
+        assert (await service.get_bucket("a")).available == Decimal(100)
+
+    async def test_budgets_that_dont_fit_the_wallet_are_refused(self, tmp_path):
+        # B2: dois buckets de 40 numa carteira de 50 não abrem juntos
+        service = _service(tmp_path, _wallet("50"), Market("100"))
+        await _open(service, "jup", JUP, Decimal(40))
+        with pytest.raises(ValueError, match="passam do que a carteira tem"):
+            await _open(service, "bonk", BONK, Decimal(40))
+
+    async def test_a_position_counts_at_cost_in_the_allocation(self, tmp_path):
+        market = Market("100")
+        service = _service(tmp_path, _wallet("50"), market)
+        await _open(service, "jup", JUP, Decimal(40))
+        assert (await service.submit_order("jup", _buy(market, "0.3"))).filled
+        # 20 livres + 30 na posição do jup: cabem 40 (jup) + 10 (bonk)
+        await _open(service, "bonk", BONK, Decimal(10))
+
+    async def test_one_balance_read_serves_every_bucket(self, tmp_path):
+        market = Market("100")
+        service = _service(tmp_path, _wallet(), market)
+        await _open(service, "jup", JUP, Decimal(20))
+        await _open(service, "bonk", BONK, Decimal(20))
+        a, b = service._buckets["jup"].account, service._buckets["bonk"].account
+        assert a.wallet is b.wallet is service.wallet
+        # a compra de um invalida o cache de todos: o outro vê o saldo novo
+        assert (await service.submit_order("jup", _buy(market, "0.1"))).filled
+        assert (await service.get_bucket("bonk")).available == Decimal(20)
+        assert await b.get_balance(USDC.pubkey) == Decimal(90)
 
     async def test_buckets_sharing_a_wallet_never_overspend(self, tmp_path):
-        # dois buckets de 40 numa carteira de 50: nenhuma compra pode passar
+        # dois buckets de 40 numa carteira de 80: nenhuma compra pode passar
         # do saldo real nem do orçamento do bucket
         rng = random.Random(7)
         market = Market("100")
-        wallet = _wallet("50")
+        wallet = _wallet("80")
         service = _service(tmp_path, wallet, market)
         budgets = {"jup": Decimal(40), "bonk": Decimal(40)}
         await _open(service, "jup", JUP, budgets["jup"])
@@ -128,7 +156,7 @@ class TestBudget:
                 assert "insuficiente" not in " ".join(reply.reasons)
                 if reply.order is not None:
                     spent = reply.order.quote_amount or Decimal(0)
-                    assert spent <= min(cash_before, snapshot.available_usd)
+                    assert spent <= min(cash_before, snapshot.available)
             elif rng.random() < 0.5:
                 qty = snapshot.position.entry_order.quantity
                 assert (await service.submit_order(name, _sell(market, qty))).filled
@@ -189,12 +217,11 @@ class TestLifecycle:
         with pytest.raises(ValueError, match="não está aberto"):
             await service.get_bucket("nope")
 
-    async def test_open_reads_no_balances_and_reconciles_only_when_tracked(self):
-        for tracks in (True, False):
-            provider = mock_provider(balances_track_fills=tracks)
-            service = TradeService(provider, memory_gateway())
-            await service.open_bucket("a", USDC.mint, JUP.mint)
-            provider.get_account_balance.assert_not_awaited()
+    async def test_open_reads_no_balances_without_positions_or_budget(self):
+        provider = mock_provider()
+        service = TradeService(provider, memory_gateway())
+        await service.open_bucket("a", USDC.mint, JUP.mint)
+        provider.get_account_balance.assert_not_awaited()
 
 
 class TestReplies:
@@ -248,3 +275,42 @@ async def test_local_client_is_bound_to_one_bucket(tmp_path):
     assert (await client.bucket()).budget_usd == Decimal(10)
     assert (await client.submit(_buy(market))).filled
     await client.aclose()
+
+
+class TestReconcile:
+    async def _bought_elsewhere(self, tmp_path, ledger):
+        """Um processo anterior comprou JUP e deixou a posição no ledger."""
+        market = Market("100")
+        first = _service(tmp_path, _wallet(), market, ledger=ledger)
+        await _open(first, "old", JUP)
+        assert (await first.submit_order("old", _buy(market, "0.1"))).filled
+        return market
+
+    async def test_missing_tokens_block_buys_of_that_token(self, tmp_path):
+        ledger = open_ledger()
+        market = await self._bought_elsewhere(tmp_path, ledger)
+        # a carteira nova não tem o JUP que o ledger diz que o bucket tem
+        service = _service(tmp_path, _wallet(), market, ledger=ledger)
+        await _open(service, "a", JUP)
+
+        events = ledger.conn.execute(
+            "SELECT payload FROM events WHERE type = 'reconcile_mismatch'"
+        ).fetchall()
+        assert len(events) == 1 and JUP.mint in events[0]["payload"]
+        reply = await service.submit_order("a", _buy(market, "0.1"))
+        assert reply.status == ReplyStatus.REJECTED
+        assert "reconcile_mismatch" in reply.reasons[0]
+        # outro token segue livre
+        await _open(service, "b", BONK)
+        assert (await service.submit_order("b", _buy(market, "0.1"))).filled
+
+    async def test_a_wallet_that_holds_the_positions_is_fine(self, tmp_path):
+        ledger = open_ledger()
+        market = await self._bought_elsewhere(tmp_path, ledger)
+        wallet = SimulatedWallet(
+            initial={"USDC": Decimal(100), "SOL": Decimal(1), "JUP": Decimal("0.1")}
+        )
+        service = _service(tmp_path, wallet, market, ledger=ledger)
+        await _open(service, "a", JUP)
+        assert not service._blocked
+        assert (await service.submit_order("a", _buy(market, "0.1"))).filled

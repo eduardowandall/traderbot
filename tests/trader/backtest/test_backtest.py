@@ -14,6 +14,8 @@ from trader.models import OrderSide, OrderSignal
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
 
+ONE = Decimal(1)
+
 START = datetime(2026, 9, 1, 12, 0)
 
 
@@ -47,7 +49,9 @@ class BuyThenSell(StubStrategy):
         self.sell_at = sell_at
         self.tick = 0
 
-    def on_market_refresh(self, price, balance, current_position):
+    def on_market_refresh(
+        self, price, balance, current_position, quote_usd: Decimal | None = Decimal(1)
+    ):
         self.tick += 1
         if not current_position and self.tick == 1:
             return OrderSignal(OrderSide.BUY, balance / price)
@@ -76,6 +80,31 @@ class TestBacktester:
         assert result.final_equity == Decimal("110")
         assert result.return_pct == Decimal("10")
         assert not result.open_position
+
+    async def test_the_network_fee_is_paid_on_each_leg(self):
+        fee = Decimal("0.5")
+        result = await _run(
+            BuyThenSell(3), [100, 105, 110], fee_bps=Decimal("0"), network_fee_usd=fee
+        )
+        # compra: 100 USD -> 1 - 0.005 SOL; venda: 0.995 x 110 - 0.5 USD
+        assert result.final_equity == Decimal("0.995") * 110 - fee
+        assert result.trades[1].realized_pnl == result.final_equity - 100
+
+    async def test_negative_costs_are_refused(self):
+        with pytest.raises(ValueError, match="negativos"):
+            await _run(BuyThenSell(3), [100], network_fee_usd=Decimal("-1"))
+
+    async def test_warmup_candles_seed_the_strategy_first(self):
+        class Recorder(BuyThenSell):
+            seeded = None
+
+            def setup(self, ticker_history):
+                self.seeded = (len(ticker_history), self.tick)
+
+        strategy = Recorder(sell_at=99)
+        candles = [object(), object()]
+        await _run(strategy, [100, 101], warmup=candles)
+        assert strategy.seeded == (2, 0)  # antes do primeiro tick
 
     async def test_fees_reduce_result(self):
         free = await _run(BuyThenSell(3), [100, 105, 110], fee_bps=Decimal("0"))
@@ -122,16 +151,22 @@ class TestBacktester:
 
     async def test_rejected_signals_are_counted(self):
         class SellWithoutPosition(StubStrategy):
-            def on_market_refresh(self, price, balance, current_position):
+            def on_market_refresh(
+                self,
+                price,
+                balance,
+                current_position,
+                quote_usd: Decimal | None = Decimal(1),
+            ):
                 return OrderSignal(OrderSide.SELL, Decimal("1"))
 
         result = await _run(SellWithoutPosition(), [100, 101])
         assert result.rejected_signals == 2
         assert result.trades == []
 
-    def test_requires_stablecoin_input(self):
-        with pytest.raises(ValueError, match="stablecoin"):
-            Backtester(BuyThenSell(2), "USDC-SOL", _ticks([1]), Decimal("1"))
+    def test_a_non_stable_quote_needs_its_usd_series(self):
+        with pytest.raises(ValueError, match="USD de SOL"):
+            Backtester(BuyThenSell(2), "JUP-SOL", _ticks([1]), Decimal("1"))
 
     def test_requires_ticks(self):
         with pytest.raises(ValueError, match="tick"):
@@ -173,7 +208,7 @@ class TestStrategyDeterminism:
             strategy = _random_spec(buy=50, sell=50)
             strategy.seed(seed)
             return [
-                strategy.on_market_refresh(Decimal("1"), Decimal("1"), None)
+                strategy.on_market_refresh(Decimal("1"), Decimal("1"), None, ONE)
                 for _ in range(50)
             ]
 
@@ -184,7 +219,9 @@ class TestStrategyDeterminism:
 class Churn(StubStrategy):
     """Compra sem posição, vende com posição: um tick cada."""
 
-    def on_market_refresh(self, price, balance, current_position):
+    def on_market_refresh(
+        self, price, balance, current_position, quote_usd: Decimal | None = Decimal(1)
+    ):
         if current_position:
             return OrderSignal(OrderSide.SELL, current_position.entry_order.quantity)
         return OrderSignal(OrderSide.BUY, Decimal("10") / price)

@@ -1,6 +1,6 @@
 """Backtest a strategy spec, printing only the key metrics.
 
-Wraps `main.py backtest` (JSON on stdout) and trims the result down to its
+Wraps `main.py backtest --json` and trims the result down to its
 headline numbers plus the first few trades. The backtest also reports format
 errors in the spec; the mode's policy limits are checked by `run`.
 
@@ -25,6 +25,11 @@ METRICS = (
     "max_drawdown_pct",
     "closed_trades",
     "win_rate_pct",
+    # B9: what costs were used (measured on Jupiter by default) and what each
+    # round trip cost in the replay
+    "fee_bps",
+    "network_fee_usd",
+    "round_trip_costs",
 )
 SHOWN_TRADES = 5
 
@@ -40,7 +45,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _backtest(spec: Path, source: list[str]) -> dict:
     proc = subprocess.run(
-        ["uv", "run", "--no-sync", "main.py", "backtest", str(spec), *source],
+        ["uv", "run", "--no-sync", "main.py", "backtest", str(spec), "--json", *source],
         cwd=ROOT,
         capture_output=True,
         check=False,

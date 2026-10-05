@@ -15,6 +15,8 @@ from trader.models import Interval, OrderSide, TickerData
 from trader.strategy_spec.models import StrategySpec
 from trader.strategy_spec.strategy import SpecStrategy
 
+ONE = Decimal(1)
+
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 MINUTE = Interval.MINUTE_1
 
@@ -228,7 +230,7 @@ class TestFeedGaps:
 
         def tick(minute, price):
             now[0] = T0 + timedelta(minutes=minute)
-            return strategy.on_market_refresh(Decimal(price), Decimal(100), None)
+            return strategy.on_market_refresh(Decimal(price), Decimal(100), None, ONE)
 
         signals = [tick(i, 90 + i % 3) for i in range(history + 1)]
         assert signals[-1] and signals[-1].side == OrderSide.BUY  # aquecida

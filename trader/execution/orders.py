@@ -26,8 +26,8 @@ ZERO = Decimal("0")
 
 
 def priced_mints(quote: Mint, token: Mint) -> set[str]:
-    """O que pedir à Price API antes do trade: lados sem stablecoin e o SOL."""
-    return {m.mint for m in (quote, token) if not m.is_usd_stable} | {SOL_MINT}
+    """Os preços USD de antes do trade: os dois lados e o SOL."""
+    return {quote.mint, token.mint, SOL_MINT}
 
 
 def order_from_fill(
@@ -43,7 +43,7 @@ def order_from_fill(
     usd = usd or {}
     quantity, quote_amount = _amounts(fill, quote, token)
     fill_price = quote_amount / quantity if quantity > 0 else ZERO
-    price_usd = _token_usd(quote, token, fill_price, signal_price, usd)
+    price_usd = _token_usd(quote, token, fill_price, usd)
     rates = _rates(quote, token, price_usd, fill_price, usd)
     return Order(
         order_id=fill.result.signature,
@@ -90,14 +90,15 @@ def _token_usd(
     quote: Mint,
     token: Mint,
     fill_price: Decimal,
-    signal_price: Decimal | None,
     usd: Mapping[str, Decimal],
 ) -> Decimal | None:
-    """USD por token: pelo trade quando há stablecoin, senão sinal ou API."""
+    """USD por token: pelo trade quando há stablecoin, senão pela API.
+
+    O preço do sinal é no token de cotação (como o fill): só serve de USD
+    num par USDC/USDT, onde o próprio fill já dá o valor.
+    """
     if quote.is_usd_stable:
         return fill_price
-    if signal_price is not None:
-        return signal_price  # o feed é em USD (mais fiel que "stable = 1")
     if token.is_usd_stable:
         return Decimal("1")
     quote_usd = usd.get(quote.mint)

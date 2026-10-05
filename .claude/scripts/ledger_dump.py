@@ -2,8 +2,8 @@
 
 The CLI has no ledger commands (stage U), so this is how `/smoke` and
 `/diagnose` look at what a run did: recent intents (status, denial reasons,
-errors), the unresolved ones that block trading, PnL per account and the
-paper wallet. It never writes; an old-format ledger is reported, not migrated.
+errors), the unresolved ones that block trading, each bucket's open position,
+PnL per bucket and the paper wallet. It never writes; an old-format ledger is reported, not migrated.
 
 Usage (from the project root):
     uv run --no-sync python .claude/scripts/ledger_dump.py [paper|real] [--limit 20]
@@ -16,10 +16,12 @@ import sys
 from dataclasses import asdict
 
 from trader.cli.output import dumps
+from trader.execution import TradeGateway
 from trader.ledger import Ledger, ledger_path
 from trader.ledger.store import LedgerFormatError
 from trader.models import SOLANA_MINTS
 from trader.paper import SimulatedWallet
+from trader.policy import Policy
 from trader.wiring import paper_wallet_path
 
 
@@ -45,6 +47,24 @@ def _intent(record) -> dict:
     }
 
 
+def _buckets(ledger: Ledger, accounts: list[str]) -> tuple[dict, dict]:
+    """(posição aberta, PnL) de cada bucket, de um `restore` só por bucket."""
+    gateway = TradeGateway(ledger, Policy(), real_mode=False)  # só leitura
+    positions, pnl = {}, {}
+    for account in accounts:
+        state = gateway.restore(account)
+        pnl[account] = asdict(state.totals)
+        entry = state.open_entry
+        if entry is not None:
+            positions[account] = {
+                "token": SOLANA_MINTS.symbol_of(entry.output_mint),
+                "quantity": entry.quantity,
+                "cost": entry.quote_amount,
+                "price": entry.price,
+            }
+    return positions, pnl
+
+
 def _ledger(mode: str, limit: int) -> dict:
     path = ledger_path(mode)
     if not path.exists():
@@ -55,12 +75,18 @@ def _ledger(mode: str, limit: int) -> dict:
         return {"path": str(path), "error": str(ex)}
     with ledger:
         records = ledger.list_intents(limit)
-        accounts = sorted({r.intent.account for r in records})
+        accounts = ledger.accounts(f"{mode}:")
+        positions, pnl = _buckets(ledger, accounts)
         return {
             "path": str(path),
             "intents": [_intent(r) for r in records],
             "unresolved": list(ledger.policy_state().unresolved_intent_ids),
-            "pnl": {a: asdict(ledger.pnl_totals(a)) for a in accounts},
+            "positions": positions,
+            "pnl": pnl,
+            # tudo que cada ida e volta custou (B9), em USD e bps
+            "round_trip_costs": {
+                a: ledger.round_trip_costs(a).as_dict() for a in accounts
+            },
             "events": ledger.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
         }
 

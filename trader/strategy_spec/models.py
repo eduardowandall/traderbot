@@ -1,14 +1,16 @@
 """Spec declarativa de estratégia (JSON, versão 1).
 
-É o que um agente escreve: blocos prontos (condições, stop, sizing) com
-parâmetros limitados, nunca código. `StrategySpec.model_json_schema()` é o
-schema entregue ao agente (`main.py strategy schema`).
+É o que o dono ou um agente escreve, num arquivo, a partir de
+`docs/specs.md`: blocos prontos (condições, stop, sizing) com parâmetros
+limitados, nunca código. Campo ou condição nova aqui precisa de uma linha lá
+(`tests/test_spec_docs.py` confere).
 
 Cada condição tem um `type` (discriminador), `lookback()` (quantas barras
 precisa para ter valor) e `label()` (texto curto usado no `rationale`). Uma
 condição `expr` futura entra como mais um membro das uniões abaixo.
 """
 
+import ast
 import hashlib
 import json
 from datetime import datetime, timedelta
@@ -20,12 +22,15 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     WithJsonSchema,
+    field_validator,
     model_validator,
 )
 
-from trader.indicators import to_utc
+from trader.indicators import RSI_SEED_FACTOR, SEED_FACTOR, to_utc
 from trader.models.public_data import Interval
+from trader.strategy_spec import expr as expr_lang
 
 Window = Annotated[int, Field(ge=2, le=500)]
 # o schema publica número com limites e unidade (a validação ainda aceita
@@ -61,15 +66,18 @@ Chance = Annotated[
         {"type": "integer", "minimum": 1, "maximum": 100, "description": "%"}
     ),
 ]
+BucketPct = Annotated[
+    Decimal,
+    Field(gt=0, le=100),
+    WithJsonSchema(
+        {"type": "number", "exclusiveMinimum": 0, "maximum": 100, "description": "%"}
+    ),
+]
 MaKind = Literal["sma", "ema", "wma"]
-# EMA/RSI são recursivos: com 5x o período, o valor inicial já não pesa
-SEED_FACTOR = 5
 # campos que não mudam o comportamento: fora do id da spec
 METADATA_FIELDS = {"name", "agent_id", "rationale", "supersedes"}
 # limite prático da API de candles para o aquecimento
 MAX_HISTORY = 900  # abaixo do limite de candles (1000, menos a barra em formação)
-# o RSI de Wilder suaviza com 1/n: converge mais devagar que a EMA
-RSI_SEED_FACTOR = 10
 
 
 class _Block(BaseModel):
@@ -283,6 +291,41 @@ class TrailingStop(_Block):
         return f"trailing_stop{self.pct}%"
 
 
+class Expr(_Block):
+    """Uma expressão restrita (`expr.py`): indicadores, preço, contas e lógica."""
+
+    type: Literal["expr"]
+    expr: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=expr_lang.MAX_LENGTH,
+            description="ex: rsi(14) < 30 and price < sma(20) * 0.98",
+        ),
+    ]
+    _tree: ast.expr | None = PrivateAttr(default=None)
+
+    @field_validator("expr")
+    @classmethod
+    def _normalized(cls, text: str) -> str:
+        # o texto guardado é o normalizado: espaços não mudam o id da spec
+        return expr_lang.render(expr_lang.parse(text))
+
+    def tree(self) -> ast.expr:
+        if self._tree is None:
+            self._tree = expr_lang.parse(self.expr)
+        return self._tree
+
+    def lookback(self) -> int:
+        return expr_lang.lookback(self.tree())
+
+    def history(self) -> int:
+        return expr_lang.history(self.tree())
+
+    def label(self) -> str:
+        return self.expr
+
+
 _MARKET = (
     RsiBelow
     | RsiAbove
@@ -296,6 +339,7 @@ _MARKET = (
     | PriceAbove
     | VolatilityBelow
     | RandomChance
+    | Expr
 )
 MarketCondition = Annotated[_MARKET, Field(discriminator="type")]
 ExitCondition = Annotated[
@@ -345,6 +389,32 @@ class FixedUsd(_Block):
     type: Literal["fixed_usd"]
     usd: Usd
 
+    def spend(self, available: Decimal, quote_usd: Decimal | None) -> Decimal:
+        """Quanto gastar, em unidades do token de cotação (0: sem preço)."""
+        if not quote_usd:
+            return Decimal(0)
+        return min(self.usd / quote_usd, available)
+
+    def max_usd(self, budget_usd: Decimal) -> Decimal:
+        """O maior gasto de uma compra, em USD (para os limites)."""
+        return self.usd
+
+
+class PctOfBucket(_Block):
+    """Cada compra gasta `pct`% do que o bucket pode gastar no momento."""
+
+    type: Literal["pct_of_bucket"]
+    pct: BucketPct
+
+    def spend(self, available: Decimal, quote_usd: Decimal | None) -> Decimal:
+        return available * self.pct / 100
+
+    def max_usd(self, budget_usd: Decimal) -> Decimal:
+        return budget_usd * self.pct / 100
+
+
+Sizing = Annotated[FixedUsd | PctOfBucket, Field(discriminator="type")]
+
 
 class StrategySpec(_Block):
     version: Annotated[Literal[1], Field(description="Versão do formato: 1")]
@@ -381,7 +451,10 @@ class StrategySpec(_Block):
     exit: Annotated[
         Exit, Field(description="Stop obrigatório (sempre OU) + condições de saída")
     ]
-    sizing: Annotated[FixedUsd, Field(description="Quanto gastar por compra")]
+    sizing: Annotated[
+        Sizing,
+        Field(description="Quanto gastar por compra: fixed_usd ou pct_of_bucket"),
+    ]
     budget_usd: Annotated[
         Usd, Field(description="Teto do bucket em USD; prejuízo realizado reduz")
     ]

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "jup-sol-expr",
+  "agent_id": "example",
+  "rationale": "Trade the JUP/SOL ratio: buy when the 5-bar average sits 1% under the 30-bar one and RSI is low; exit on +3% (in SOL), a 2% trailing stop, or 6h. Each buy spends 40% of what the bucket may spend.",
+  "symbol": "JUP-SOL",
+  "timeframe": "1_MINUTE",
+  "entry": {
+    "mode": "all",
+    "conditions": [
+      {"type": "expr", "expr": "(sma(5) - sma(30)) / sma(30) < -0.01 and rsi(14) < 40"}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "trailing_stop", "pct": 2},
+    "mode": "any",
+    "conditions": [
+      {"type": "take_profit", "pct": 3},
+      {"type": "max_hold", "minutes": 360}
+    ]
+  },
+  "sizing": {"type": "pct_of_bucket", "pct": 40},
+  "budget_usd": 50,
+  "max_loss_usd": 10,
+  "cooldown_minutes": 30,
+  "ttl_days": 30
+}

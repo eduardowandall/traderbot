@@ -24,6 +24,8 @@ from trader.strategy_spec.validate import SpecLimits, validate
 from trader.trading_service.protocol import BucketStatus, OrderRequest, ReplyStatus
 from trader.trading_service.service import TradeService
 
+ONE = Decimal(1)
+
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 JUP = SOLANA_MINTS.get_by_symbol("JUP")
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
@@ -58,9 +60,11 @@ class TestRelativeExpiry:
         strategy.set_clock(lambda: now[0])
         strategy._warm = True  # sem aquecimento: só a validade importa
 
-        assert strategy.on_market_refresh(Decimal("50"), Decimal("100"), None)
+        assert strategy.on_market_refresh(Decimal("50"), Decimal("100"), None, ONE)
         now[0] = T0 + timedelta(days=1, seconds=1)
-        assert strategy.on_market_refresh(Decimal("50"), Decimal("100"), None) is None
+        assert (
+            strategy.on_market_refresh(Decimal("50"), Decimal("100"), None, ONE) is None
+        )
 
     def test_the_shipped_example_validates(self):
         example = PROJECT_ROOT / "docs" / "examples" / "spec-sol-dip.json"

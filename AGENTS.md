@@ -18,15 +18,42 @@ roadmap: [`docs/plan.md`](docs/plan.md) (plan there first, then implement).
 - Scripts in `.claude/scripts/`, run with `uv run --no-sync python .claude/scripts/<x>.py`:
   `check.py` (the CI gate, one line per step), `smoke.py` (isolated paper run +
   report), `spec_check.py` (backtest headline), `ledger_dump.py` (read-only JSON
-  of a ledger and the paper wallet). Slash commands wrap them: `/check`,
+  of a ledger and the paper wallet), `live_vs_backtest.py SPEC --ticks FILE`
+  (a `--record-ticks` file replayed next to the bucket's legs in the same
+  window). Slash commands wrap them: `/check`,
   `/smoke`, `/spec`, `/diagnose`, `/phase`, `/sync-docs`.
 
-## The CLI: `run` and `backtest` only
+## The CLI: `run`, `serve`, `connect`, `backtest`
 ```bash
 uv run main.py run paper docs/examples/spec-random.json [--seed N] [--record-ticks FILE]
 uv run --env-file .env main.py run real <spec.json>
-uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps 30] [--slippage-bps 10]
+uv run main.py serve paper                      # trade-runner: key, wallet, ledger
+uv run main.py connect <spec.json> [--trader FILE] [--seed N]   # one per spec, no key
+uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--json]
 ```
+- **One execution process per mode** (`trader/runners/lock.py`, an OS lock on
+  `.data/trader-<mode>.lock`): `run` or `serve`, never both. One spec: `run`.
+  Several specs at once: one `serve <mode>` plus one `connect spec.json` per
+  spec. `serve` writes `{host, port, token, pid}` to `.data/trader-<mode>.json`;
+  `connect` finds it (or `--trader FILE`), sends the spec, and the trade-runner
+  validates it with its own policy. Protocol: `docs/plan.md` §3.3,
+  `trader/trading_service/wire.py`, `remote.py`, `trader/runners/`. A `serve`
+  and a `connect` from different versions may not talk (B6 renamed snapshot
+  fields, B7 added the `price` op): restart them together.
+- **Prices come from a hub** (`trader/market/hub.py`, B7): one websocket for
+  every mint plus a batched Price API poll for quiet ones. `serve` runs it and
+  answers `connect`s through the `price` op; `run` runs its own. A price older
+  than 30s raises `StalePriceError` (no decisions on stale data), and
+  `HubMarketData` paces each bot at one price per second. The hub is also
+  the process's `PriceOracle` (B10): `build_trade_service(prices=hub)` gives
+  it to the service, the sweep, the daily report and the provider's quote
+  check, so only the hub calls the Price API. USDC/USDT = 1 USD is decided
+  in one place, `usd_snapshot`/`price_fn` (`trader/market/prices.py`).
+- **Wallet checks** (`TradeService`): one balance cache for all buckets; a
+  bucket whose budget doesn't fit the wallet (with the other open budgets) is
+  refused; at the first open, the open positions of every bucket in the ledger
+  are checked against the wallet, and a missing token blocks buys of it
+  (`reconcile_mismatch` event).
 - Modes: `paper` (simulated wallet `.data/paper-wallet.json`, real Jupiter
   quotes, no key) and `real` (needs `SOLANA_PRIVATE_KEY` + `HELIUS_RPC_URL`;
   optional `SOLANA_PUBLIC_KEY` is checked against the key). The mode has no
@@ -34,32 +61,71 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
 - `run` validates the spec against the mode's policy and trades in bucket
   `strategy:<spec_id>` with the spec's `budget_usd`; reaching `-max_loss_usd`
   retires the bucket. Telegram turns on when `TELEGRAM_CHAT_ID` and
-  `TELEGRAM_BOT_TOKEN` are set. Ctrl+C stops it (on Windows, a test run is
+  `TELEGRAM_BOT_TOKEN` are set: fills (with the bucket's PnL and open
+  mark-to-market) and, from `run`/`serve`, a daily report of the previous UTC
+  day (`trader/notification/daily_report.py`, once per day via a
+  `daily_report` ledger event). Ctrl+C stops it (on Windows, a test run is
   stopped with `taskkill /PID <uv pid> /T /F`).
-- `backtest` always prints one JSON object (`{"ok": true, ...}` or
-  `{"ok": false, "errors": [{"path","msg"}]}`, exit 1; decimals are strings). It
+- `backtest` prints a short readable summary (errors as `erro: path: msg` on
+  stderr, exit 1). `--json` prints one JSON object instead, with every trade
+  (`{"ok": true, ...}` or `{"ok": false, "errors": [{"path","msg"}]}`, exit 1;
+  decimals are strings); scripts and tests use that. It
   uses the spec's budget and max loss, replays each closed candle as an
   interpolated open -> low -> high -> close path, and refuses fewer than
-  warm-up + 20 bars. Input must be USDC/USDT.
+  warm-up + 20 bars. A non-stable input replays two candle series (the
+  ratio, plus the quote's USD in `Tick.quote_usd`; a third column in tick
+  CSVs) and measures equity in USD. Costs per leg: `fee_bps` +
+  `slippage_bps` and `network_fee_usd`, all taken from the replay quote's
+  output. Without `--fee-bps`/`--network-fee-usd` both are **measured on
+  Jupiter now** (`trader/backtest/costs.py`, B9): half the loss of a buy+sell
+  quote at the spec's trade size, and (5000 + `max_priority_fee_lamports`)
+  lamports at the SOL price; the result has `measured_costs`. Pass both flags
+  for an offline, repeatable run. Every result has `round_trip_costs`.
 - The pair is the spec's `symbol`, `OUTPUT-INPUT` (`SOL-USDC` buys SOL with
-  USDC). New symbols go in `SOLANA_MINTS` (`trader/models/mints.py`).
+  USDC; `JUP-SOL` buys JUP with SOL). New symbols go in `SOLANA_MINTS`
+  (`trader/models/mints.py`).
+- **Two units (B6).** The strategy side sees prices and the bucket's
+  `available` in the **quote token** (`market_for` in `trader/market/pair.py`
+  divides two USD feeds; positions use `Order.quote_price`); budgets, PnL,
+  `Order.price` and the policy stay USD (`TradeService.quote_usd` converts,
+  failing closed). For USDC/USDT both are the same numbers.
 - No ledger, pnl, swap, halt or paper commands. Inspect state with
   `ledger_dump.py`. Reset paper by deleting `.data/paper-wallet.json` and/or
   `.data/ledger-paper.sqlite3`.
 
 ## Strategy specs (`trader/strategy_spec/`)
-- Every strategy is a JSON spec run by `SpecStrategy`; examples in
-  `docs/examples/`. Composition is `entry.mode`/`exit.mode` (`all`/`any`).
+- Strategies are created as **spec files written from
+  [`docs/specs.md`](docs/specs.md)** (the whole contract), kept in
+  `docs/examples/`. There is no command to create or submit one, and agents
+  don't use a CLI: write the file, `backtest` it, `run paper` it, iterate.
+- Every strategy is a JSON spec run by `SpecStrategy`. Composition is
+  `entry.mode`/`exit.mode` (`all`/`any`).
 - Exactly one of `expires_at` or `ttl_days` (counted from the first tick).
-- Add a condition type in three places: a model in `models.py` (with
+- Add a condition type in four places: a model in `models.py` (with
   `lookback()`/`label()`), its union there (`EntryCondition` for entry-only
-  blocks such as `below_last_exit`), and a predicate in `conditions.PREDICATES`.
-  A test fails if they disagree.
+  blocks such as `below_last_exit`), a predicate in `conditions.PREDICATES`,
+  and a row in `docs/specs.md`. Tests fail if any of them disagree. Most ideas
+  fit an `expr` instead (`trader/strategy_spec/expr.py`: `ast.parse` plus a
+  whitelist walk and its own evaluator, never `eval`; an indicator there is one
+  entry in `FUNCTIONS`).
+- Sizing is `fixed_usd` or `pct_of_bucket` (of what the bucket may spend now).
 - Stops and exits never wait for the warm-up; only entries do. Warm-up is
   `spec.history()` (5x the period for EMA, 10x for RSI, capped at 900 bars).
   After an exit, an entry must turn false once (re-arm) before firing again.
 - Strategies use `self.clock()` / `self.rng`, never `datetime.now()` / `random`,
   so backtests stay deterministic; predicates get the rng as `TickContext.rng`.
+
+## Guardrails for agent sessions (B4)
+Agent sessions work in paper and backtests only. `.claude/settings.json` denies
+reading `.env` and editing `.env`/`policy.toml`, and the PreToolUse hook
+`.claude/hooks/guard_commands.py` blocks shell commands that start real mode
+(`main.py run real`), use `--env-file`, set `TRADER_POLICY_FILE`, mention `.env`,
+print `SOLANA_PRIVATE_KEY`/`HELIUS_RPC_URL`, mention `ledger-real.sqlite3` or
+`trader-real` (the real trade-runner's token and lock), or run `serve real`.
+It matches the command text, so edit docs that mention these with the Edit
+tool, not a shell heredoc. Don't work around a block: give the owner the exact
+command to run in a terminal. The rules are tested in
+`tests/test_guard_commands.py`; they are guardrails, not a sandbox.
 
 ## Rules that are easy to break
 - **Layering** (`tests/test_architecture.py`): every `trader/` module is mapped
@@ -70,28 +136,56 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   per-tick decision (`trader/bot/decision.py`).
 - **One path to a swap**: `TradeGateway.submit` (idempotency -> policy -> ledger
   -> execute), called only by `trader/execution/fills.py::execute_trade`.
+- **Before a real swap is sent** (B7): the quote must be within 2% of the Price
+  API value (`max_quote_deviation_pct`, on in `trader/wiring.py`; buys fail
+  closed, sells only warn), and `OnChainExecutor` inspects the signed
+  transaction (`tx_inspection.py`): allowed programs only, and a simulation
+  returning the wallet's accounts where only the input leaves, up to
+  `inAmount`. Both refusals are `SwapRejectedError`s. Test fakes of the RPC
+  need `inspection_passes()` from `tests/factories.py`.
 - **Nothing raises after EXECUTED**: `execute_trade` is the only caller of
   `provider.fetch_swap_costs` (never raises), build orders with
   `order_from_fill` (falls back to the quote), `record_fill` failures are
   logged. Nothing that can fail after confirmation goes inside `_do_swap`.
-  Retries only cover pre-broadcast failures; after `send_transaction` it's
-  `TransactionSubmittedError`, never retried.
+  Retries only cover pre-broadcast failures and transactions the chain
+  confirmed as failed (`TransactionFailedOnChainError`: nothing moved, the
+  intent ends FAILED). Any other failure after `send_transaction` is
+  `TransactionSubmittedError`: never retried, the intent is UNCONFIRMED.
 - **Costs**: never subtract LP fees or slippage from the actual amounts
   (they're already in them). USD values for pairs without a stable or SOL come
-  from a Price API snapshot taken **before** the trade.
+  from a Price API snapshot taken **before** the trade. Attempts that failed
+  on-chain carry their signatures out of the provider (`failed_signatures` on
+  the result or the error); `execute_trade` books their fee on both paths
+  (`failed_tx_fee` event + `PositionBook.charge`) and never raises doing it.
+  Paper fills 10 bps below the quote (`SimulatedExecutor.slippage_bps`).
+- **Priority fee (B9)** is one owner setting, `max_priority_fee_lamports` in
+  `policy.toml` (default 100,000): real sends it to Jupiter as the
+  `maxLamports` cap (`priority_fee()` in `async_jupiter_client.py`), paper
+  charges it in full on every leg, the backtest prices it into
+  `network_fee_usd`. `wiring.build_trade_service` loads the policy once for
+  the provider and the gateway.
+- **Cost per round trip** (`RoundTripCosts`, `Ledger.round_trip_costs`): per
+  closed position, entry spend x (exit tick price / entry tick price - 1)
+  minus the net realized PnL, in USD and bps. It can be negative when fills
+  beat the tick. Shown by the backtest, the daily report,
+  `live_vs_backtest.py` and `ledger_dump.py`.
 - **Ledger schema** is one `_SCHEMA` with a `user_version` in
   `trader/ledger/store.py`. There are no migrations: an older file is refused
   (`LedgerFormatError`); bump `SCHEMA_VERSION` when the schema changes.
 - **UNCONFIRMED** (process killed mid-swap) blocks all trading in that mode
   until the ledger file is moved or deleted. The circuit breaker counts
-  failures since the process started (a restart re-arms it).
+  failures since the process started (a restart re-arms it); provider
+  rejections (`SwapRejectedError`, stored as REJECTED) don't count.
+- **RPC commitment is Confirmed** everywhere (reads, simulation, confirmation);
+  Finalized lags ~13s and would show pre-swap balances.
 - **State paths** go through `trader/paths.py` (`TRADER_DATA_DIR`,
   `TRADER_POLICY_FILE`, `TRADER_LOG_DIR`; relative values resolve against the
   project root). Never a bare `Path(".data")`.
 - **Policy** (`policy.toml`, untracked; model `policy.example.toml`): real mode
   is off until `real_trading_enabled = true`. Paper has roomy limits by default
   (`PAPER_DEFAULTS`); `[limits]` applies to every mode, `[paper.*]`/`[real.*]`
-  only to theirs.
+  only to theirs. `max_trades_per_hour` is wallet-wide;
+  `max_trades_per_hour_per_bucket` caps one spec.
 - `trader/__init__.py` stays empty (every `import trader.x` loads it).
 - Windows console is cp1252: no non-Latin-1 symbols in log/CLI output (use `[!]`).
 
@@ -112,6 +206,6 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
 - Quotes/swaps: `api.jup.ag` (`JUPITER_API_URL` overrides; `JUPITER_API_KEY` is
   sent as `x-api-key`, optional). Keyless requests hit `429` under bursts;
   HTTP calls retry with backoff (`_HTTP_RETRY`, pre-broadcast only).
-- The price websocket (`trench-stream.jup.ag`) and candles (`datapi.jup.ag`) are
-  undocumented frontend endpoints; prices fall back to the Price API V3,
-  candles have no fallback.
+- The price websocket (`trench-stream.jup.ag`, several mints per subscription)
+  and candles (`datapi.jup.ag`) are undocumented frontend endpoints; the hub
+  backs prices with the Price API V3, candles have no fallback.

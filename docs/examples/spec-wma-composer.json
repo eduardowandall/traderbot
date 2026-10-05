@@ -3,7 +3,7 @@
   "name": "wma-composer",
   "agent_id": "example",
   "rationale": "Antigo StrategyComposer com os padroes dele: compra quando as quatro WMAs concordam (50<100, 15<100, 15>30, 5>10 em barras de 15s) e sai com trailing stop de 3.1%.",
-  "symbol": "SOL-USDC",
+  "symbol": "NOBODY-USDC",
   "timeframe": "15_SECOND",
   "entry": {
     "mode": "all",

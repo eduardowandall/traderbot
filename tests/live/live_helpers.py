@@ -22,7 +22,8 @@ def invoke(*argv: str):
 
 
 def invoke_json(*argv: str) -> dict:
-    result = invoke(*argv)
+    """Um comando com `--json` (o `backtest`), já decodificado."""
+    result = invoke(*argv, "--json")
     assert result.exit_code == 0, result.output
     data = json.loads(result.stdout)
     assert data["ok"], data

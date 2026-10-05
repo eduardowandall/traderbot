@@ -20,9 +20,9 @@
       {"type": "max_hold", "minutes": 240}
     ]
   },
-  "sizing": {"type": "fixed_usd", "usd": 20},
-  "budget_usd": 50,
-  "max_loss_usd": 10,
+  "sizing": {"type": "fixed_usd", "usd": 4},
+  "budget_usd": 5,
+  "max_loss_usd": 3,
   "cooldown_minutes": 30,
   "ttl_days": 30
 }

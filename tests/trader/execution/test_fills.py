@@ -50,13 +50,6 @@ class TestExecuteTrade:
         assert seen == [IntentStatus.EXECUTED]
         assert fill == Fill(RESULT, costs)
 
-    async def test_non_cost_values_count_as_unknown(self):
-        provider = mock_provider()  # fetch_swap_costs devolve um Mock
-
-        fill = await execute_trade(memory_gateway(), provider, make_intent(), _swap)
-
-        assert fill.costs is None
-
     async def test_a_denial_never_fetches_costs(self):
         gateway = memory_gateway(Policy(max_trade_usd=Decimal("1")))
         provider = mock_provider()

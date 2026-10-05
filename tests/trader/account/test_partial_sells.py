@@ -10,7 +10,7 @@ from trader.execution.account import AsyncAccount
 from trader.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.models.account_data import MintBalance
 from trader.models.book import remainder_entry
-from trader.models.costs import TradeCosts
+from trader.models.costs import QUOTE, TradeCosts
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
@@ -48,7 +48,7 @@ def _account(gateway, sol_balance="10"):
 
     provider.buy = AsyncMock(side_effect=buy)
     provider.sell = AsyncMock(side_effect=sell)
-    provider.fetch_swap_costs = AsyncMock(return_value=None)
+    provider.fetch_swap_costs = AsyncMock(return_value=TradeCosts(source=QUOTE))
     account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey, gateway, account_id="t")
     return account, wallet
 
@@ -94,7 +94,7 @@ async def test_an_unsellable_rest_closes_and_is_recorded():
     account, wallet = _account(gateway, sol_balance="0")
     await account.buy(Decimal("100"), Decimal("0.1"))
     wallet["sol"] = Decimal("0.1")  # a reserva de 0.02 SOL não pode ser vendida
-    account.balances = None
+    account.wallet.invalidate()
 
     order = await account.sell(Decimal("110"), Decimal("0.1"))
 

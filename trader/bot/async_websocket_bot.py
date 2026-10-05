@@ -36,13 +36,13 @@ class AsyncWebsocketTradingBot:
     def __init__(self, config: BotConfig):
         self.name = config.name
         self.symbol = config.symbol
-        token, _ = SOLANA_MINTS.get_pair(config.symbol)
-        self.output_mint = token.mint
+        self.output_mint = SOLANA_MINTS.get_pair(config.symbol)[0].mint
         self.strategy = config.strategy
         self.market = config.market
         self.trader = config.trader
         self.notification_service = config.notifier
         self.on_tick = config.on_tick
+        self.background = config.background
         self.is_running = False
         self._opened = False  # bucket aberto (uma vez só)
         self._resumed = False  # estado da estratégia restaurado (uma vez só)
@@ -87,7 +87,7 @@ class AsyncWebsocketTradingBot:
             self._orders_paused_until = self.monotonic() + self.denial_cooldown
             return None
         # da tempo da wallet atualizar a operacao feita.
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(2.0)  # TODO: check if this is needed
         return reply.order
 
     def stop(self):
@@ -100,6 +100,7 @@ class AsyncWebsocketTradingBot:
     async def arun(self):
         # por task: vários bots podem rodar no mesmo processo
         logging_config.botname.set(f"{self.name}-{self.symbol}")
+        tasks = [asyncio.create_task(start()) for start in self.background]
         try:
             await self._loop()
         except asyncio.CancelledError:
@@ -108,6 +109,7 @@ class AsyncWebsocketTradingBot:
             self.notification_service.send_message("Bot interrompido pelo usuário")
             raise
         finally:
+            await _cancel(tasks)
             await self._shutdown()
 
     async def _shutdown(self):
@@ -179,24 +181,28 @@ class AsyncWebsocketTradingBot:
         )
 
     async def _tick(self):
+        # no token de cotação do par (o feed divide, num par sem stablecoin)
         current_price = await self.market.get_price(self.output_mint)
-        if self.on_tick is not None:
-            self.on_tick(datetime.now(UTC), current_price)
         snapshot = await self.trader.bucket()
+        if self.on_tick is not None:
+            # o replay mede o patrimônio em USD com o USD da cotação
+            self.on_tick(datetime.now(UTC), current_price, snapshot.quote_usd)
         log_ticker(self.symbol, current_price, snapshot.pnl_summary)
 
         order = await self.process_market_data(current_price, snapshot)
         if order:
-            self._report_order(order)
+            await self._report_order(order, current_price)
         elif snapshot.position:
-            log_position(snapshot.position, current_price)
+            log_position(snapshot.position, current_price, snapshot.quote_usd)
 
-    def _report_order(self, order: Order):
+    async def _report_order(self, order: Order, current_price: Decimal):
         log_placed_order(order)
+        # o bucket depois do fill: PnL realizado e, com posição, a marcação
+        after = await self.trader.bucket()
         self.notification_service.send_message(
             f"Ordem executada: {order.side.upper()} "
             f"{order.quantity:.8f} {self.symbol} @ "
-            f"USD {order.price:.8f}"
+            f"USD {order.price:.8f}\n{bucket_line(after, current_price)}"
         )
 
     async def _on_error(self, ex: Exception, backoff: float) -> float:
@@ -224,7 +230,26 @@ def log_placed_order(order: Order):
     bot_logger.debug(describe_costs(order.costs, order.sol_usd))
 
 
-def log_position(position: Position, current_price: Decimal):
+async def _cancel(tasks: list[asyncio.Task]) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def bucket_line(snapshot: BucketSnapshot, price: Decimal) -> str:
+    """PnL realizado do bucket e, com posição aberta, a marcação a mercado.
+
+    `price` é no token de cotação; a marcação é em USD (sem o preço USD da
+    cotação, fica de fora).
+    """
+    line = snapshot.pnl_summary
+    if snapshot.position is not None and snapshot.quote_usd:
+        unrealized = snapshot.position.unrealized_usd(price * snapshot.quote_usd)
+        line += f"; aberto ~${unrealized:+.4f} a {price:.8f}"
+    return line
+
+
+def log_position(position: Position, current_price: Decimal, quote_usd: Decimal | None):
     pnl = (
         position.unrealized_pnl_percent(current_price)
         if position.exit_order is None
@@ -232,8 +257,10 @@ def log_position(position: Position, current_price: Decimal):
     )
     pnl_style = "green" if pnl > 0 else "red"
     pnl_str = f"[{pnl_style}]{pnl:.2f}%[/{pnl_style}]"
+    usd = position.unrealized_usd(current_price * quote_usd) if quote_usd else None
+    unrealized = "" if usd is None else f" (~${usd:+.4f})"
 
     bot_logger.debug(
-        f"LONG {position.entry_order.quantity:.8f} @ ${position.entry_order.price:.8f}. PNL: {pnl_str}",
+        f"LONG {position.entry_order.quantity:.8f} @ {position.entry_order.quote_price:.8f}. PNL: {pnl_str}{unrealized}",
         extra={"markup": True},
     )

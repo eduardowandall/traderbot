@@ -5,6 +5,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
+from factories import inspection_passes
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
@@ -224,8 +225,9 @@ class TestConfirmedTransactionFetch:
 def _provider():
     return AsyncJupiterProvider.on_chain(
         Keypair(),
-        rpc_client=AsyncMock(spec=AsyncRPCClient),
+        rpc_client=inspection_passes(AsyncMock(spec=AsyncRPCClient)),
         jupiter_client=AsyncMock(spec=AsyncJupiterClient),
+        max_priority_fee_lamports=100_000,
     )
 
 

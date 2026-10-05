@@ -14,7 +14,7 @@ from trader.execution.fills import Fill
 from trader.execution.orders import order_from_fill
 from trader.models import SOLANA_MINTS, OrderSide, SwapResult
 from trader.models.account_data import MintBalance
-from trader.models.costs import TradeCosts
+from trader.models.costs import QUOTE, TradeCosts
 from trader.models.intent import IntentStatus
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -61,7 +61,7 @@ def _account(gateway):
         ]
     )
     provider.buy = AsyncMock(return_value=BUY)
-    provider.fetch_swap_costs = AsyncMock(return_value=None)
+    provider.fetch_swap_costs = AsyncMock(return_value=TradeCosts(source=QUOTE))
     return AsyncAccount(provider, USDC.pubkey, SOL.pubkey, gateway, account_id="t")
 
 

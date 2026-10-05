@@ -8,23 +8,26 @@ quote é sintética, calculada a partir do preço do tick com uma taxa
 relógio do replay e uma semente fixa, então a mesma entrada gera sempre o
 mesmo resultado.
 
-Limitação: o preço do feed é em USD, então o token de entrada do par precisa
-ser uma stablecoin de dólar (ex: SOL-USDC).
+O preço do tick é o do token no token de cotação (USD num par USDC/USDT).
+Num par sem stablecoin (ex: JUP-SOL) cada tick traz também o preço USD do token
+de cotação (`Tick.quote_usd`): a carteira começa com `budget_usd` convertido,
+o serviço vê os dois preços em USD por um oráculo do replay (orçamento e PnL
+em USD, como ao vivo), e o patrimônio é medido em USD.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from trader.backtest.ticks import Tick
 from trader.bot.config import Strategy
 from trader.bot.decision import bucket_done, order_for
 from trader.execution import TradeGateway
-from trader.models import SOLANA_MINTS, Mint, OrderSide
-from trader.models.costs import REPLAY
+from trader.models import SOLANA_MINTS, Mint, OrderSide, TickerData
+from trader.models.costs import BPS, REPLAY, RoundTripCosts
 from trader.paper.provider import paper_provider
 from trader.paper.wallet import SimulatedWallet
 from trader.providers.jupiter.jupiter_data import JupiterQuoteResponse
@@ -33,7 +36,8 @@ from trader.trading_service.service import TradeService
 
 logger = logging.getLogger(__name__)
 
-BPS = Decimal("10000")
+ZERO = Decimal("0")
+ONE = Decimal("1")
 
 # loggers das estratégias: silenciados durante o replay (milhares de ticks
 # viram milhares de linhas; o resultado já resume o que aconteceu)
@@ -56,9 +60,13 @@ def quiet_strategy_logs() -> Iterator[None]:
 class ReplayQuoteClient:
     """Substitui o `AsyncJupiterClient` do provider: quotes do tick atual."""
 
-    def __init__(self, quote_mint: Mint, fee_bps: Decimal):
+    def __init__(
+        self, quote_mint: Mint, fee_bps: Decimal, network_fee_usd: Decimal = ZERO
+    ):
         self.quote_mint = quote_mint  # stablecoin (input do par)
         self.fee_bps = fee_bps
+        # taxa de rede por perna, em USD, tirada da saída (como custo do swap)
+        self.network_fee_usd = network_fee_usd
         self.tick: Tick | None = None
 
     @property
@@ -66,17 +74,26 @@ class ReplayQuoteClient:
         assert self.tick is not None, "replay ainda não começou"
         return self.tick.timestamp
 
+    @property
+    def quote_usd(self) -> Decimal:
+        assert self.tick is not None, "replay ainda não começou"
+        return ONE if self.tick.quote_usd is None else self.tick.quote_usd
+
     async def get_quote(
         self, input_mint: str, output_mint: str, amount: int, slippage_bps: int = 50
     ) -> JupiterQuoteResponse:
         assert self.tick is not None
         price = self.tick.price
         in_ui = SOLANA_MINTS.raw_to_ui(input_mint, amount)
+        # a taxa de rede em unidades do token de cotação
+        fee_in_quote = self.network_fee_usd / self.quote_usd
         if input_mint == self.quote_mint.mint:
             out_ui = in_ui / price  # compra do token
+            network_fee = fee_in_quote / price
         else:
             out_ui = in_ui * price  # venda do token
-        out_ui *= (BPS - self.fee_bps) / BPS
+            network_fee = fee_in_quote
+        out_ui = max(ZERO, out_ui * (BPS - self.fee_bps) / BPS - network_fee)
         return JupiterQuoteResponse.single_route(
             input_mint,
             amount,
@@ -88,6 +105,24 @@ class ReplayQuoteClient:
 
     async def aclose(self) -> None:
         return None
+
+
+class ReplayPrices:
+    """O oráculo de preços USD do replay: o token e a cotação, do tick atual."""
+
+    def __init__(self, client: ReplayQuoteClient, token: Mint, quote: Mint):
+        self.client = client
+        self.token = token
+        self.quote = quote
+
+    async def usd_prices(self, mints) -> dict[str, Decimal]:
+        assert self.client.tick is not None
+        quote_usd = self.client.quote_usd
+        known = {
+            self.quote.mint: quote_usd,
+            self.token.mint: self.client.tick.price * quote_usd,
+        }
+        return {mint: known[mint] for mint in mints if mint in known}
 
 
 @dataclass(frozen=True)
@@ -112,6 +147,8 @@ class BacktestResult:
     rejected_signals: int
     open_position: bool
     trades: list[BacktestTrade] = field(default_factory=list)
+    # do ledger do replay, como nos relatórios ao vivo
+    round_trip_costs: RoundTripCosts = field(default_factory=RoundTripCosts)
 
     @property
     def return_pct(self) -> Decimal:
@@ -163,23 +200,30 @@ class Backtester:
         budget_usd: Decimal | None = None,
         # prejuízo que encerra o bucket, como ao vivo
         max_loss_usd: Decimal | None = None,
+        # taxa de rede por perna, em USD (o executor do replay não tem SOL)
+        network_fee_usd: Decimal = ZERO,
+        # candles de aquecimento antes do primeiro tick, como o bot faz ao
+        # iniciar (`strategy.setup`); vazio: aquece nos próprios ticks
+        warmup: Sequence[TickerData] = (),
     ):
         self.token, self.quote = SOLANA_MINTS.get_pair(symbol)
-        if not self.quote.is_usd_stable:
-            raise ValueError(
-                f"Backtest precisa de uma stablecoin de dólar como entrada "
-                f"(ex: {self.token.symbol}-USDC); {self.quote.symbol} não é"
-            )
         if not ticks:
             raise ValueError("Nenhum tick para reproduzir")
-        if fee_bps < 0 or slippage_bps < 0:
-            raise ValueError("fee_bps e slippage_bps não podem ser negativos")
+        if not self.quote.is_usd_stable and ticks[0].quote_usd is None:
+            raise ValueError(
+                f"{symbol}: os ticks precisam do preço USD de {self.quote.symbol} "
+                "(a terceira coluna do CSV, ou candles das duas séries)"
+            )
+        if min(fee_bps, slippage_bps, network_fee_usd) < 0:
+            raise ValueError("custos do backtest não podem ser negativos")
         self.symbol = symbol
         self.strategy = strategy
         self.ticks = ticks
         self.initial_balance = initial_balance
         self.fee_bps = fee_bps
         self.slippage_bps = slippage_bps
+        self.network_fee_usd = network_fee_usd
+        self.warmup = warmup
         self.seed = seed
         self.budget_usd = budget_usd
         self.max_loss_usd = max_loss_usd
@@ -194,16 +238,19 @@ class Backtester:
 
     async def _replay_on(self, gateway: TradeGateway) -> BacktestResult:
         client, wallet, trader = self._venue(gateway)
+        client.tick = self.ticks[0]  # abrir o bucket já lê saldo no relógio do replay
         await trader.open()
         self.strategy.set_clock(lambda: client.now)
         self.strategy.seed(self.seed)
+        if self.warmup:
+            self.strategy.setup(self.warmup)
 
         run = _Run()
         for tick in self.ticks:
             client.tick = tick
             if not await self._step(trader, tick, run):
                 break  # bucket encerrado e sem posição: ao vivo, o bot pararia
-            run.track(self._equity(wallet, tick.price))
+            run.track(self._equity(wallet, tick))
 
         final = await trader.bucket()
         return BacktestResult(
@@ -212,33 +259,42 @@ class Backtester:
             end=self.ticks[-1].timestamp,
             ticks=len(self.ticks),
             initial_equity=self.initial_balance,
-            final_equity=self._equity(wallet, self.ticks[-1].price),
+            final_equity=self._equity(wallet, self.ticks[-1]),
             max_drawdown_pct=run.max_drawdown,
             realized_pnl=final.realized_usd,
             rejected_signals=run.rejected,
             open_position=final.position is not None,
             trades=run.trades,
+            # o bucket do replay é o par (serviço sem modo)
+            round_trip_costs=gateway.ledger.round_trip_costs(self.symbol),
         )
 
     def _venue(
         self, gateway: TradeGateway
     ) -> tuple[ReplayQuoteClient, SimulatedWallet, LocalTradeClient]:
         """Mesmo caminho do paper trading: TradeService -> gateway -> carteira."""
-        client = ReplayQuoteClient(self.quote, self.fee_bps + self.slippage_bps)
-        wallet = SimulatedWallet(initial={self.quote.symbol: self.initial_balance})
+        client = ReplayQuoteClient(
+            self.quote, self.fee_bps + self.slippage_bps, self.network_fee_usd
+        )
+        wallet = SimulatedWallet(initial={self.quote.symbol: self._funding()})
         provider = paper_provider(
             wallet,
             jupiter_client=client,
-            # a quote sintética não tem impacto de preço; taxas de rede em SOL
-            # não se aplicam (a carteira do backtest só tem a stablecoin), e
-            # sem taxas o executor não reserva SOL
+            # a quote sintética não tem impacto de preço; a taxa de rede sai
+            # da quote em USD (a carteira do backtest só tem a stablecoin), e
+            # sem taxas em SOL o executor não reserva SOL
             max_price_impact_pct=None,
             fee_lamports=0,
             account_rent_lamports=0,
-            cost_source=REPLAY,  # custos modelados em fee_bps
+            cost_source=REPLAY,  # custos modelados na quote do replay
+            slippage_bps=0,  # já na quote (`slippage_bps` do backtest)
         )
-        # ledger em memória e política sem limites; ordens no horário do tick
-        service = TradeService(provider, gateway, clock=lambda: client.now)
+        # ledger em memória e política sem limites; ordens no horário do tick;
+        # os preços USD vêm do tick (orçamento e PnL)
+        prices = ReplayPrices(client, self.token, self.quote)
+        service = TradeService(
+            provider, gateway, clock=lambda: client.now, prices=prices
+        )
         trader = LocalTradeClient(
             service,
             self.symbol,
@@ -274,5 +330,22 @@ class Backtester:
         )
         return True
 
-    def _equity(self, wallet: SimulatedWallet, price: Decimal) -> Decimal:
-        return wallet.balance(self.quote.mint) + wallet.balance(self.token.mint) * price
+    def _funding(self) -> Decimal:
+        """O saldo inicial no token de cotação: o orçamento em USD convertido.
+
+        Arredondado para cima na menor unidade do token: truncado, o saldo
+        ficaria um tico abaixo do orçamento e o bucket não abriria.
+        """
+        start_usd = self.ticks[0].quote_usd
+        if start_usd is None:
+            return self.initial_balance
+        unit = Decimal(1).scaleb(-self.quote.decimals)
+        return (self.initial_balance / start_usd).quantize(unit, ROUND_CEILING)
+
+    def _equity(self, wallet: SimulatedWallet, tick: Tick) -> Decimal:
+        """Patrimônio em USD: cotação + token ao preço do tick, a `quote_usd`."""
+        in_quote = (
+            wallet.balance(self.quote.mint)
+            + wallet.balance(self.token.mint) * tick.price
+        )
+        return in_quote * (tick.quote_usd or ONE)

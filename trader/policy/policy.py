@@ -21,6 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from trader.models import SOLANA_MINTS
+from trader.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
 from trader.models.intent import IntentSide, PolicyDecision, TradeIntent
 from trader.models.mode import RunningMode
 from trader.paths import policy_file
@@ -37,10 +38,15 @@ class Policy:
     max_trade_usd: Decimal = Decimal("25")
     max_daily_notional_usd: Decimal = Decimal("100")  # janela móvel de 24h
     max_trades_per_hour: int = 10
+    # compras de um bucket na última hora (um bucket não come o limite todo)
+    max_trades_per_hour_per_bucket: int = 6
     max_daily_loss_usd: Decimal = Decimal("20")  # bloqueia compras
     max_consecutive_failures: int = 3  # circuit breaker
     # permite intenções sem estimativa em USD (ex: swap SOL -> JUP)
     allow_unknown_notional: bool = False
+    # teto da priority fee por transação: o `maxLamports` da Jupiter no real,
+    # cobrado inteiro em paper e no custo de rede do backtest
+    max_priority_fee_lamports: int = DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
     version: str = field(default="defaults", compare=False)
 
     @classmethod
@@ -57,6 +63,7 @@ class Policy:
             max_trade_usd=unbounded,
             max_daily_notional_usd=unbounded,
             max_trades_per_hour=sys.maxsize,
+            max_trades_per_hour_per_bucket=sys.maxsize,
             max_daily_loss_usd=unbounded,
             max_consecutive_failures=sys.maxsize,
             allow_unknown_notional=True,
@@ -70,6 +77,8 @@ class PolicyState:
 
     daily_notional_usd: Decimal = Decimal("0")
     trades_last_hour: int = 0
+    # do bucket da intenção avaliada (0 sem conta)
+    account_trades_last_hour: int = 0
     daily_realized_pnl_usd: Decimal = Decimal("0")
     consecutive_failures: int = 0
     unresolved_intent_ids: tuple[str, ...] = ()
@@ -86,6 +95,12 @@ def _decimal(key: str, value) -> Decimal:
 def _count(key: str, value) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{key} deve ser um inteiro >= 0")
+    return value
+
+
+def _positive(key: str, value) -> int:
+    if _count(key, value) == 0:
+        raise ValueError(f"{key} deve ser um inteiro > 0")
     return value
 
 
@@ -110,7 +125,9 @@ _PARSERS = {
     "max_daily_notional_usd": _decimal,
     "max_daily_loss_usd": _decimal,
     "max_trades_per_hour": _count,
+    "max_trades_per_hour_per_bucket": _count,
     "max_consecutive_failures": _count,
+    "max_priority_fee_lamports": _positive,
 }
 
 
@@ -131,6 +148,7 @@ PAPER_DEFAULTS = {
     "max_trade_usd": Decimal("1000"),
     "max_daily_notional_usd": Decimal("10000"),
     "max_trades_per_hour": 60,
+    "max_trades_per_hour_per_bucket": 60,
 }
 
 
@@ -264,6 +282,12 @@ def _trades_per_hour(c: _Check) -> Iterator[str]:
         yield f"limite de {c.policy.max_trades_per_hour} trades por hora atingido"
 
 
+def _bucket_trades_per_hour(c: _Check) -> Iterator[str]:
+    limit = c.policy.max_trades_per_hour_per_bucket
+    if c.state.account_trades_last_hour >= limit:
+        yield f"limite de {limit} trades por hora do bucket atingido"
+
+
 def _daily_loss(c: _Check) -> Iterator[str]:
     if c.state.daily_realized_pnl_usd <= -c.policy.max_daily_loss_usd:
         yield (
@@ -287,6 +311,7 @@ _BUDGET_RULES: tuple[Rule, ...] = (
     _max_trade,
     _daily_notional,
     _trades_per_hour,
+    _bucket_trades_per_hour,
     _daily_loss,
 )
 

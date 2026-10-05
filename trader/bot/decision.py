@@ -25,7 +25,7 @@ def order_for(
 ) -> OrderRequest | None:
     """A ordem que a estratégia pede neste preço, ou None."""
     signal = strategy.on_market_refresh(
-        price, snapshot.available_usd, snapshot.position
+        price, snapshot.available, snapshot.position, quote_usd=snapshot.quote_usd
     )
     if signal is None:
         return None

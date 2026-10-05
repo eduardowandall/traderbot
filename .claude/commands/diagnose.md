@@ -20,7 +20,8 @@ the first real cause:
      the owner checks the signature on the chain, then moves or deletes the
      ledger file.
    - `circuit breaker` in the reasons: consecutive failures in this process;
-     restarting the bot re-arms it. Look at the `error` of the failed rows.
+     restarting the bot re-arms it. Look at the `error` of the failed rows
+     (REJECTED rows, provider refusals such as price impact, don't count).
    - `error: "... formato antigo ..."`: a pre-stage-U ledger; it must be moved
      or deleted before the bot opens it.
 2. **Logs:** read the newest `.logs/trader-*.log` (the log dir is `TRADER_LOG_DIR`,

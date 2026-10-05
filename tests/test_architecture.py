@@ -50,6 +50,11 @@ PACKAGES: dict[str, str] = {
     "trader.trading_service": "execution",
     "trader.trading_service.protocol": "core",
     "trader.trading_service.client": "strategy-side",
+    "trader.trading_service.remote": "strategy-side",
+    "trader.trading_service.wire": "core",
+    "trader.runners": "app",
+    # sem chave nem ledger: só o bot, a spec e o cliente remoto
+    "trader.runners.strategy_runner": "strategy-side",
     # o loop do bot só conhece MarketData + TradeClient
     "trader.bot": "strategy-side",
     "trader.backtest": "app",

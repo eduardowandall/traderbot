@@ -32,7 +32,7 @@ def _position(price="100") -> Position:
 
 def _signals(strategy, prices, position=None):
     return [
-        strategy.on_market_refresh(Decimal(str(p)), Decimal(100), position)
+        strategy.on_market_refresh(Decimal(str(p)), Decimal(100), position, Decimal(1))
         for p in prices
     ]
 

@@ -213,25 +213,6 @@ class TestAccountWithGateway:
         restarted.restore_from_ledger()
         assert restarted.book.position is None
 
-    async def test_reconcile_flags_missing_tokens(self, tmp_path):
-        gateway = _gateway(tmp_path)
-        account = _account(gateway, sol="0.05")
-        account.book.position = None
-        await _account(gateway).buy(Decimal("100"), Decimal("0.1"))
-        account.restore_from_ledger()
-
-        assert await account.reconcile_position() is False
-        events = gateway.ledger.conn.execute(
-            "SELECT type FROM events WHERE type = 'reconcile_mismatch'"
-        ).fetchall()
-        assert len(events) == 1
-
-    async def test_reconcile_ok(self, tmp_path):
-        gateway = _gateway(tmp_path)
-        account = _account(gateway, sol="1")
-        await account.buy(Decimal("100"), Decimal("0.1"))
-        assert await account.reconcile_position() is True
-
     async def test_second_sell_of_same_position_is_blocked(self, tmp_path):
         gateway = _gateway(tmp_path)
         account = _account(gateway)

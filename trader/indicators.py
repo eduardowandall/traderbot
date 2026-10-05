@@ -22,6 +22,11 @@ from trader.models.public_data import Interval, TickerData
 ZERO = Decimal(0)
 HUNDRED = Decimal(100)
 NEUTRAL_RSI = Decimal(50)
+# barras de aquecimento por período: EMA e RSI são recursivos e só esquecem
+# o valor inicial depois de vários períodos (o RSI de Wilder suaviza com 1/n,
+# mais devagar que a EMA)
+SEED_FACTOR = 5
+RSI_SEED_FACTOR = 10
 
 
 def _tail(values: Sequence[Decimal], n: int) -> Sequence[Decimal] | None:

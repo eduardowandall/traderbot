@@ -2,7 +2,9 @@
 
 Mesmo contrato do `OnChainExecutor` (ver `trader/providers/jupiter/
 executor.py`), sem chave e sem RPC. Cobra a taxa base de rede e o rent da
-primeira conta de cada token, como on-chain.
+primeira conta de cada token, como on-chain, e recebe um pouco menos do que a
+quote (`slippage_bps`), nunca abaixo do mínimo dela (`otherAmountThreshold`):
+on-chain, abaixo disso a transação falharia.
 """
 
 import uuid
@@ -22,6 +24,9 @@ DEFAULT_FEE_LAMPORTS = 5000
 # rent de uma conta de token SPL (165 bytes); contas Token-2022 custam um
 # pouco mais (>= 2_074_080), então em paper é uma aproximação
 DEFAULT_ACCOUNT_RENT_LAMPORTS = 2_039_280
+# o fill de paper sai este tanto abaixo da quote (o padrão do backtest)
+DEFAULT_SLIPPAGE_BPS = 10
+BPS = 10_000
 
 
 class SimulatedExecutor:
@@ -33,13 +38,21 @@ class SimulatedExecutor:
         fee_lamports: int = DEFAULT_FEE_LAMPORTS,
         account_rent_lamports: int = DEFAULT_ACCOUNT_RENT_LAMPORTS,
         cost_source: str = SIMULATED,
+        slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
+        # cobrada inteira em cada perna, além da base: o teto
+        # `max_priority_fee_lamports` da política (`trader/wiring.py`)
+        priority_fee_lamports: int = 0,
     ):
         self.wallet = wallet
+        self.slippage_bps = slippage_bps
         self.fee_lamports = fee_lamports
+        self.priority_fee_lamports = priority_fee_lamports
         self.account_rent_lamports = account_rent_lamports
         self.cost_source = cost_source
         # sem taxas de rede (backtest) não há por que reservar SOL
-        charges_sol = fee_lamports > 0 or account_rent_lamports > 0
+        charges_sol = (
+            fee_lamports > 0 or priority_fee_lamports > 0 or account_rent_lamports > 0
+        )
         self.native_fee_reserve = (
             DEFAULT_SOL_FEE_RESERVE if charges_sol else Decimal("0")
         )
@@ -57,13 +70,15 @@ class SimulatedExecutor:
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
     ) -> SwapResult:
-        in_amount, out_amount = int(quote.inAmount), int(quote.outAmount)
+        in_amount, out_amount = int(quote.inAmount), self._filled_out(quote)
         self.wallet.reload()  # outro processo pode ter aberto a conta do token
         rent = (
             self.account_rent_lamports if self.wallet.needs_account(output_mint) else 0
         )
+        # como on-chain: `fee_lamports` é a taxa total (base + priority)
+        fee = self.fee_lamports + self.priority_fee_lamports
         self.wallet.apply_swap(
-            input_mint, in_amount, output_mint, out_amount, self.fee_lamports, rent
+            input_mint, in_amount, output_mint, out_amount, fee, rent
         )
         return SwapResult(
             signature=f"paper-{uuid.uuid4().hex}",
@@ -73,7 +88,8 @@ class SimulatedExecutor:
             out_amount=out_amount,
             costs=TradeCosts(
                 source=self.cost_source,
-                fee_lamports=self.fee_lamports,
+                fee_lamports=fee,
+                priority_fee_lamports=self.priority_fee_lamports,
                 rent_lamports=rent,
                 actual_in_amount=in_amount,
                 actual_out_amount=out_amount,
@@ -81,9 +97,19 @@ class SimulatedExecutor:
             quote=quote,
         )
 
+    def _filled_out(self, quote: JupiterQuoteResponse) -> int:
+        """A saída do fill: a quote menos o slippage, no mínimo o da quote."""
+        quoted = int(quote.outAmount)
+        slipped = quoted * (BPS - self.slippage_bps) // BPS
+        floor = min(int(quote.otherAmountThreshold or 0), quoted)
+        return max(slipped, floor)
+
     async def fetch_costs(self, result: SwapResult) -> TradeCosts | None:
         # os custos simulados já vêm no resultado da execução
         return result.costs
+
+    async def fetch_fee(self, signature: str) -> int | None:
+        return None  # nada falha "na rede" aqui
 
     async def aclose(self) -> None:
         return None

@@ -12,7 +12,7 @@ O PnL fica em duas formas:
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
-from trader.models.costs import PnLResult, TradeCosts
+from trader.models.costs import FailedTxFee, PnLResult, TradeCosts
 from trader.models.order import Order
 from trader.models.position import Position
 
@@ -71,6 +71,8 @@ class PositionBook:
     net_quote: Decimal = ZERO
     costs_sol: Decimal = ZERO
     incomplete: int = 0  # posições fechadas sem custos convertidos
+    # taxas de transações que falharam na rede (já descontadas de realized_usd)
+    failed_fee_sol: Decimal = ZERO
 
     @classmethod
     def restored(
@@ -82,6 +84,7 @@ class PositionBook:
         costs_sol: Decimal,
         incomplete: int,
         entry: Order | None,
+        failed_fee_sol: Decimal = ZERO,
     ) -> PositionBook:
         """O livro reconstruído a partir do ledger (totais + entrada aberta)."""
         book = cls(
@@ -91,6 +94,7 @@ class PositionBook:
             net_quote=net_quote,
             costs_sol=costs_sol,
             incomplete=incomplete,
+            failed_fee_sol=failed_fee_sol,
         )
         if entry is not None:
             book.open(entry)
@@ -115,6 +119,11 @@ class PositionBook:
         rest = remainder_entry(entry, exit_order.quantity)
         self.position = None if rest is None else Position(rest)
         return closed
+
+    def charge(self, fee: FailedTxFee) -> None:
+        """Taxa de transações que falharam: sai do PnL (e do orçamento)."""
+        self.failed_fee_sol += fee.sol
+        self.realized_usd -= fee.usd or ZERO
 
     def _open(self) -> Position:
         if self.position is None:
@@ -146,8 +155,11 @@ class PositionBook:
         flag = (
             f" [!] {self.incomplete} trade(s) incompleto(s)" if self.incomplete else ""
         )
+        failed = (
+            f", tx falhas {self.failed_fee_sol:.9f} SOL" if self.failed_fee_sol else ""
+        )
         return (
             f"PNL líquido {self.net_quote:+.6f} {self.quote_symbol} "
             f"(~${self.realized_usd:+.4f}); bruto {self.gross_quote:+.6f}, "
-            f"custos {self.costs_sol:.9f} SOL{flag}"
+            f"custos {self.costs_sol:.9f} SOL{failed}{flag}"
         )

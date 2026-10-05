@@ -56,7 +56,9 @@ def _fire(strategy, clock, price, position=None, balance="100") -> OrderSignal:
 
 
 def _tick(strategy, clock, price, position=None, balance="100", minutes=1):
-    signal = strategy.on_market_refresh(Decimal(str(price)), Decimal(balance), position)
+    signal = strategy.on_market_refresh(
+        Decimal(str(price)), Decimal(balance), position, Decimal(1)
+    )
     clock.advance(minutes=minutes)
     return signal
 

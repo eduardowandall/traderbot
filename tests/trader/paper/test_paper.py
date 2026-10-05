@@ -1,3 +1,4 @@
+import dataclasses
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -12,6 +13,7 @@ from trader.paper import (
     SimulatedWallet,
     paper_provider,
 )
+from trader.paper.executor import DEFAULT_FEE_LAMPORTS
 from trader.providers import JupiterQuoteResponse
 from trader.providers.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.providers.jupiter.async_jupiter_svc import SwapRejectedError
@@ -97,6 +99,25 @@ class TestPaperProvider:
         assert wallet.balance(USDC.mint) == Decimal("90")
         assert wallet.balance(SOL.mint) == Decimal("1.069995")  # taxa de 5000 lamports
 
+    async def test_the_priority_fee_cap_is_charged_on_every_leg(self):
+        wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
+        quote = _quote(USDC.mint, USDC.ui_to_raw("10"), SOL.mint, SOL.ui_to_raw("0.07"))
+        client = AsyncMock(spec=AsyncJupiterClient)
+        client.get_quote = AsyncMock(return_value=quote)
+        provider = paper_provider(
+            wallet, jupiter_client=client, priority_fee_lamports=100_000
+        )
+
+        result = await provider.swap_with_details(
+            USDC.mint, SOL.mint, USDC.ui_to_raw("10")
+        )
+
+        # como on-chain: `fee_lamports` é o total, a parte priority à parte
+        assert result.costs is not None
+        assert result.costs.fee_lamports == 105_000
+        assert result.costs.priority_fee_lamports == 100_000
+        assert wallet.balance(SOL.mint) == Decimal("1.069895")
+
     async def test_insufficient_balance_is_rejected_once(self):
         wallet = SimulatedWallet(initial={"USDC": Decimal("1"), "SOL": Decimal("1")})
         quote = _quote(USDC.mint, USDC.ui_to_raw("10"), SOL.mint, 1)
@@ -155,3 +176,31 @@ class TestPaperProvider:
         assert account.book.realized_usd == Decimal("1") - Decimal("0.00105")
         assert account.book.incomplete == 0
         assert wallet.balance(USDC.mint) == Decimal("101")
+
+
+class TestPaperSlippage:
+    def _quote(self, threshold: int):
+        quote = JupiterQuoteResponse.single_route(
+            USDC.mint, 10_000_000, SOL.mint, 1_000_000
+        )
+        return dataclasses.replace(quote, otherAmountThreshold=str(threshold))
+
+    @pytest.mark.parametrize(
+        ("threshold", "filled"),
+        [
+            (950_000, 999_000),  # 10 bps abaixo da quote
+            (999_900, 999_900),  # nunca abaixo do mínimo da quote
+            (1_000_000, 1_000_000),  # sem tolerância: o fill é a quote
+        ],
+    )
+    async def test_the_fill_is_below_the_quote_but_not_below_its_minimum(
+        self, threshold, filled
+    ):
+        wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
+        executor = SimulatedExecutor(wallet)
+        result = await executor.execute(USDC.mint, SOL.mint, self._quote(threshold))
+
+        assert result.out_amount == filled
+        assert result.costs is not None
+        assert result.costs.actual_out_amount == filled
+        assert wallet.raw_balance(SOL.mint) == 10**9 + filled - DEFAULT_FEE_LAMPORTS

@@ -30,10 +30,13 @@ class ReplyStatus(StrEnum):
 @dataclass(frozen=True)
 class BucketSnapshot:
     bucket: str
-    # quanto a estratégia pode gastar agora, na moeda de entrada (USDC/USDT)
-    available_usd: Decimal
+    # quanto a estratégia pode gastar agora, no token de cotação (a entrada)
+    available: Decimal
     position: Position | None
     realized_usd: Decimal
+    # USD por unidade do token de cotação (1 em USDC/USDT); None: sem preço,
+    # e então `available` é 0 (o orçamento em USD não pode ser conferido)
+    quote_usd: Decimal | None
     budget_usd: Decimal | None = None  # None: sem teto (a carteira toda)
     status: BucketStatus = BucketStatus.ACTIVE
     pnl_summary: str = ""
@@ -47,7 +50,9 @@ class BucketSnapshot:
 class OrderRequest:
     side: OrderSide
     quantity: Decimal  # do token comprado/vendido
-    price: Decimal  # preço de mercado (USD) no momento do sinal
+    # preço de mercado no momento do sinal, no token de cotação (USD em
+    # pares USDC/USDT)
+    price: Decimal
     rationale: str | None = None
     # quem pede pode fixar a chave (reenvio após reconexão não duplica)
     idempotency_key: str | None = None
