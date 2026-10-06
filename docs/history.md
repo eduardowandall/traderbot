@@ -2613,6 +2613,45 @@ is largest.
   1 `take_profit`, no trailing stop (the soak's pre-A14 run: 7 trailing stops
   of 15).
 
+#### A5. One rule for when orders re-read the wallet — S (done 2026-10-05)
+Old B10 C3. It touches real sells, so it is settled before A6. Decided with
+the owner on 2026-10-05:
+- **Every order reads the wallet fresh** (`WalletBalances.fresh`), inside the
+  service's order lock: buys with or without a bucket cap, and sells (one read
+  per sell, where `can_sell` and the cap used to read twice). The cache serves
+  only reads that are not orders (allocation, reconcile, snapshots), and
+  anything that moves the wallet (a fill, the A3 resolver) still invalidates
+  it. Replaces the four special cases (cap-only re-read on buys, sell
+  re-read, ...).
+- **The bot's 2 s pause after a fill goes** (`POST_FILL_PAUSE_SECONDS`,
+  "da tempo da wallet atualizar"): the wallet is the trade-runner's, the reply
+  comes after the ledger, and the next order reads the wallet fresh anyway.
+- **A sell the wallet can't cover is refused and alerted**, no longer capped
+  at the balance. If the spendable balance of the token (for SOL, after the fee
+  reserve) is below the quantity to sell, `AsyncAccount.sell` raises
+  `WalletShortfallError` (a `ValueError`: the reply is a rejection, nothing is
+  sent). `TradeService` blocks buys of that token (as `reconcile_mismatch`),
+  and once per open position writes a `sell_shortfall` event, logs an ERROR
+  and sends a Telegram message from `serve` (`TradeService(notifier=)`,
+  the notifier `serve` already builds for the daily report). The owner checks
+  the wallet; the strategy keeps asking and the sell goes through once the
+  tokens are back. `settle_sell(may_keep_rest=False)` stays for intents
+  resolved from older ledgers.
+
+Tests: a buy without a cap reads fresh; a shortfall sell is refused without a
+swap, blocks buys, writes one event and one message for repeated attempts;
+the old capped-sell test becomes the refusal.
+- **Done.** As designed. `WalletBalances.fresh`; `AsyncAccount` reads once per
+  order (`_sellable` takes the balance; `can_sell` is gone, and so is the
+  live `record_leftover` call, which only a wallet-capped sell could reach);
+  `WalletShortfallError` in `gateway/account.py`; `TradeService._sell` /
+  `_shortfall`; `build_trade_service(notifier=)`, and `serve` shares one
+  notifier between the service and the daily report. 781 tests (3 new, 3
+  rewritten: the capped sell, the fee-reserve rest that used to close as a
+  `position_leftover`, and the pause test). Consequence for SOL-output pairs
+  (`SOL-USDC`): the 0.02 SOL fee reserve is not sellable, so the wallet needs
+  SOL beyond the reserve plus the position, or the sell is refused.
+
 #### A4. Warm-up across candle gaps — M (done 2026-10-05)
 Soak F1: Jupiter candles only exist for bars with trades, and
 `BarSeries.seed` treats every gap over `MAX_GAP_BARS` as an outage and clears

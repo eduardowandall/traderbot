@@ -55,11 +55,16 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   it to the service, the sweep, the daily report and the provider's quote
   check, so only the hub calls the Price API. USDC/USDT = 1 USD is decided
   in one place, `usd_snapshot`/`price_fn` (`trader/execution/market/prices.py`).
-- **Wallet checks** (`TradeService`): one balance cache for all buckets; a
+- **Wallet checks** (`TradeService`): one balance cache for all buckets, but
+  every order reads the wallet fresh (`WalletBalances.fresh`, A5; the cache is
+  for allocation, reconcile and snapshots); a
   bucket whose budget doesn't fit the wallet (with the other open budgets) is
   refused; at the first open, the open positions of every bucket in the ledger
   are checked against the wallet, and a missing token blocks buys of it
-  (`reconcile_mismatch` event).
+  (`reconcile_mismatch` event). A sell the wallet can't cover (for SOL, after
+  the 0.02 fee reserve) is refused, never capped (`WalletShortfallError`): it
+  blocks buys of the token and, once per position, writes `sell_shortfall`
+  and sends Telegram from `serve`.
 - Modes: `paper` (simulated wallet `.data/paper-wallet.json`, real Jupiter
   quotes, no key) and `real` (needs `SOLANA_PRIVATE_KEY` + `HELIUS_RPC_URL`;
   optional `SOLANA_PUBLIC_KEY` is checked against the key). The mode has no

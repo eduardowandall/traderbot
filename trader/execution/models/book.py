@@ -121,12 +121,12 @@ class PositionBook:
         return closed
 
     def settle_sell(
-        self, exit_order: Order, may_keep_rest: bool
+        self, exit_order: Order, may_keep_rest: bool = True
     ) -> tuple[Order, ClosedPosition]:
         """Fecha a posição, ou só reduz se pode sobrar algo que não é poeira.
 
-        `may_keep_rest` é falso quando a venda já fecha a posição de qualquer
-        jeito (limitada ao saldo da carteira). Devolve a ordem com
+        `may_keep_rest` é falso só para intenções antigas, que já fechavam a
+        posição (limitadas ao saldo, antes da A5). Devolve a ordem com
         `closes_position` decidido e o que foi realizado.
         """
         entry = self._open().entry_order

@@ -3,6 +3,9 @@
 Os buckets de um `TradeService` dividem a mesma carteira: com um cache por
 conta, o bucket A não via o que o bucket B acabou de gastar. Aqui há um cache
 só, invalidado a cada fill e com validade de `BALANCE_CACHE_TTL`.
+
+A regra (A5): toda ordem lê a carteira de novo (`fresh`); o cache serve só o
+que não é ordem (alocação, reconcile, snapshots).
 """
 
 from collections.abc import Callable
@@ -38,6 +41,11 @@ class WalletBalances:
             if str(balance.mint) == str(mint):
                 return balance.available
         return Decimal("0")
+
+    async def fresh(self, mint: Pubkey | str) -> Decimal:
+        """Saldo de `mint` lido agora: o que as ordens usam."""
+        self.invalidate()
+        return await self.get(mint)
 
     async def _all(self) -> list[MintBalance]:
         if not self._stale():

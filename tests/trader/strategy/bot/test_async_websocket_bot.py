@@ -6,7 +6,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import StubStrategy, make_order, memory_gateway, served
+from factories import Inbox, StubStrategy, make_order, memory_gateway, served
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
@@ -106,15 +106,6 @@ async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
     assert all(r.order_json for r in records)
     assert wallet.balance(BONK.mint) == 0  # vendeu tudo o que comprou
     market_client.aclose.assert_awaited_once()
-
-
-class Inbox(NotificationService):
-    def __init__(self):
-        super().__init__()
-        self.messages: list[str] = []
-
-    def send_message(self, message: str) -> None:
-        self.messages.append(message)
 
 
 async def test_fills_report_the_bucket_and_no_task_outlives_the_bot(
@@ -233,23 +224,20 @@ async def test_no_price_is_a_warning_without_traceback(caplog):
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-async def test_a_fill_is_reported_before_the_pause():
-    # soak F11: um `connect` parado nos 2 s depois do fill não o reportava
+async def test_a_fill_is_reported_without_a_pause():
+    # soak F11 e A5: sem os 2 s depois do fill; o fill é reportado na hora
     inbox = Inbox()
     trader = FakeTrader([OrderReply.of_fill(make_order(output_mint=BONK.mint))])
     strategy = mock.Mock(wraps=StubStrategy())
     strategy.on_market_refresh.return_value = OrderSignal(OrderSide.BUY, ONE)
     bot = _bot(_market([ONE, KeyboardInterrupt()]), strategy, trader)
     bot.notification_service = inbox
-    seen_at_pause: list[list[str]] = []
 
-    async def pause(seconds):
-        seen_at_pause.append(list(inbox.messages))
-
-    with mock.patch("asyncio.sleep", side_effect=pause):
+    with mock.patch("asyncio.sleep") as sleep:
         await bot.arun()
 
-    assert any(m.startswith("Ordem executada") for m in seen_at_pause[0])
+    assert any(m.startswith("Ordem executada") for m in inbox.messages)
+    sleep.assert_not_awaited()
 
 
 async def test_stop_ends_the_loop():

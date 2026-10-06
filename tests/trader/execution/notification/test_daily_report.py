@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from factories import SOL, executed_leg, memory_gateway
+from factories import SOL, Inbox, executed_leg, memory_gateway
 
 from trader.execution.notification.daily_report import DailyReporter
 
@@ -12,17 +12,6 @@ NOW = datetime(2026, 10, 3, 0, 5, tzinfo=UTC)  # relata 2026-10-02
 
 def _at(day: int, hour: int) -> datetime:
     return datetime(2026, 10, day, hour, 0, tzinfo=UTC)
-
-
-class Inbox:
-    def __init__(self):
-        self.messages: list[str] = []
-
-    def send_message(self, message: str) -> None:
-        self.messages.append(message)
-
-    async def aclose(self) -> None:
-        return None
 
 
 async def _sol_at_110(mint: str) -> Decimal | None:

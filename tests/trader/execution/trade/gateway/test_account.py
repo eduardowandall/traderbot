@@ -7,7 +7,7 @@ import pytest
 from factories import memory_gateway, mock_provider
 
 from trader.execution.models.account_data import MintBalance
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import AsyncAccount, WalletShortfallError
 from trader.shared.models import (
     SOLANA_MINTS,
     Order,
@@ -66,14 +66,14 @@ async def test_buy_raises_when_balance_below_minimum():
     acc.provider.buy.assert_not_awaited()  # type: ignore[attr-defined]
 
 
-async def test_can_sell_raises_when_no_position():
+async def test_sell_raises_when_no_position():
     acc, _, _ = _make_account()
 
     with pytest.raises(ValueError, match="Sem posicão de compra"):
-        await acc.can_sell()
+        await acc.sell(Decimal("100"), Decimal("0.1"))
 
 
-async def test_can_sell_raises_when_balance_below_minimum():
+async def test_sell_raises_when_balance_below_minimum():
     mi, mo = SOLANA_MINTS.get_by_symbol("SOL"), SOLANA_MINTS.get_by_symbol("USDC")
     acc, _, _ = _make_account(
         [
@@ -84,14 +84,7 @@ async def test_can_sell_raises_when_balance_below_minimum():
     acc.book.position = _long_position(mi, mo)
 
     with pytest.raises(ValueError, match="Sem valor minimo"):
-        await acc.can_sell()
-
-
-async def test_can_sell_allows_with_long_position_and_sufficient_balance():
-    acc, mi, mo = _make_account()
-    acc.book.position = _long_position(mi, mo)
-
-    await acc.can_sell()
+        await acc.sell(Decimal("100"), Decimal("0.1"))
 
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -193,26 +186,39 @@ async def test_buy_and_sell_fills_are_logged_at_info(caplog):
     assert [r.levelno for r in placed] == [logging.INFO, logging.INFO]
 
 
-async def test_sell_is_capped_at_wallet_balance():
-    # a compra recebeu menos que o pedido (slippage): vende só o que existe
+async def test_a_sell_the_wallet_cannot_cover_is_refused():
+    # A5: a venda não é mais limitada ao saldo; é recusada e nada é enviado
     acc = _usdc_sol_account(sol="0.098")
     acc.book.position = _long_position(USDC, SOL)
 
-    order = await acc.sell(Decimal("100.0"), Decimal("0.1"))
+    with pytest.raises(WalletShortfallError) as refused:
+        await acc.sell(Decimal("100.0"), Decimal("0.1"))
 
-    assert order.quantity == Decimal("0.078")  # 0.098 - reserva de 0.02 SOL
-    acc.provider.sell.assert_awaited_once_with(  # type: ignore[attr-defined]
-        USDC.pubkey, SOL.pubkey, quantity=Decimal("0.078")
-    )
+    assert refused.value.available == Decimal("0.078")  # 0.098 - reserva 0.02
+    assert refused.value.quantity == Decimal("0.1")
+    acc.provider.sell.assert_not_awaited()  # type: ignore[attr-defined]
+    assert acc.book.position is not None
 
 
 async def test_sell_refuses_to_touch_sol_fee_reserve():
     acc = _usdc_sol_account(sol="0.015")
     acc.book.position = _long_position(USDC, SOL)
 
-    with pytest.raises(ValueError, match="reservado para taxas"):
+    with pytest.raises(WalletShortfallError):
         await acc.sell(Decimal("100.0"), Decimal("0.1"))
     acc.provider.sell.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_every_order_reads_the_wallet_fresh():
+    # A5: uma compra sem teto de bucket também relê (antes, só com teto)
+    acc = _usdc_sol_account()
+    await acc.get_balance(USDC.pubkey)  # cache quente
+
+    await acc.buy(Decimal("100"), Decimal("0.5"))
+    await acc.sell(Decimal("110"), Decimal("0.5"))
+
+    reads = acc.provider.get_account_balance.await_count  # type: ignore[attr-defined]
+    assert reads == 3
 
 
 async def test_buy_with_sol_keeps_fee_reserve():

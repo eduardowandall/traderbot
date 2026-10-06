@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 import pytest
-from factories import memory_gateway, mock_provider, open_ledger
+from factories import Inbox, memory_gateway, mock_provider, open_ledger
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
@@ -357,3 +357,32 @@ class TestReconcile:
         await _open(service, "a", JUP)
         assert not service._blocked
         assert (await service.submit_order("a", _buy(market, "0.1"))).filled
+
+
+class TestSellShortfall:
+    async def test_is_refused_blocks_buys_and_alerts_once(self, tmp_path):
+        # A5: tokens sumiram da carteira depois da compra; a venda é recusada
+        market, wallet, ledger = Market("100"), _wallet(), open_ledger()
+        messages = Inbox()
+        provider = paper_provider(wallet, jupiter_client=market.client)
+        gateway = TradeGateway(ledger, LOOSE, False)
+        service = TradeService(provider, gateway, mode="paper", notifier=messages)
+        await _open(service, "a", JUP)
+        bought = await service.submit_order("a", _buy(market, "0.1"))
+        assert bought.filled and bought.order is not None
+        wallet.reset({"USDC": Decimal(90), "SOL": Decimal(1), "JUP": Decimal("0.05")})
+
+        for _ in range(2):
+            reply = await service.submit_order("a", _sell(market, Decimal("0.1")))
+            assert reply.status == ReplyStatus.REJECTED
+            assert "recusada" in reply.reasons[0]
+
+        events = ledger.conn.execute(
+            "SELECT payload FROM events WHERE type = 'sell_shortfall'"
+        ).fetchall()
+        assert len(events) == 1 and JUP.mint in events[0]["payload"]
+        assert len(messages.messages) == 1 and "paper:a" in messages.messages[0]
+        assert (await service.get_bucket("a")).position is not None
+        assert wallet.balance(JUP.mint) == Decimal("0.05")  # nada foi vendido
+        await _open(service, "b", JUP)
+        assert not (await service.submit_order("b", _buy(market, "0.1"))).filled

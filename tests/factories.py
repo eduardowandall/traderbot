@@ -347,3 +347,16 @@ def simulation(lamports: int = 10**9, tokens=()):
     accounts = [SimpleNamespace(lamports=lamports)]
     accounts += [SimpleNamespace(data=data) for data in tokens]
     return SimpleNamespace(value=SimpleNamespace(accounts=accounts, err=None))
+
+
+class Inbox:
+    """`Notifier` que guarda as mensagens (sem Telegram)."""
+
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def send_message(self, message: str) -> None:
+        self.messages.append(message)
+
+    async def aclose(self) -> None:
+        return None

@@ -11,7 +11,8 @@ aumenta. Os buckets dividem a carteira: um cache de saldo só
 (`WalletBalances`), as ordens uma por vez (`asyncio.Lock`), e os orçamentos
 abertos precisam caber na carteira. Ao abrir o primeiro bucket, as posições de
 todos os buckets do ledger são conferidas contra a carteira; faltando token,
-compras dele ficam bloqueadas. A política do gateway continua valendo para
+compras dele ficam bloqueadas. Uma venda que a carteira não cobre é recusada
+e avisada (A5), e também bloqueia compras do token. A política do gateway continua valendo para
 cada ordem, por cima do bucket.
 
 O modo (real/paper) é só do serviço: quem pede ordens nunca o conhece.
@@ -34,11 +35,15 @@ from trader.execution.trade.gateway import (
     PolicyDeniedError,
     TradeGateway,
 )
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import AsyncAccount, WalletShortfallError
 from trader.execution.trade.gateway.balances import WalletBalances
 from trader.execution.trade.gateway.resolve import IntentResolver
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.shared.models import Order, OrderSide
+from trader.shared.notification.notification_service import (
+    NotificationService,
+    Notifier,
+)
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
     BucketStatus,
@@ -79,8 +84,11 @@ class TradeService:
         clock: Callable[[], datetime] = partial(datetime.now, UTC),
         # preços USD para pares sem stablecoin/SOL; None no backtest e testes
         prices: PriceOracle | None = None,
+        # avisos ao dono (Telegram, no `serve`); o padrão não envia nada
+        notifier: Notifier | None = None,
     ):
         self.provider = provider
+        self.notifier = notifier or NotificationService()
         self.prices = prices
         # no backtest, `TradeGateway.in_memory()`
         self.gateway = gateway
@@ -92,6 +100,8 @@ class TradeService:
         # tokens com menos na carteira do que as posições do ledger
         self._blocked: set[str] = set()
         self._reconciled = False
+        # (conta, entrada) cuja venda a carteira não cobriu: um aviso só
+        self._shortfalls: set[tuple[str, str]] = set()
         self._resolver = IntentResolver(gateway, provider, prices)
 
     def account_id(self, name: str) -> str:
@@ -156,22 +166,26 @@ class TradeService:
 
         Uma falta (tokens vendidos por fora, um fill mal registrado) vira um
         evento `reconcile_mismatch` e bloqueia compras do token neste processo;
-        o dono confere a carteira. Vendas continuam, limitadas ao saldo.
+        o dono confere a carteira. Vendas continuam enquanto a carteira as cobre.
         """
         prefix = f"{self.mode}:" if self.mode else ""
         for mint, expected in self.gateway.open_positions(prefix).items():
             balance = await self.wallet.get(mint)
             if balance >= expected * RECONCILE_TOLERANCE:
                 continue
-            self._blocked.add(mint)
             logger.warning(
                 f"Carteira tem {balance} de {mint}, mas os buckets somam {expected}: "
                 "compras bloqueadas"
             )
-            self.gateway.add_event(
+            self._block_buys(
                 "reconcile_mismatch",
                 {"mint": mint, "expected": expected, "wallet_balance": balance},
             )
+
+    def _block_buys(self, event: str, payload: dict) -> None:
+        """A carteira tem menos de `payload["mint"]` que o ledger: sem compras dele."""
+        self._blocked.add(payload["mint"])
+        self.gateway.add_event(event, payload)
 
     async def _check_allocation(self, name: str, new: _Bucket) -> None:
         """Os orçamentos abertos (na mesma moeda) precisam caber na carteira.
@@ -330,12 +344,7 @@ class TradeService:
                 "do que as posições do ledger (reconcile_mismatch)"
             )
         if request.side == OrderSide.SELL:
-            return await account.sell(
-                request.price,
-                request.quantity,
-                request.rationale,
-                request.idempotency_key,
-            )
+            return await self._sell(account, request)
         cap, _ = await self._quote_cap(bucket)
         return await account.buy(
             request.price,
@@ -343,6 +352,41 @@ class TradeService:
             request.rationale,
             request.idempotency_key,
             limit=cap,
+        )
+
+    async def _sell(self, account: AsyncAccount, request: OrderRequest) -> Order:
+        try:
+            return await account.sell(
+                request.price,
+                request.quantity,
+                request.rationale,
+                request.idempotency_key,
+            )
+        except WalletShortfallError as ex:
+            self._shortfall(account, ex)
+            raise
+
+    def _shortfall(self, account: AsyncAccount, ex: WalletShortfallError) -> None:
+        """Venda recusada por falta na carteira: bloqueia compras e avisa uma vez.
+
+        A estratégia continua pedindo a venda; ela passa quando o token voltar.
+        """
+        key = (account.account_id, ex.entry_id)
+        if key in self._shortfalls:
+            return
+        self._shortfalls.add(key)
+        logger.error(f"{account.account_id}: {ex}; compras do token bloqueadas")
+        self._block_buys(
+            "sell_shortfall",
+            {
+                "account": account.account_id,
+                "mint": ex.mint,
+                "quantity": ex.quantity,
+                "wallet_available": ex.available,
+            },
+        )
+        self.notifier.send_message(
+            f"[!] {account.account_id}: {ex}. Confira a carteira"
         )
 
     async def close_bucket(self, name: str, price: Decimal) -> OrderReply | None:

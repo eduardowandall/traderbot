@@ -91,7 +91,7 @@ class Position:
         entry, exit_ = self.entry_order, self.exit_order
         if exit_ is None or entry.quote_amount is None or exit_.quote_amount is None:
             return None
-        # a venda pode ser menor que a entrada (limitada ao saldo)
+        # a venda pode ser menor que a entrada (venda parcial)
         fraction = min(exit_.quantity / entry.quantity, Decimal("1"))
         spent = entry.quote_amount * fraction
         entry_costs = _leg_costs(entry, fraction, exit_)

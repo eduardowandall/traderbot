@@ -31,8 +31,6 @@ bot_logger = logging.getLogger("bot")
 
 # falhas seguidas de inicialização antes de avisar o dono
 STARTUP_ALERT_AFTER = 5
-# pausa depois de cada fill, já reportado (se ela fica é a A5)
-POST_FILL_PAUSE_SECONDS = 2.0
 
 
 class AsyncWebsocketTradingBot:
@@ -194,10 +192,7 @@ class AsyncWebsocketTradingBot:
 
         order = await self.process_market_data(current_price, snapshot)
         if order:
-            # reporta antes da pausa: um `connect` parado logo depois do fill
-            # ainda loga e notifica a ordem (F11)
             await self._report_order(order, current_price)
-            await asyncio.sleep(POST_FILL_PAUSE_SECONDS)
 
     def _log_bar(self, price: Decimal, snapshot: BucketSnapshot):
         """Preço e posição no primeiro tick de cada barra do timeframe."""

@@ -95,10 +95,12 @@ the ledger or the policy.
 | 13 | `account.py:174` `_to_order` → `trader/execution/trade/gateway/orders.py:33` `order_from_fill` | Real amounts, else the quote's; USD rates; never raises. | A trade that happened is never lost. |
 | 14 | `account.py:194` `_record_fill` → `gateway.py:197` `record_fill` → `intents.py:179` `attach_order` | Stores the order JSON, cost and PnL columns on the (EXECUTED) row; a failure is logged, not raised. `book.open(order)` (`models/book.py:99`) opens the position in memory. | The ledger is the truth; the book is its in-memory copy. |
 | 15 | `service.py:163` (after `_place`) | `_check_max_loss`: realized loss past `max_loss_usd` retires the bucket; `_close_if_retiring` (`:173`) sells a leftover once per order. | Exits don't depend on the strategy. |
-| 16 | `async_websocket_bot.py:83` `_handle_reply`, `:212` `_report_order` | Filled → log and Telegram, with the bucket after the fill (realized PnL; an open position marked to market, `Position.unrealized_usd`), then a 2 s pause (`_tick`). Denied/rejected → pause orders 30s. Error → loop backoff; no price from the hub (`PriceUnavailableError`) is a WARNING, anything else an ERROR with its traceback (`:222` `_on_error`). | The strategy keeps getting prices while orders pause; a fill is reported even if the `connect` stops right after it. |
+| 16 | `async_websocket_bot.py:83` `_handle_reply`, `:212` `_report_order` | Filled → log and Telegram, with the bucket after the fill (realized PnL; an open position marked to market, `Position.unrealized_usd`); no pause after a fill (A5). Denied/rejected → pause orders 30s. Error → loop backoff; no price from the hub (`PriceUnavailableError`) is a WARNING, anything else an ERROR with its traceback (`:222` `_on_error`). | The strategy keeps getting prices while orders pause; a fill is reported even if the `connect` stops right after it. |
 
 A **sell** takes the same path with `account.sell` (`account.py:386`): the
-quantity is capped at the position and at the wallet, the idempotency key is
+wallet is read fresh, the quantity is capped at the position, a wallet that
+can't cover it refuses the sell (`WalletShortfallError`, A5: buys of the token
+blocked, one `sell_shortfall` event and Telegram), the idempotency key is
 fixed per position (`<account>:sell:<entry order>:<qty>`), the intent records
 whether it closes the position, budget rules don't apply, and
 `book.close`/`book.reduce` compute the realized PnL.
@@ -294,7 +296,6 @@ Any request that fails answers `{"ok": false, "error": "<Type>: <msg>", "kind": 
 
 ## 10. Where it's going
 
-The roadmap is [`plan.md`](plan.md): next, a first tiny-budget real run
-(the wallet re-read rule first), then
+The roadmap is [`plan.md`](plan.md): next, a first tiny-budget real run, then
 perpetual futures. Specs stay
 files written from [`specs.md`](specs.md).

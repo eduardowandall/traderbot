@@ -76,13 +76,6 @@ first tiny-budget real run.
 In order. Each item ships on its own with the suite green (`/check`). Size:
 **S** under an hour, **M** several modules, **L** a design change.
 
-### A5. One rule for when orders re-read the wallet — S
-Old B10 C3, waiting for a talk with the owner. It touches real sells, so it is
-settled before A6. The bot's 2 s pause after every fill
-(`AsyncWebsocketTradingBot._handle_reply`, "da tempo da wallet atualizar")
-is part of the same question: keep it or drop it here (A13 moved the fill
-report before it).
-
 ### A6. First real run — S (owner, with a checklist)
 - The owner's answers to §7 recorded: pairs, `max_trade_usd`, daily notional,
   one hot wallet.
@@ -149,10 +142,10 @@ ledger schema, so it waits for the end of a paper soak.
 | A2 Owner: paper soak | done | 2026-10-05, ended early by the owner; in `history.md` (F9-F13 -> A13, A14) |
 | A3 Resolve UNCONFIRMED | done | 2026-10-05; in `history.md` |
 | A4 Warm-up across candle gaps | done | 2026-10-05; in `history.md` |
-| A5 Wallet re-read rule | open | Owner discussion first |
+| A5 Wallet re-read rule | done | 2026-10-05; in `history.md` |
 | A13 Soak II small fixes | done | 2026-10-05; in `history.md` |
 | A14 Replay fills like live fills | done | 2026-10-05; in `history.md` |
-| A6 First real run | open | After A5 |
+| A6 First real run | open | Next |
 | A7 Perps: decoupling | open | |
 | A8 Perps: model, paper, spec | open | Schema bump; after a soak |
 | A9 Perps: backtest | open | |

@@ -24,7 +24,6 @@ from trader.execution.trade.gateway.fills import (
     Fill,
     execute_trade,
     record_fill_safely,
-    record_leftover,
 )
 from trader.execution.trade.gateway.gateway import AccountState, TradeGateway
 from trader.execution.trade.gateway.orders import order_from_fill, priced_mints
@@ -36,6 +35,23 @@ from trader.shared.models.order import SwapResult
 from trader.shared.models.position import Position
 
 SOL = SOLANA_MINTS[SOL_MINT].pubkey
+
+
+class WalletShortfallError(ValueError):
+    """A carteira tem menos do token do que a venda pede (A5).
+
+    A venda é recusada, não limitada ao saldo: o dono confere a carteira.
+    """
+
+    def __init__(self, mint: str, quantity: Decimal, available: Decimal, entry_id: str):
+        super().__init__(
+            f"venda de {quantity} recusada: a carteira tem só {available} "
+            f"gastável de {mint}"
+        )
+        self.mint = mint
+        self.quantity = quantity
+        self.available = available
+        self.entry_id = entry_id
 
 
 class AsyncAccount:
@@ -242,16 +258,14 @@ class AsyncAccount:
 
     # --- ordens ------------------------------------------------------------
 
-    async def can_sell(self) -> Position:
+    def _sellable(self, balance: Decimal) -> Position:
         """Verifica se é possível vender e devolve a posição a fechar."""
         position = self.book.position
         if position is None:
             raise ValueError(
                 "Não é possível executar venda no momento. Sem posicão de compra"
             )
-
-        balance = await self.get_balance(self.output_mint)
-        self.logger.debug(f"can_sell: output_mint={str(self.output_mint)} {balance=}")
+        self.logger.debug(f"sell: output_mint={str(self.output_mint)} {balance=}")
         if balance < Decimal("0.00001"):  # Mínimo para vender
             raise ValueError(
                 "Não é possível executar venda no momento. Sem valor minimo"
@@ -261,16 +275,13 @@ class AsyncAccount:
     async def _buy_limit(self, cap: Decimal | None) -> Decimal:
         """Quanto uma compra pode gastar: saldo gastável, limitado pelo bucket.
 
-        Uma leitura de saldo só. Com teto (bucket), a leitura é nova: buckets
-        dividem a carteira, e o saldo em cache pode já ter sido gasto.
+        Uma leitura de saldo só, nova (A5): toda ordem relê a carteira.
         """
         if self.book.position is not None:
             raise ValueError(
                 "Não é possível executar compra no momento. Já existe posicão"
             )
-        if cap is not None:
-            self.wallet.invalidate()
-        spendable = self._spendable_input(await self.get_balance(self.input_mint))
+        spendable = self._spendable_input(await self.wallet.fresh(self.input_mint))
         if cap is None:
             return spendable
         if cap <= 0:
@@ -340,33 +351,25 @@ class AsyncAccount:
         rationale: str | None = None,
         idempotency_key: str | None = None,
     ) -> Order:
-        """Vende até `quantity` da posição (nunca mais que ela nem que a carteira).
+        """Vende até `quantity` da posição (nunca mais que ela).
 
-        A chave padrão é uma por posição (`<conta>:sell:<entrada>:<qtd>`); quem
-        pede pode fixar outra (o strategy-runner, para um reenvio não repetir).
+        Se a carteira não cobre a venda, ela é recusada (`WalletShortfallError`,
+        A5). A chave padrão é uma por posição (`<conta>:sell:<entrada>:<qtd>`);
+        quem pede pode fixar outra (o strategy-runner, para um reenvio não
+        repetir).
         """
-        # o saldo em cache pode ser de antes da compra: a venda confere de novo
-        self.wallet.invalidate()
-        position = await self.can_sell()
+        # uma leitura nova da carteira (A5): o cache pode ser de antes da compra
+        balance = await self.wallet.fresh(self.output_mint)
+        position = self._sellable(balance)
         entry = position.entry_order
         # nunca mais do que a posição: o pedido vem do cliente, e vendas não
         # passam pelas regras de orçamento
         quantity = min(quantity, entry.quantity)
-
-        # a quantidade recebida na compra pode ser menor que a pedida
-        # (slippage/taxas); nunca tenta vender mais do que a carteira tem
-        available = await self.get_spendable_balance(self.output_mint)
-        if available <= 0:
-            raise ValueError(
-                "Não é possível executar venda no momento. Saldo reservado para taxas"
+        available = self._spendable(self.output_mint, balance)
+        if quantity > available:
+            raise WalletShortfallError(
+                str(self.output_mint), quantity, available, entry.order_id
             )
-        capped_by_wallet = quantity > available
-        if capped_by_wallet:
-            self.logger.warning(
-                f"Quantidade de venda {quantity} maior que o saldo {available}; "
-                "vendendo o saldo disponível"
-            )
-            quantity = available
 
         usd = await self._usd_snapshot()
         intent = self._intent(
@@ -379,8 +382,7 @@ class AsyncAccount:
             idempotency_key=idempotency_key
             or f"{self.account_id}:sell:{entry.order_id}:{entry.quantity}",
             rationale=rationale,
-            closes_position=capped_by_wallet
-            or remainder_entry(entry, quantity) is None,
+            closes_position=remainder_entry(entry, quantity) is None,
         )
         order = await self._execute_order(
             intent,
@@ -397,10 +399,8 @@ class AsyncAccount:
             f"ORDER PLACED: order={asdict(order)} position={asdict(position)}",
             extra=asdict(order),
         )
-        order, closed = self.book.settle_sell(order, not capped_by_wallet)
+        order, closed = self.book.settle_sell(order)
         record_fill_safely(
             self.gateway, intent.intent_id, order, closed.realized_usd, closed.pnl
         )
-        if order.closes_position:
-            record_leftover(self.gateway, self.account_id, entry, order)
         return order

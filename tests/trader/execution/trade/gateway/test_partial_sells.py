@@ -4,11 +4,12 @@ from datetime import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import pytest
 from factories import memory_gateway, mock_provider
 
 from trader.execution.models.account_data import MintBalance
 from trader.execution.models.book import remainder_entry
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import AsyncAccount, WalletShortfallError
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, SwapResult
 from trader.shared.models.costs import QUOTE, TradeCosts
 
@@ -89,22 +90,21 @@ async def test_a_partial_sell_keeps_the_rest_and_survives_a_restart():
     assert fresh.book.position is None
 
 
-async def test_an_unsellable_rest_closes_and_is_recorded():
+async def test_a_rest_held_by_the_fee_reserve_is_refused_not_left_over():
+    # A5: antes vendia 0.08 e registrava a sobra; agora a venda é recusada
     gateway = memory_gateway()
     account, wallet = _account(gateway, sol_balance="0")
     await account.buy(Decimal("100"), Decimal("0.1"))
     wallet["sol"] = Decimal("0.1")  # a reserva de 0.02 SOL não pode ser vendida
-    account.wallet.invalidate()
 
-    order = await account.sell(Decimal("110"), Decimal("0.1"))
+    with pytest.raises(WalletShortfallError):
+        await account.sell(Decimal("110"), Decimal("0.1"))
 
-    assert order.quantity == Decimal("0.08")
-    assert order.closes_position
-    assert account.book.position is None
+    assert account.book.position is not None
     events = gateway.ledger.conn.execute(
         "SELECT payload FROM events WHERE type = 'position_leftover'"
     ).fetchall()
-    assert len(events) == 1 and '"quantity": "0.02"' in events[0]["payload"]
+    assert events == []
 
 
 def test_the_rest_scales_costs_and_ignores_dust():

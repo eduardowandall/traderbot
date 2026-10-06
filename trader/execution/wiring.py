@@ -26,6 +26,7 @@ from trader.execution.trade.venues.paper import (
     SimulatedWallet,
     paper_provider,
 )
+from trader.shared.notification.notification_service import Notifier
 from trader.shared.paths import data_dir
 
 
@@ -89,13 +90,15 @@ def build_trade_service(
     mode: RunningMode,
     on_wallet_created: Callable[[str], None] = lambda message: None,
     prices: PriceOracle | None = None,
+    notifier: Notifier | None = None,
     **limits,
 ) -> TradeService:
     """O serviço que executa as ordens dos buckets deste modo.
 
     `prices`: o oráculo USD do processo (o `PriceHub` do `serve`), para
     o serviço e a conferência das quotes; sem ele, a Price API no cliente
-    Jupiter das quotes. Quem cria fecha: `service.aclose()` (provider) e o
+    Jupiter das quotes. `notifier`: avisos ao dono (vendas que a carteira
+    não cobre, A5). Quem cria fecha: `service.aclose()` (provider) e o
     ledger do gateway.
     """
     policy = load_policy(mode=str(mode))
@@ -105,4 +108,6 @@ def build_trade_service(
     prices = prices or JupiterPriceOracle(provider.jupiter_client)
     provider.usd_prices = prices.usd_prices
     gateway = TradeGateway.for_mode(mode, policy)  # política + ledger do modo
-    return TradeService(provider, gateway, mode=str(mode), prices=prices)
+    return TradeService(
+        provider, gateway, mode=str(mode), prices=prices, notifier=notifier
+    )

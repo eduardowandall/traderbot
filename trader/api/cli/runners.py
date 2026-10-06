@@ -40,13 +40,16 @@ def serve(mode: RunningMode = typer.Argument(..., help="real ou paper")):
     with mode_lock(mode):
         # um feed de preços para todos os `connect` e para o próprio serviço
         hub = PriceHub()
+        # um Telegram para o relatório diário e os avisos do serviço
+        notifier = notifier_from_env()
         service = build_trade_service(
-            mode, on_wallet_created=lambda m: typer.echo(m, err=True), prices=hub
+            mode,
+            on_wallet_created=lambda m: typer.echo(m, err=True),
+            prices=hub,
+            notifier=notifier,
         )
         # o relatório marca as posições a mercado pelo hub
-        reporter = DailyReporter(
-            service.gateway, str(mode), notifier_from_env(), price_fn(hub)
-        )
+        reporter = DailyReporter(service.gateway, str(mode), notifier, price_fn(hub))
         runner = TradeRunner(
             service,
             str(mode),
