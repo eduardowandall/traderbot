@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "real-first-run",
+  "agent_id": "claude",
+  "rationale": "A6, the first real run, on a ~5 USD SOL-only wallet. Not for profit: it exercises the real path (quote check, tx inspection, fills, costs, ledger) about once an hour. JUP-SOL spends SOL, the only token the wallet has (a stablecoin can't be the bought token). Entry is a 1% draw per tick (live ~100 s); out after 10 min, or on a 1% stop of JUP against SOL; then 60 min of cooldown: ~1 round trip an hour, ~17 in the one-day TTL. 1.5 USD a buy inside a 2 USD budget, which must fit the ~2.6 USD left above the 0.02 SOL fee reserve. Worst case per trade is about the stop (~0.015 USD) plus costs; the bucket retires at -0.5 USD.",
+  "symbol": "JUP-SOL",
+  "timeframe": "1_MINUTE",
+  "entry": {
+    "mode": "all",
+    "conditions": [{"type": "random_chance", "pct": 1}]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 1},
+    "mode": "any",
+    "conditions": [{"type": "max_hold", "minutes": 10}]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 1.5},
+  "budget_usd": 2,
+  "max_loss_usd": 0.5,
+  "cooldown_minutes": 60,
+  "ttl_days": 1
+}

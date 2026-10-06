@@ -88,6 +88,26 @@ In order. Each item ships on its own with the suite green (`/check`). Size:
   can't).
 - Afterwards: `ledger_dump.py`, the daily report and `live_vs_backtest.py`;
   write down the exit criteria for raising the budget.
+- **Constraint (owner, 2026-10-06): the wallet holds about 5 USD, all SOL.**
+  At ~120 USD/SOL that is ~0.042 SOL; the 0.02 SOL fee reserve
+  (`DEFAULT_SOL_FEE_RESERVE`) leaves ~0.022 SOL (~2.6 USD) spendable, and
+  `_check_allocation` measures budgets against that. So: a SOL-input spec
+  (no USDC to spend), budget ~2 USD with room for a SOL drop between
+  restarts; the first buy of a new token opens its account (~0.002 SOL,
+  ~0.25 USD rent, refundable only by closing it); the 100,000-lamport
+  priority-fee cap is ~0.012 USD a leg, ~60 bps of a 2 USD trade, so lower
+  it; tight `[real.limits]` (trade, daily notional, daily loss, trades per
+  hour). The goal is a few round trips that exercise the real path, not PnL.
+- **Chosen (2026-10-06):** `docs/examples/spec-real-first-run.json`, JUP-SOL
+  (`USDC-SOL` is refused: the bought token can't be a stablecoin), a 1% draw
+  per tick, out after 10 min or a 1% stop, 60 min cooldown, 1.5 USD a buy,
+  budget 2, max loss 0.5, one day. Backtests at a 20,000-lamport cap: 14
+  round trips a day, -0.10 to -0.15 USD. Policy for the owner to add:
+  `[real.trading]` `real_trading_enabled = true`, `allowed_symbols = ["SOL",
+  "JUP"]`, `max_priority_fee_lamports = 20000`; `[real.limits]`
+  `max_trade_usd = 2`, `max_daily_notional_usd = 40`, `max_trades_per_hour =
+  2`, `max_trades_per_hour_per_bucket = 2`, `max_daily_loss_usd = 1`,
+  `max_consecutive_failures = 2`.
 
 ### A7–A12. Perps
 The design is in §8. A7 changes no behaviour and no schema; A8 bumps the
