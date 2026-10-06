@@ -59,7 +59,9 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   every order reads the wallet fresh (`WalletBalances.fresh`, A5; the cache is
   for allocation, reconcile and snapshots); a
   bucket whose budget doesn't fit the wallet (with the other open budgets) is
-  refused; at the first open, the open positions of every bucket in the ledger
+  refused; a fresh read of a token (not SOL) also reads its account by
+  address and keeps the larger (`token_balance`, A15: the RPC's owner index
+  once missed an account); at the first open, the open positions of every bucket in the ledger
   are checked against the wallet, and a missing token blocks buys of it
   (`reconcile_mismatch` event). A sell the wallet can't cover (for SOL, after
   the 0.02 fee reserve) is refused, never capped (`WalletShortfallError`): it
@@ -196,8 +198,16 @@ command to run in a terminal. The rules are tested in
   the provider and the gateway.
 - **Cost per round trip** (`RoundTripCosts`, `Ledger.round_trip_costs`): per
   closed position, entry spend x (exit tick price / entry tick price - 1)
-  minus the net realized PnL, in USD and bps. It can be negative when fills
-  beat the tick. Shown by the backtest, the daily report,
+  minus the net realized PnL, in USD and bps, less rent refunds in the window.
+  It can be negative when fills beat the tick.
+- **Rent comes back on retirement (A15).** The first buy of a token pays its
+  account's rent (a cost). When the bucket is retired and flat, the `serve`
+  sweep closes the empty account (`TradeService.close_token_account`; never SOL,
+  never while another ACTIVE bucket or any open position uses the token, never
+  an account no fill of the mode paid for, never past the swaps' send gate:
+  `real_trading_enabled`, unresolved intents, breaker) and credits the bucket that paid
+  (`rent_refund_sent` before the send, `rent_refund` after; events, no schema
+  change). Shown by the backtest, the daily report,
   `live_vs_backtest.py` and `ledger_dump.py`.
 - **Ledger schema** is one `_SCHEMA` with a `user_version` in
   `trader/execution/trade/ledger/store.py`. There are no migrations: an older file is refused

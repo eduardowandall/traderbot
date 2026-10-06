@@ -206,6 +206,10 @@ class RoundTripCosts:
         self.notional_usd += notional_usd
         self.count += closes
 
+    def refund(self, net_usd: Decimal) -> None:
+        """Rent devolvido (menos a taxa do fechamento): sai do custo (A15)."""
+        self.cost_usd -= net_usd
+
     @property
     def per_trip_usd(self) -> Decimal | None:
         return self.cost_usd / self.count if self.count else None

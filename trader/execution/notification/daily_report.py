@@ -143,6 +143,8 @@ def _day_line(day: AccountPnL) -> str:
     )
     if day.failed_tx:
         line += f", {day.failed_tx} tx falha(s) {sol_text(day.failed_fee_lamports)} SOL"
+    if day.rent_refund_lamports:
+        line += f", rent devolvido {sol_text(day.rent_refund_lamports)} SOL"
     return line
 
 

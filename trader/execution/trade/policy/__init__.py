@@ -3,6 +3,7 @@ from .policy import (
     PolicyState,
     evaluate,
     load_policy,
+    send_refusals,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "PolicyState",
     "evaluate",
     "load_policy",
+    "send_refusals",
 ]

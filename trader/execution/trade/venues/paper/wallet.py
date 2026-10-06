@@ -146,22 +146,56 @@ class SimulatedWallet:
             )
             applied, trimmed_at = self._applied, self.trimmed_at
             if signature is not None:
-                entry = {
-                    "signature": signature,
-                    "in_amount": in_amount,
-                    "out_amount": out_amount,
-                    "fee": fee_lamports,
-                    "rent": rent_lamports,
-                    "at": time.time(),
-                }
-                applied = [*applied, entry]
-                if len(applied) > APPLIED_LOG_SIZE:
-                    # sem horário (o primeiro formato): agora, o lado seguro
-                    trimmed_at = applied[-APPLIED_LOG_SIZE - 1].get("at", time.time())
-                    applied = applied[-APPLIED_LOG_SIZE:]
+                applied, trimmed_at = self._logged(
+                    signature, in_amount, out_amount, fee_lamports, rent_lamports
+                )
             self._write(raw, opened, applied, trimmed_at)
             self._raw, self._open = raw, opened
             self._applied, self.trimmed_at = applied, trimmed_at
+
+    def close_account(
+        self, mint: str, rent_lamports: int, fee_lamports: int, signature: str
+    ) -> bool:
+        """Fecha a conta vazia do token: o rent volta, menos a taxa (A15).
+
+        False (nada muda) se não há conta aberta do token, se ela tem saldo,
+        ou se é o SOL. Como `apply_swap`: sob o lock, relê, grava e só então
+        muda a memória; entra no registro dos aplicados (rent negativo).
+        """
+        with _file_lock(self.path):
+            self._read()
+            if self.needs_account(mint) or mint == SOL_MINT or self.raw_balance(mint):
+                return False
+            raw = dict(self._raw)
+            raw[SOL_MINT] = raw.get(SOL_MINT, 0) + rent_lamports - fee_lamports
+            raw.pop(mint, None)
+            opened = self._open - {mint}
+            applied, trimmed_at = self._logged(
+                signature, 0, rent_lamports, fee_lamports, -rent_lamports
+            )
+            self._write(raw, opened, applied, trimmed_at)
+            self._raw, self._open = raw, opened
+            self._applied, self.trimmed_at = applied, trimmed_at
+        return True
+
+    def _logged(
+        self, signature: str, in_amount: int, out_amount: int, fee: int, rent: int
+    ) -> tuple[list[dict], float | None]:
+        """O registro dos aplicados com mais esta entrada (e o corte, se passou)."""
+        entry = {
+            "signature": signature,
+            "in_amount": in_amount,
+            "out_amount": out_amount,
+            "fee": fee,
+            "rent": rent,
+            "at": time.time(),
+        }
+        applied, trimmed_at = [*self._applied, entry], self.trimmed_at
+        if len(applied) > APPLIED_LOG_SIZE:
+            # sem horário (o primeiro formato): agora, o lado seguro
+            trimmed_at = applied[-APPLIED_LOG_SIZE - 1].get("at", time.time())
+            applied = applied[-APPLIED_LOG_SIZE:]
+        return applied, trimmed_at
 
     def _after_swap(
         self,

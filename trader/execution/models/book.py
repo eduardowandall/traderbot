@@ -73,6 +73,9 @@ class PositionBook:
     incomplete: int = 0  # posições fechadas sem custos convertidos
     # taxas de transações que falharam na rede (já descontadas de realized_usd)
     failed_fee_sol: Decimal = ZERO
+    # rent devolvido ao fechar a conta do token (o líquido da taxa já está em
+    # realized_usd; A15)
+    rent_refund_sol: Decimal = ZERO
 
     @classmethod
     def restored(
@@ -85,6 +88,7 @@ class PositionBook:
         incomplete: int,
         entry: Order | None,
         failed_fee_sol: Decimal = ZERO,
+        rent_refund_sol: Decimal = ZERO,
     ) -> PositionBook:
         """O livro reconstruído a partir do ledger (totais + entrada aberta)."""
         book = cls(
@@ -95,6 +99,7 @@ class PositionBook:
             costs_sol=costs_sol,
             incomplete=incomplete,
             failed_fee_sol=failed_fee_sol,
+            rent_refund_sol=rent_refund_sol,
         )
         if entry is not None:
             book.open(entry)
@@ -172,11 +177,13 @@ class PositionBook:
         flag = (
             f" [!] {self.incomplete} trade(s) incompleto(s)" if self.incomplete else ""
         )
-        failed = (
+        extra = (
             f", tx falhas {self.failed_fee_sol:.9f} SOL" if self.failed_fee_sol else ""
         )
+        if self.rent_refund_sol:
+            extra += f", rent devolvido {self.rent_refund_sol:+.9f} SOL"
         return (
             f"PNL líquido {self.net_quote:+.6f} {self.quote_symbol} "
             f"(~${self.realized_usd:+.4f}); bruto {self.gross_quote:+.6f}, "
-            f"custos {self.costs_sol:.9f} SOL{failed}{flag}"
+            f"custos {self.costs_sol:.9f} SOL{extra}{flag}"
         )

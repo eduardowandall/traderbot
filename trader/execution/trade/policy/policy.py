@@ -205,23 +205,27 @@ def load_policy(
 
 
 @dataclass(frozen=True)
-class _Check:
-    intent: TradeIntent
+class _SendCheck:
     policy: Policy
     state: PolicyState
     real_mode: bool
+
+
+@dataclass(frozen=True)
+class _Check(_SendCheck):
+    intent: TradeIntent
 
 
 # cada regra devolve os motivos de recusa (vazio = ok)
 Rule = Callable[[_Check], Iterator[str]]
 
 
-def _real_mode(c: _Check) -> Iterator[str]:
+def _real_mode(c: _SendCheck) -> Iterator[str]:
     if c.real_mode and not c.policy.real_trading_enabled:
         yield "modo real desabilitado na política (real_trading_enabled)"
 
 
-def _unresolved(c: _Check) -> Iterator[str]:
+def _unresolved(c: _SendCheck) -> Iterator[str]:
     if c.state.unresolved_intent_ids:
         # o trade-runner tenta resolver a cada varredura (`gateway/resolve.py`);
         # o log dele diz o que conferir quando não consegue
@@ -232,7 +236,7 @@ def _unresolved(c: _Check) -> Iterator[str]:
         )
 
 
-def _circuit_breaker(c: _Check) -> Iterator[str]:
+def _circuit_breaker(c: _SendCheck) -> Iterator[str]:
     if c.state.consecutive_failures >= c.policy.max_consecutive_failures:
         yield (
             f"circuit breaker: {c.state.consecutive_failures} falhas seguidas "
@@ -296,11 +300,11 @@ def _daily_loss(c: _Check) -> Iterator[str]:
         )
 
 
+# valem para todo envio da carteira, swap ou não (A15: fechar uma conta)
+_SEND_RULES = (_real_mode, _unresolved, _circuit_breaker)
 # valem para toda intenção, inclusive vendas
 _SAFETY_RULES: tuple[Rule, ...] = (
-    _real_mode,
-    _unresolved,
-    _circuit_breaker,
+    *_SEND_RULES,
     _mints,
     _spend_amount,
 )
@@ -323,7 +327,7 @@ def evaluate(
     *,
     real_mode: bool,
 ) -> PolicyDecision:
-    check = _Check(intent, policy, state, real_mode)
+    check = _Check(policy, state, real_mode, intent)
     rules = _SAFETY_RULES
     if intent.side != IntentSide.SELL:
         rules += _BUDGET_RULES
@@ -331,3 +335,15 @@ def evaluate(
     return PolicyDecision(
         allowed=not reasons, reasons=reasons, policy_version=policy.version
     )
+
+
+def send_refusals(
+    policy: Policy, state: PolicyState, *, real_mode: bool
+) -> tuple[str, ...]:
+    """Por que a carteira não pode enviar nada agora (vazio = pode).
+
+    As travas de `evaluate` que não dependem de um trade, para envios que não
+    são swaps (fechar a conta de um token, A15).
+    """
+    check = _SendCheck(policy, state, real_mode)
+    return tuple(reason for rule in _SEND_RULES for reason in rule(check))

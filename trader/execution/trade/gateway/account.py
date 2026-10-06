@@ -141,6 +141,7 @@ class AsyncAccount:
             incomplete=totals.incomplete,
             entry=state.open_entry,
             failed_fee_sol=Decimal(totals.failed_fee_lamports) / LAMPORTS_PER_SOL,
+            rent_refund_sol=Decimal(totals.rent_refund_lamports) / LAMPORTS_PER_SOL,
         )
         self.opened_at = state.opened_at
         self.last_exit_at = state.last_exit_at

@@ -98,23 +98,37 @@ the ledger or the policy.
 | 16 | `async_websocket_bot.py:83` `_handle_reply`, `:212` `_report_order` | Filled → log and Telegram, with the bucket after the fill (realized PnL; an open position marked to market, `Position.unrealized_usd`); no pause after a fill (A5). Denied/rejected → pause orders 30s. Error → loop backoff; no price from the hub (`PriceUnavailableError`) is a WARNING, anything else an ERROR with its traceback (`:222` `_on_error`). | The strategy keeps getting prices while orders pause; a fill is reported even if the `connect` stops right after it. |
 
 A **sell** takes the same path with `account.sell` (`account.py:386`): the
-wallet is read fresh, the quantity is capped at the position, a wallet that
+wallet is read fresh (`WalletBalances.fresh` also reads the token's own
+account by address and keeps the larger: the RPC's owner index once came
+back without it, A15), the quantity is capped at the position, a wallet that
 can't cover it refuses the sell (`WalletShortfallError`, A5: buys of the token
 blocked, one `sell_shortfall` event and Telegram), the idempotency key is
 fixed per position (`<account>:sell:<entry order>:<qty>`), the intent records
 whether it closes the position, budget rules don't apply, and
 `book.close`/`book.reduce` compute the realized PnL.
 
+When a bucket is **retired and flat**, the `serve` sweep closes the token
+account its first buy opened and the rent comes back
+(`TradeService.close_token_account`, A15): only if no other ACTIVE bucket uses
+the token, no bucket of the mode holds it, a fill of the mode paid that rent
+(`Ledger.rent_payer`, who is credited), the account is empty and the
+swaps' send gate allows it (`policy.send_refusals`: real mode enabled, no
+unresolved intent, breaker not tripped). The
+executor sends one `CloseAccount` (paper: the simulated wallet drops the
+account); `rent_refund_sent` is written before the send and `rent_refund`
+after, and a send without an outcome is resolved on later sweeps
+(`resolve_rent_refunds`, like A3).
+
 ## 4. Where state lives
 
 | State | Where | Notes |
 |---|---|---|
-| Intents, orders, PnL, events | `data_dir()/ledger-<mode>.sqlite3` (`trader/execution/trade/ledger/`) | **The source of truth.** One schema, versioned by `PRAGMA user_version`; an older file is refused (move or delete it). Costs without a trade (`failed_tx_fee`) and the sent daily reports (`daily_report`) are events. |
+| Intents, orders, PnL, events | `data_dir()/ledger-<mode>.sqlite3` (`trader/execution/trade/ledger/`) | **The source of truth.** One schema, versioned by `PRAGMA user_version`; an older file is refused (move or delete it). Costs without a trade (`failed_tx_fee`), rent refunds (`rent_refund_sent`, `rent_refund`) and the sent daily reports (`daily_report`) are events. |
 | Position and PnL totals of a bucket | `AsyncAccount.book` (`models/book.py`) | Rebuilt from the ledger at startup (`gateway.restore`), then kept in step by each fill. |
 | Signal state (entry price, peak, cooldown, re-arm, expiry) | `SpecStrategy` | Restored through `resume()` from the bucket snapshot. |
 | Paper balances | `data_dir()/paper-wallet.json` (`paper/wallet.py`) | Created with 100 USDC + 0.5 SOL; delete it to start over. |
 | Policy | `policy_file()` (`policy.toml`, untracked) | Model: `policy.example.toml`. Paper has roomy limits by default. |
-| Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. `websockets` at INFO; the bot writes the ticker and open-position lines once per bar (`_log_bar`), prices with 8 significant digits (`format_price`). |
+| Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. `websockets` at INFO, `hpack`/`h2` at WARNING; the bot writes the ticker and open-position lines once per bar (`_log_bar`), prices with 8 significant digits (`format_price`). |
 
 `trader/shared/paths.py` resolves all of them from `TRADER_DATA_DIR` /
 `TRADER_POLICY_FILE` / `TRADER_LOG_DIR` (relative to the project root), never

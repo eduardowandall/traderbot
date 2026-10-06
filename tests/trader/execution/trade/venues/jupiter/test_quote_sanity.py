@@ -41,6 +41,12 @@ class Recorder:
     async def outcome(self, sent):
         return TxOutcome.PENDING
 
+    async def token_balance(self, mint):
+        return Decimal("0")
+
+    async def close_token_account(self, mint, announce):
+        return None
+
     async def aclose(self):
         return None
 

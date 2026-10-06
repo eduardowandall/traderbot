@@ -271,3 +271,42 @@ async def test_stablecoin_input_uses_real_fill_price():
 
     # 50 USDC por 0.495 SOL: o slippage entra no preço de entrada
     assert order.price == order.fill_price == Decimal("50") / Decimal("0.495")
+
+
+JUP = SOLANA_MINTS.get_by_symbol("JUP")
+
+
+def _wallet(listed, direct):
+    from trader.execution.trade.gateway.balances import WalletBalances
+
+    provider = mock_provider()
+    provider.get_account_balance = AsyncMock(
+        return_value=[MintBalance(mint=m.pubkey, available=a) for m, a in listed]
+    )
+    provider.token_balance = AsyncMock(side_effect=[direct])
+    return WalletBalances(provider), provider
+
+
+async def test_a_fresh_read_missing_the_token_uses_its_account(caplog):
+    # A15 (A6 F1): o índice do RPC voltou sem a conta do token
+    wallet, provider = _wallet([(USDC, Decimal("950"))], Decimal("4.3"))
+
+    with caplog.at_level(logging.WARNING):
+        assert await wallet.fresh(JUP.pubkey) == Decimal("4.3")
+
+    provider.token_balance.assert_awaited_once_with(JUP.pubkey)
+    assert any("a conta do token tem 4.3" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_failed_direct_read_keeps_the_wallet_read():
+    wallet, _ = _wallet([(JUP, Decimal("2"))], OSError("RPC fora"))
+
+    assert await wallet.fresh(JUP.pubkey) == Decimal("2")
+
+
+async def test_sol_is_not_read_from_a_token_account():
+    # o saldo do SOL são os lamports; a conta associada dele seria o wSOL
+    wallet, provider = _wallet([(SOL, Decimal("1"))], Decimal("9"))
+
+    assert await wallet.fresh(SOL.pubkey) == Decimal("1")
+    provider.token_balance.assert_not_awaited()

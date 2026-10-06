@@ -278,6 +278,28 @@ async def test_the_sweep_sells_a_retired_or_expired_leftover_once():
         assert len(sells) == 1
 
 
+async def test_the_sweep_closes_the_token_account_once_the_bucket_is_flat():
+    # A15: encerrado e vendido, a conta do token devolve o rent
+    runner = _runner()
+    service = runner.service
+    service.close_token_account = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    service.resolve_rent_refunds = AsyncMock()  # type: ignore[method-assign]
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        assert (await client.submit(_buy())).filled
+        await client.aclose()
+        name = client.bucket_name or ""
+
+        await runner.sweep()  # ativa: nada a fechar
+        later = datetime.now(UTC) + timedelta(days=6)
+        await runner.sweep(now=later)  # encerra e vende
+        service.close_token_account.assert_not_awaited()
+        await runner.sweep(now=later)  # sem posição: fecha
+
+        service.close_token_account.assert_awaited_once_with(name)
+        assert service.resolve_rent_refunds.await_count == 3
+
+
 async def test_an_error_reply_is_raised_on_the_strategy_side():
     runner = _runner()
     async with await runner.start() as server:

@@ -2,7 +2,8 @@
 
 Taxas de transações que falharam na rede (`failed_tx_fee`, eventos: não há
 intenção executada para elas) entram nos custos e saem do `net_usd`, como o
-livro do bucket faz em memória.
+livro do bucket faz em memória. O rent devolvido ao fechar uma conta de token
+(`rent_refund`, A15) faz o caminho inverso.
 """
 
 import json
@@ -14,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from trader.execution.models.intent import IntentSide, IntentStatus
+from trader.execution.models.rent import RENT_REFUND, RENT_REFUND_SENT
 from trader.execution.trade.ledger.store import LedgerStore, _int, _window
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import RoundTripCosts
@@ -46,6 +48,9 @@ class AccountPnL:
     failed_tx: int = 0
     failed_fee_lamports: int = 0
     failed_fee_usd: Decimal = Decimal("0")
+    # rent devolvido ao fechar contas de token (a taxa do fechamento está em
+    # `fee_lamports`)
+    rent_refund_lamports: int = 0
 
     def add(self, row: sqlite3.Row) -> None:
         self.trades += 1
@@ -85,6 +90,17 @@ class AccountPnL:
         self.failed_fee_usd += Decimal(usd)
         self.net_usd -= Decimal(usd)
 
+    def add_rent_refund(self, payload: dict) -> None:
+        """Um evento `rent_refund`: o rent volta, a taxa do fechamento sai."""
+        self.rent_refund_lamports += int(payload["refund_lamports"])
+        self.fee_lamports += int(payload["fee_lamports"])
+        usd = payload.get("net_usd")
+        if usd is None:
+            self.unknown_costs += 1  # sem preço do SOL
+            return
+        self.net_usd += Decimal(usd)
+        self.costs_usd -= Decimal(usd)
+
 
 class Reports(LedgerStore):
     def pnl_totals(
@@ -102,14 +118,65 @@ class Reports(LedgerStore):
             (str(IntentStatus.EXECUTED), account, *params),
         ):
             totals.add(row)
-        window, params = _window("ts", start, end)
-        for row in self.conn.execute(
-            "SELECT payload FROM events WHERE type = ? "
-            f"AND json_extract(payload, '$.account') = ?{window} ORDER BY id",
-            (FAILED_TX_FEE, account, *params),
-        ):
-            totals.add_failed_fee(json.loads(row["payload"]))
+        add = {
+            FAILED_TX_FEE: totals.add_failed_fee,
+            RENT_REFUND: totals.add_rent_refund,
+        }
+        for type_, payload in self._account_events(tuple(add), account, start, end):
+            add[type_](payload)
         return totals
+
+    def _account_events(
+        self,
+        types: tuple[str, ...],
+        account: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[tuple[str, dict]]:
+        """(tipo, payload) dos eventos da conta, em ordem, em `[start, end)`."""
+        window, params = _window("ts", start, end)
+        marks = ", ".join("?" for _ in types)
+        rows = self.conn.execute(
+            f"SELECT type, payload FROM events WHERE type IN ({marks}) "
+            f"AND json_extract(payload, '$.account') = ?{window} ORDER BY id",
+            (*types, account, *params),
+        )
+        return [(row["type"], json.loads(row["payload"])) for row in rows]
+
+    def rent_payer(self, prefix: str, mint: str) -> str | None:
+        """A conta cuja compra abriu a conta de token de `mint`, se ainda aberta.
+
+        A última compra executada (nas contas do prefixo) que pagou rent pelo
+        token; None se nenhuma pagou, ou se um `rent_refund` do token devolveu
+        o rent depois dela. Uma conta que o bot não abriu não tem pagador.
+        """
+        row = self.conn.execute(
+            "SELECT account, updated_at FROM intents WHERE status = ? "
+            "AND receive_mint = ? AND rent_lamports > 0 "
+            "AND substr(account, 1, ?) = ? ORDER BY updated_at DESC LIMIT 1",
+            (str(IntentStatus.EXECUTED), mint, len(prefix), prefix),
+        ).fetchone()
+        if row is None:
+            return None
+        refunded = self.conn.execute(
+            "SELECT 1 FROM events WHERE type = ? AND ts > ? "
+            "AND json_extract(payload, '$.mint') = ? "
+            "AND json_extract(payload, '$.refund_lamports') > 0 LIMIT 1",
+            (RENT_REFUND, row["updated_at"], mint),
+        ).fetchone()
+        return None if refunded else row["account"]
+
+    def pending_rent_refunds(self, prefix: str) -> list[dict]:
+        """Fechamentos enviados (`rent_refund_sent`) ainda sem `rent_refund`."""
+        rows = self.conn.execute(
+            "SELECT payload FROM events AS sent WHERE sent.type = ? "
+            "AND substr(json_extract(sent.payload, '$.account'), 1, ?) = ? "
+            "AND NOT EXISTS (SELECT 1 FROM events AS done WHERE done.type = ? "
+            "AND json_extract(done.payload, '$.signature') = "
+            "json_extract(sent.payload, '$.signature')) ORDER BY sent.id",
+            (RENT_REFUND_SENT, len(prefix), prefix, RENT_REFUND),
+        )
+        return [json.loads(row["payload"]) for row in rows]
 
     def round_trip_costs(
         self,
@@ -137,7 +204,20 @@ class Reports(LedgerStore):
                 totals.add(*leg, closes=bool(row["closes_position"]))
             if row["closes_position"]:
                 entry = None
+        self._refund_rent(totals, account, start, end)
         return totals
+
+    def _refund_rent(
+        self,
+        totals: RoundTripCosts,
+        account: str,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> None:
+        """O rent está no custo da ida e volta que abriu a conta; volta aqui."""
+        for _, payload in self._account_events((RENT_REFUND,), account, start, end):
+            if payload.get("net_usd") is not None:
+                totals.refund(Decimal(payload["net_usd"]))
 
     def daily_report_sent(self, day: str) -> bool:
         """Já há um `daily_report` do dia (`YYYY-MM-DD`, UTC)?"""

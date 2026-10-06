@@ -114,3 +114,30 @@ class TestAccountNeverTradesOnAFailedRead:
             await account.get_balance(USDC.pubkey)
 
         assert await account.get_balance(USDC.pubkey) == Decimal("100")
+
+
+class TestAssociatedTokenAccounts:
+    async def test_reads_the_mints_accounts_by_address(self):
+        from solders.solders import TOKEN_PROGRAM_ID
+        from spl.token.constants import TOKEN_2022_PROGRAM_ID
+        from spl.token.instructions import get_associated_token_address
+
+        data = _token_account(USDC, 4_365_485).account.data
+        account = SimpleNamespace(owner=TOKEN_PROGRAM_ID, lamports=2_039_280, data=data)
+        client = AsyncMock()
+        client.is_connected = AsyncMock(return_value=True)
+        client.get_multiple_accounts = AsyncMock(
+            return_value=SimpleNamespace(value=[account, None])
+        )
+        rpc = AsyncRPCClient(client=client)
+
+        found = await rpc.associated_token_accounts(OWNER, USDC.pubkey)
+
+        addresses = client.get_multiple_accounts.await_args.args[0]
+        assert addresses == [
+            get_associated_token_address(OWNER, USDC.pubkey, TOKEN_PROGRAM_ID),
+            get_associated_token_address(OWNER, USDC.pubkey, TOKEN_2022_PROGRAM_ID),
+        ]
+        assert len(found) == 1
+        assert (found[0].amount, found[0].lamports) == (4_365_485, 2_039_280)
+        assert found[0].program == TOKEN_PROGRAM_ID

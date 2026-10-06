@@ -30,7 +30,12 @@ from trader.execution.models.intent import (
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.ledger import AccountPnL, Ledger, ledger_path
 from trader.execution.trade.ledger.reports import FAILED_TX_FEE
-from trader.execution.trade.policy import Policy, evaluate, load_policy
+from trader.execution.trade.policy import (
+    Policy,
+    evaluate,
+    load_policy,
+    send_refusals,
+)
 from trader.shared.models.costs import FailedTxFee, PnLResult
 from trader.shared.models.order import Order, OrderSide, SwapResult, order_from_json
 
@@ -224,6 +229,11 @@ class TradeGateway:
         entre os dois, e a intenção precisa estar EXECUTED antes disso.
         """
         self.ledger.attach_order(intent_id, order, realized_usd, pnl)
+
+    def send_refusals(self) -> tuple[str, ...]:
+        """As travas da política para um envio que não é swap (A15)."""
+        state = self.ledger.policy_state(failures_since=self.started_at)
+        return send_refusals(self.policy, state, real_mode=self.real_mode)
 
     def add_event(self, type_: str, payload: dict) -> None:
         self.ledger.add_event(type_, payload)

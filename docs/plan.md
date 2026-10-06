@@ -108,6 +108,25 @@ In order. Each item ships on its own with the suite green (`/check`). Size:
   `max_trade_usd = 2`, `max_daily_notional_usd = 40`, `max_trades_per_hour =
   2`, `max_trades_per_hour_per_bucket = 2`, `max_daily_loss_usd = 1`,
   `max_consecutive_failures = 2`.
+- **Run 1 (2026-10-06, 06:00-08:41 UTC):** 3 JUP-SOL round trips, every leg
+  through the quote check, inspection and simulation, confirmed at the first
+  send; nothing UNCONFIRMED, no failed tx, flat at the end. Ledger: net
+  -0.001595 SOL (-0.19 USD) = swaps +0.000043, fees -0.000150 (6 x 24,999
+  lamports), rent -0.001488 (the JUP account, first buy only). Without the
+  rent a round trip cost ~0.007 USD (~46 bps); the backtest on the recorded
+  ticks says 0.009 USD (59.8 bps), so it errs on the safe side. Fill vs quote
+  under 3 bps except the first buy (19.7 bps). Findings, fixed in A15:
+  - **F1.** Two of three exits were refused once ("Sem valor minimo") and
+    went through 30-45 s later: the fresh wallet read (`getTokenAccountsByOwner`)
+    came back without the JUP account, one minute after a read that had it.
+  - **F2.** The rent is booked as a cost and never comes back: the account
+    stays open after the sell. It is 93% of the bucket's loss and 36% of its
+    max loss, and makes the round-trip cost read 441 bps.
+  - **F3.** Prices stale for ~4 min (08:04-08:08 UTC): websocket and Price
+    API failed together (a local network blip); the warnings end in an empty
+    message (`str(ex)` of a timeout is empty).
+  - **F4.** 12,306 of ~12,700 lines of the `serve` log are `hpack` DEBUG
+    (with Cloudflare cookies).
 
 ### A7–A12. Perps
 The design is in §8. A7 changes no behaviour and no schema; A8 bumps the
@@ -165,7 +184,8 @@ ledger schema, so it waits for the end of a paper soak.
 | A5 Wallet re-read rule | done | 2026-10-05; in `history.md` |
 | A13 Soak II small fixes | done | 2026-10-05; in `history.md` |
 | A14 Replay fills like live fills | done | 2026-10-05; in `history.md` |
-| A6 First real run | open | Next |
+| A6 First real run | open | Run 1 done 2026-10-06 (findings -> A15); exit criteria for a bigger budget still to write |
+| A15 First real run fixes | done | 2026-10-06; in `history.md` |
 | A7 Perps: decoupling | open | |
 | A8 Perps: model, paper, spec | open | Schema bump; after a soak |
 | A9 Perps: backtest | open | |
@@ -418,3 +438,7 @@ Decisions up to 2026-10-04 are in [`history.md`](history.md).
   `serve`) instead of a week; no end-of-week memory sample. The run was clean;
   its findings are A13 (F10-F13) and A14 (F9). The report moved from
   `soak-test.md` into `history.md` (A2).
+- **2026-10-06 (owner, A6 run 1 -> A15):** a token account the bot opened is
+  closed when its bucket retires flat, and the refund is recorded (credited
+  to the bucket that paid the rent); sells re-read the token account directly
+  when the wallet read comes up short; `hpack`/`h2` logs go to WARNING.

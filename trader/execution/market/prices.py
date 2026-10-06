@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable, Collection
 from decimal import Decimal
 from typing import Protocol
 
+from trader.shared.logging_config import error_text
 from trader.shared.models import SOLANA_MINTS
 
 logger = logging.getLogger(__name__)
@@ -97,5 +98,5 @@ async def usd_snapshot(
             oracle.usd_prices(rest), timeout=SNAPSHOT_TIMEOUT_SECONDS
         )
     except Exception as ex:
-        logger.warning(f"Sem preços em USD para {sorted(rest)}: {ex}")
+        logger.warning(f"Sem preços em USD para {sorted(rest)}: {error_text(ex)}")
         return prices

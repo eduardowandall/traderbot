@@ -158,3 +158,17 @@ def test_an_error_escaping_the_real_cli_process_is_redacted(tmp_path):
     assert "RuntimeError" in proc.stderr
     assert "SEGREDO" not in proc.stderr + proc.stdout
     assert "api-key=***" in proc.stderr
+
+
+def test_http2_frames_stay_out_of_the_log_file():
+    # A6 F4: hpack em DEBUG era 95% do log do `serve` (com cookies)
+    loggers = logging_config.LOGGING["loggers"]
+    for name in ("hpack", "h2"):
+        level = logging.getLevelNamesMapping()[loggers[name]["level"]]
+        assert level >= logging.WARNING, name
+
+
+def test_error_text_names_an_error_without_message():
+    # A6 F3: um timeout sem mensagem deixava o aviso terminando em ": "
+    assert logging_config.error_text(TimeoutError()) == "TimeoutError"
+    assert logging_config.error_text(ValueError("ruim")) == "ruim"

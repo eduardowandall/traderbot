@@ -10,6 +10,7 @@ from solana.exceptions import SolanaRpcException
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed, Finalized
 from solana.rpc.models import TokenAccountOpts
+from solders.instruction import Instruction
 from solders.keypair import Keypair
 from solders.message import MessageV0, to_bytes_versioned
 from solders.pubkey import Pubkey
@@ -21,6 +22,7 @@ from solders.solders import (
     VersionedTransaction,
 )
 from spl.token.constants import TOKEN_2022_PROGRAM_ID
+from spl.token.instructions import get_associated_token_address
 from tenacity import (
     retry,
     retry_if_exception,
@@ -61,6 +63,16 @@ _READ_RETRY = retry(
 
 class TransactionFailedError(Exception):
     """A transação foi processada pela rede, mas falhou (status.err)."""
+
+
+@dataclass(frozen=True)
+class TokenAccount:
+    """Uma conta de token da carteira, lida pelo endereço."""
+
+    address: Pubkey
+    program: Pubkey  # Token ou Token-2022 (o dono da conta)
+    lamports: int  # o rent que fechar a conta devolve
+    amount: int  # saldo raw
 
 
 @dataclass(frozen=True)
@@ -157,6 +169,19 @@ class AsyncRPCClient:
         """Altura de bloco finalizada: passou do `last_valid_block_height` de
         uma transação não vista, ela nunca mais entra."""
         return (await self.client.get_block_height(commitment=Finalized)).value
+
+    @logger_wrapper
+    async def sign_instructions(
+        self, instructions: list[Instruction], keypair: Keypair
+    ) -> SignedTx:
+        """Uma transação nossa (não da Jupiter), paga e assinada pela carteira."""
+        await self.is_connected()
+        latest = await self.client.get_latest_blockhash()
+        message = MessageV0.try_compile(
+            keypair.pubkey(), instructions, [], latest.value.blockhash
+        )
+        tx = VersionedTransaction(message, [keypair])
+        return SignedTx(tx, latest.value.last_valid_block_height)
 
     @logger_wrapper
     async def sign_transaction(
@@ -262,3 +287,28 @@ class AsyncRPCClient:
             # a mesma mint pode estar em mais de uma conta de token
             balances[mint] = balances.get(mint, Decimal(0)) + token_amount(data)
         return balances
+
+    @logger_wrapper
+    @_READ_RETRY
+    async def associated_token_accounts(
+        self, owner: Pubkey, mint: Pubkey
+    ) -> list[TokenAccount]:
+        """As contas associadas de `mint` da carteira (Token e Token-2022).
+
+        Lidas pelo endereço (`getMultipleAccounts`), não pelo índice por dono
+        de `getTokenAccountsByOwner`, que já voltou sem uma conta que existia
+        (A6 F1). Uma conta que não existe não entra na lista.
+        """
+        await self.is_connected()
+        programs = (TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID)
+        addresses = [get_associated_token_address(owner, mint, p) for p in programs]
+        resp = await self.client.get_multiple_accounts(addresses)
+        return [
+            TokenAccount(
+                address, program, info.lamports, token_amount(bytes(info.data))
+            )
+            for address, program, info in zip(
+                addresses, programs, resp.value, strict=True
+            )
+            if info is not None and info.owner == program
+        ]

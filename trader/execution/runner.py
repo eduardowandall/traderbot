@@ -31,6 +31,7 @@ from trader.execution.market.hub import PriceHub
 from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.execution.market.prices import PriceOf, price_fn
 from trader.execution.trade.trading_service.service import TradeService
+from trader.shared.logging_config import error_text
 from trader.shared.market import CandleSource
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.public_data import Interval
@@ -252,6 +253,10 @@ class TradeRunner:
             await self.service.resolve_intents()
         except Exception as ex:
             logger.error(f"Resolução de intenções falhou: {ex}")
+        try:
+            await self.service.resolve_rent_refunds()
+        except Exception as ex:
+            logger.error(f"Resolução de fechamentos de conta falhou: {error_text(ex)}")
         for name, spec in list(self.specs.items()):
             try:
                 await self._sweep_one(name, spec, now)
@@ -267,7 +272,11 @@ class TradeRunner:
         ):
             self.service.retire(name, "spec vencida")
             status = BucketStatus.RETIRING
-        if status != BucketStatus.RETIRING or snapshot.position is None:
+        if status != BucketStatus.RETIRING:
+            return
+        if snapshot.position is None:
+            # encerrado e vendido: a conta do token devolve o rent (A15)
+            await self.service.close_token_account(name)
             return
         entry = snapshot.position.entry_order
         price = await self._pair_price(entry.output_mint, entry.input_mint)

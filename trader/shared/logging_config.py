@@ -159,8 +159,20 @@ LOGGING = {
         "httpcore2": {"level": "ERROR"},
         # cada frame do websocket em DEBUG era 35-50% do arquivo (soak F3)
         "websockets": {"level": "INFO"},
+        # o HTTP/2 do RPC loga cada cabeçalho em DEBUG (com cookies): 95% do
+        # log do `serve` na primeira execução real (A6 F4)
+        "hpack": {"level": "WARNING"},
+        "h2": {"level": "WARNING"},
     },
 }
+
+
+def error_text(ex: BaseException) -> str:
+    """O erro para um log: o nome do tipo quando a mensagem é vazia.
+
+    Um timeout do httpx tem `str()` vazio, e o aviso terminava em `: ` (A6 F3).
+    """
+    return str(ex) or type(ex).__name__
 
 
 def setup_logging():

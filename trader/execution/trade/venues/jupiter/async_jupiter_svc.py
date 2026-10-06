@@ -36,6 +36,7 @@ from trader.execution.models.errors import (
     TransactionSubmittedError as TransactionSubmittedError,
 )
 from trader.execution.models.intent import SentTx, TxOutcome
+from trader.execution.models.rent import RentRefund
 from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.executor import Executor, OnChainExecutor
 from trader.execution.trade.venues.jupiter.swap_costs import quote_info
@@ -122,6 +123,23 @@ class AsyncJupiterProvider[E: Executor]:
 
     async def get_account_balance(self) -> list[MintBalance]:
         return await self.executor.balances()
+
+    async def token_balance(self, mint: Pubkey | str) -> Decimal:
+        """Saldo de um token lido direto da conta dele (A6 F1)."""
+        return await self.executor.token_balance(str(mint))
+
+    async def close_token_account(
+        self, mint: str, announce: Callable[[SentTx], None]
+    ) -> RentRefund | None:
+        """Fecha a conta vazia do token e devolve o rent (A15); None: nada a fechar.
+
+        A taxa é lida como a das transações que falharam (nunca levanta).
+        """
+        refund = await self.executor.close_token_account(mint, announce)
+        if refund is None:
+            return None
+        fee = await self.fetch_failed_fees([refund.signature])
+        return replace(refund, fee_lamports=fee)
 
     async def buy(
         self,

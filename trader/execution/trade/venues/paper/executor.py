@@ -9,6 +9,7 @@ on-chain, abaixo disso a transação falharia.
 
 import time
 import uuid
+from collections.abc import Callable
 from decimal import Decimal
 
 from solders.pubkey import Pubkey
@@ -16,10 +17,12 @@ from solders.pubkey import Pubkey
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.models.account_data import MintBalance
 from trader.execution.models.intent import SentTx, TxOutcome, announce_send
+from trader.execution.models.rent import RentRefund
 from trader.execution.trade.venues.jupiter.executor import DEFAULT_SOL_FEE_RESERVE
 from trader.execution.trade.venues.paper.wallet import SimulatedWallet
 from trader.shared.models import SOLANA_MINTS, SwapResult
 from trader.shared.models.costs import SIMULATED, TradeCosts
+from trader.shared.models.mints import SOL_MINT
 
 # taxa base de uma transação Solana (5000 lamports por assinatura)
 DEFAULT_FEE_LAMPORTS = 5000
@@ -68,6 +71,10 @@ class SimulatedExecutor:
             for mint, amount in self.wallet.balances().items()
             if mint in SOLANA_MINTS
         ]
+
+    async def token_balance(self, mint: str) -> Decimal:
+        self.wallet.reload()
+        return self.wallet.balance(mint)
 
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
@@ -146,7 +153,27 @@ class SimulatedExecutor:
         return TxOutcome.EXPIRED
 
     async def fetch_fee(self, signature: str) -> int | None:
-        return None  # nada falha "na rede" aqui
+        applied = self.wallet.applied(signature)
+        # um fechamento de conta (A15) tem a taxa no registro; nada falha "na rede"
+        return None if applied is None else applied["fee"]
+
+    async def close_token_account(
+        self, mint: str, announce: Callable[[SentTx], None]
+    ) -> RentRefund | None:
+        """Fecha a conta vazia do token na carteira simulada (A15).
+
+        Devolve o rent que esta carteira cobra ao abrir; a taxa base fica no
+        registro dos aplicados (`fetch_fee`).
+        """
+        self.wallet.reload()
+        if self.wallet.needs_account(mint) or self.wallet.raw_balance(mint):
+            return None
+        rent = self.account_rent_lamports
+        signature = f"paper-close-{uuid.uuid4().hex}"
+        announce(SentTx(signature, mint, SOL_MINT, 0, rent, sent_at=time.time()))
+        if not self.wallet.close_account(mint, rent, self.fee_lamports, signature):
+            return None
+        return RentRefund(signature, mint, rent)
 
     async def aclose(self) -> None:
         return None

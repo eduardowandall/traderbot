@@ -260,6 +260,8 @@ def mock_provider(**attrs):
     provider.native_fee_reserve = Decimal("0.02")
     provider.fetch_swap_costs.return_value = TradeCosts(source=QUOTE)
     provider.fetch_failed_fees.return_value = 0
+    # a leitura direta só confirma a da carteira (A6 F1): nada a mais
+    provider.token_balance.return_value = Decimal("0")
     for name, value in attrs.items():
         setattr(provider, name, value)
     return provider

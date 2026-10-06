@@ -5,9 +5,13 @@ conta, o bucket A não via o que o bucket B acabou de gastar. Aqui há um cache
 só, invalidado a cada fill e com validade de `BALANCE_CACHE_TTL`.
 
 A regra (A5): toda ordem lê a carteira de novo (`fresh`); o cache serve só o
-que não é ordem (alocação, reconcile, snapshots).
+que não é ordem (alocação, reconcile, snapshots). A leitura nova de um token
+confere a conta dele pelo endereço: o índice por dono do RPC já voltou sem
+uma conta que existia (A15).
 """
 
+import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -17,6 +21,10 @@ from solders.pubkey import Pubkey
 
 from trader.execution.models.account_data import MintBalance
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
+from trader.shared.logging_config import error_text
+from trader.shared.models.mints import SOL_MINT
+
+logger = logging.getLogger(__name__)
 
 BALANCE_CACHE_TTL = timedelta(minutes=3)
 
@@ -43,9 +51,23 @@ class WalletBalances:
         return Decimal("0")
 
     async def fresh(self, mint: Pubkey | str) -> Decimal:
-        """Saldo de `mint` lido agora: o que as ordens usam."""
+        """Saldo de `mint` lido agora: o que as ordens usam.
+
+        Um token (não o SOL) é lido também pela conta dele, ao mesmo tempo, e
+        vale a maior leitura; se a direta falha, fica a da carteira.
+        """
         self.invalidate()
-        return await self.get(mint)
+        if str(mint) == SOL_MINT:
+            return await self.get(mint)
+        listed, direct = await asyncio.gather(
+            self.get(mint), self._direct(mint), return_exceptions=True
+        )
+        if isinstance(listed, BaseException):
+            raise listed
+        return _larger(mint, listed, direct)
+
+    async def _direct(self, mint: Pubkey | str) -> Decimal:
+        return await self.provider.token_balance(mint)
 
     async def _all(self) -> list[MintBalance]:
         if not self._stale():
@@ -65,3 +87,14 @@ class WalletBalances:
         """A carteira mudou (fill, ou outro bucket pode ter gastado): relê."""
         self._balances = None
         self._generation += 1
+
+
+def _larger(mint, listed: Decimal, direct: Decimal | BaseException) -> Decimal:
+    if isinstance(direct, BaseException):
+        logger.warning(f"Leitura direta de {mint} falhou: {error_text(direct)}")
+        return listed
+    if direct != listed:
+        logger.warning(
+            f"Carteira mostrou {listed} de {mint}, a conta do token tem {direct}"
+        )
+    return max(listed, direct)

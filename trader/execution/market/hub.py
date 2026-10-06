@@ -31,6 +31,7 @@ from decimal import Decimal
 import websockets
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.shared.logging_config import error_text
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,9 @@ class PriceHub:
         try:
             prices = await self.client.get_usd_prices(sorted(mints))
         except Exception as ex:
-            logger.warning(f"Price API sem resposta para {sorted(mints)}: {ex}")
+            logger.warning(
+                f"Price API sem resposta para {sorted(mints)}: {error_text(ex)}"
+            )
             return
         for mint, price in prices.items():
             self._set(mint, price)
@@ -210,7 +213,9 @@ class PriceHub:
             try:
                 await self._stream_until_changed(set(self._mints))
             except Exception as ex:
-                logger.warning(f"Websocket de preços caiu ({ex}); a API cobre")
+                logger.warning(
+                    f"Websocket de preços caiu ({error_text(ex)}); a API cobre"
+                )
                 await asyncio.sleep(RECONNECT_SECONDS)
 
     async def _stream_until_changed(self, mints: set[str]) -> None:

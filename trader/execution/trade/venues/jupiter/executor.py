@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Protocol
 
@@ -26,6 +27,8 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.solders import SendTransactionResp, TransactionConfirmationStatus
 from solders.transaction import VersionedTransaction
+from spl.token.instructions import close_account
+from spl.token.models import CloseAccountParams
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
@@ -35,6 +38,7 @@ from trader.execution.models.errors import (
     TransactionSubmittedError,
 )
 from trader.execution.models.intent import SentTx, TxOutcome, announce_send
+from trader.execution.models.rent import RentRefund
 from trader.execution.trade.venues.jupiter.async_rpc_client import (
     AsyncRPCClient,
     SignedTx,
@@ -67,6 +71,9 @@ class Executor(Protocol):
 
     async def balances(self) -> list[MintBalance]: ...
 
+    # saldo de um token lido direto da conta dele (A6 F1), em unidades de UI
+    async def token_balance(self, mint: str) -> Decimal: ...
+
     async def fetch_costs(self, result: SwapResult) -> TradeCosts | None: ...
 
     # `meta.fee` de uma transação que falhou na rede; None se não achou
@@ -74,6 +81,12 @@ class Executor(Protocol):
 
     # o que aconteceu com um envio gravado (resolver intenções, A3)
     async def outcome(self, sent: SentTx) -> TxOutcome: ...
+
+    # fecha a conta vazia do token (A15); `announce` grava o envio antes dele.
+    # None: não há conta vazia para fechar
+    async def close_token_account(
+        self, mint: str, announce: Callable[[SentTx], None]
+    ) -> RentRefund | None: ...
 
     async def aclose(self) -> None: ...
 
@@ -119,6 +132,12 @@ class OnChainExecutor:
                     MintBalance(available=info.raw_to_ui(amount), mint=mint)
                 )
         return balances
+
+    async def token_balance(self, mint: str) -> Decimal:
+        accounts = await self.rpc_client.associated_token_accounts(
+            self.pubkey, Pubkey.from_string(mint)
+        )
+        return SOLANA_MINTS.raw_to_ui(mint, sum(a.amount for a in accounts))
 
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
@@ -231,6 +250,47 @@ class OnChainExecutor:
                 signature=str(signature),
             ) from ex
         return resp
+
+    async def close_token_account(
+        self, mint: str, announce: Callable[[SentTx], None]
+    ) -> RentRefund | None:
+        """Fecha a conta associada do token, se existe e está vazia (A15).
+
+        Uma instrução `CloseAccount` (o rent volta para a carteira, que também
+        é a autoridade), só com a taxa base: nada urgente. Antes de enviar, a
+        mesma checagem de programas dos swaps e uma simulação. Depois do
+        envio, as falhas são as dos swaps: `TransactionFailedOnChainError`
+        (a conta continua aberta) ou `TransactionSubmittedError` (resolver).
+        """
+        accounts = await self.rpc_client.associated_token_accounts(
+            self.pubkey, Pubkey.from_string(mint)
+        )
+        account = next((a for a in accounts if a.amount == 0), None)
+        if account is None:
+            return None
+        instruction = close_account(
+            CloseAccountParams(
+                program_id=account.program,
+                account=account.address,
+                dest=self.pubkey,
+                owner=self.pubkey,
+            )
+        )
+        signed = await self.rpc_client.sign_instructions([instruction], self.keypair)
+        check_programs(signed.tx)
+        await self.rpc_client.simulate_transaction(signed.tx)
+        announce(
+            SentTx(
+                signed.signature,
+                mint,
+                SOL_MINT,
+                0,
+                account.lamports,
+                signed.last_valid_block_height,
+            )
+        )
+        await self._send_transaction_and_wait_for_confirmation(signed.tx)
+        return RentRefund(signed.signature, mint, account.lamports)
 
     async def fetch_costs(self, result: SwapResult) -> TradeCosts | None:
         """Custos lidos da transação confirmada."""

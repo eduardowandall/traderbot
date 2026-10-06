@@ -2704,3 +2704,85 @@ The backtest headline of the liquid examples must not change.
   The wma-composer replay takes ~15 s (99k ticks). `/smoke --spec
   spec-wma-composer.json`: `aquecida` on the first tick (the soak: 25 min).
   Left as is: `ratio_candles` keeps only bars with a candle in both series.
+
+#### A15. First real run fixes — M (done 2026-10-06)
+From A6 run 1. No schema change: the refund is an event, like
+`failed_tx_fee`.
+
+- **Sell re-read (F1).** When the fresh read has less of the token than the
+  sell needs, `AsyncAccount.sell` asks the provider for a direct read
+  (`token_balance(mint)`): real reads the wallet's associated token accounts
+  of the mint by address (`getMultipleAccounts`, Token and Token-2022: an
+  account read, not the owner index), paper the simulated wallet. The larger
+  of the two is used, and a disagreement is logged.
+- **Log noise (F3, F4).** `hpack` and `h2` at WARNING (`httpcore` is already
+  ERROR). The hub and `usd_snapshot` warnings name the error type when
+  `str(ex)` is empty.
+- **Close the token account when a bucket retires (F2).** Owner decision
+  (2026-10-06): close it and record the refund.
+  - *When:* the `serve` sweep, for a bucket that is RETIRING and flat (after
+    expiry or max loss; the sweep already sells what is left first).
+  - *Only if* the account is the bot's and nothing needs it: the mint is not
+    SOL; no other open bucket of the `serve` is ACTIVE on the mint (either
+    side of its pair); no open position on the mint in any bucket of the
+    mode's ledger; a fill of the mode paid rent for the mint after its last
+    close (an account the owner made is never closed); the wallet's associated
+    account of the mint exists and holds exactly 0 (dust or the owner's own
+    tokens: left alone; `CloseAccount` would refuse it anyway); no close of the
+    mint pending.
+  - *Who gets the refund:* the bucket of the latest fill that paid that rent,
+    which may not be the retiring one.
+  - *How (real):* one `CloseAccount` instruction (the account's token program,
+    destination and authority the wallet), base fee only (it is not urgent),
+    the program check and a simulation before signing off, then send and
+    confirm. A `rent_refund_sent` event (signature, block height, lamports)
+    is written before the broadcast; if that write fails, nothing is sent.
+    After confirmation, `rent_refund` (account, mint, signature,
+    `refund_lamports`, `fee_lamports`, `sol_usd`, `net_usd`). A send with no
+    `rent_refund` is resolved on the next sweeps with the A3 outcome check:
+    landed -> `rent_refund`; failed -> `rent_refund` with refund 0 and the fee;
+    expired -> `rent_refund` with both 0; pending -> wait.
+  - *How (paper):* the simulated wallet drops the account from
+    `open_accounts` and credits the rent it charged minus the base fee, under
+    its lock.
+  - *Accounting:* `AccountPnL.add_rent_refund` (`rent_refund_lamports`, the
+    fee into `fee_lamports`, `net_usd += net_usd`, `costs_usd -= net_usd`; no
+    SOL price: counted in `unknown_costs`); the payer's open bucket re-reads
+    its book from the ledger;
+    `round_trip_costs` subtracts the refunds in its window (the rent sits in
+    the first trip's cost). `ledger_dump.py` and the daily report show it
+    through those totals.
+  - *Limits:* only buckets opened in this `serve` (a spec whose `connect`
+    never comes back is not swept); the account of a bucket that retired
+    while another was ACTIVE on the mint closes when that one retires.
+- **Done.** As designed, except that `rent_lamports` stays what was paid and
+  the refund is its own field (`rent_refund_lamports`), so the daily report
+  shows both. Code: `TokenAccount` and `associated_token_accounts`,
+  `sign_instructions` (`async_rpc_client.py`); `token_balance` and
+  `close_token_account` on both executors and the provider;
+  `SimulatedWallet.close_account` (the paper `fetch_fee` now reads the fee of
+  an applied entry, so a resolved paper close books its fee);
+  `trader/execution/models/rent.py` (`RentRefund`, the two event names);
+  `Reports.rent_payer` / `pending_rent_refunds` / `_account_events`,
+  `RoundTripCosts.refund`; `TradeService.close_token_account` /
+  `resolve_rent_refunds`, called by the `serve` sweep;
+  `PositionBook.rent_refund_sol` in the bucket summary; `error_text` in
+  `logging_config.py`. After `/simplify`: the direct read moved from the sell
+  into `WalletBalances.fresh` (every order and the startup reconcile, not SOL,
+  both reads at once); the close passes the swaps' send gate first
+  (`policy.send_refusals`: `real_trading_enabled`, unresolved intents,
+  breaker; refused -> retried next sweep); the provider reads the close's fee
+  (`fetch_failed_fees`, one fallback path); the sent event is `asdict(SentTx)`;
+  the paper wallet's applied-log append is one helper (`_logged`), so a close
+  also moves `trimmed_at`. Not done: folding the close into the A3 intent
+  resolver (it would need a non-swap intent and a schema change). 801 tests (18 new): the sell re-read (missing token,
+  covered read, failed direct read), the direct RPC read, the logger levels,
+  and `test_rent_refund.py` (refund and its accounting, once per bucket, every
+  rule that leaves the account alone, the payer, a failed close, a send
+  resolved on the next sweep, the on-chain instruction and its order) plus
+  the sweep calling it; the "another bucket active" and "a bucket holds the
+  token" rules were each disabled once to see their test fail. Not checked
+  live: no real close has been sent yet. The A6 run 1 JUP account (1,488,440
+  lamports, paid by `real:strategy:ad3606394fc0`) closes the next time that
+  bucket is swept as retired: once its one-day TTL is over, when the owner
+  runs `serve real` and connects the spec again.

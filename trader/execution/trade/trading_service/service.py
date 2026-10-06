@@ -13,7 +13,8 @@ abertos precisam caber na carteira. Ao abrir o primeiro bucket, as posições de
 todos os buckets do ledger são conferidas contra a carteira; faltando token,
 compras dele ficam bloqueadas. Uma venda que a carteira não cobre é recusada
 e avisada (A5), e também bloqueia compras do token. A política do gateway continua valendo para
-cada ordem, por cima do bucket.
+cada ordem, por cima do bucket. Um bucket encerrado sem posição fecha a conta
+do token e o rent volta para quem o pagou (A15), se nada mais precisa dela.
 
 O modo (real/paper) é só do serviço: quem pede ordens nunca o conhece.
 """
@@ -21,7 +22,7 @@ O modo (real/paper) é só do serviço: quem pede ordens nunca o conhece.
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
@@ -29,7 +30,12 @@ from functools import partial
 from solders.pubkey import Pubkey
 
 from trader.execution.market.prices import PriceOracle, usd_snapshot
-from trader.execution.models.errors import SwapRejectedError
+from trader.execution.models.errors import (
+    SwapRejectedError,
+    TransactionFailedOnChainError,
+)
+from trader.execution.models.intent import SentTx, TxOutcome
+from trader.execution.models.rent import RENT_REFUND, RENT_REFUND_SENT, RentRefund
 from trader.execution.trade.gateway import (
     DuplicateIntentError,
     PolicyDeniedError,
@@ -39,7 +45,8 @@ from trader.execution.trade.gateway.account import AsyncAccount, WalletShortfall
 from trader.execution.trade.gateway.balances import WalletBalances
 from trader.execution.trade.gateway.resolve import IntentResolver
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.shared.models import Order, OrderSide
+from trader.shared.models import SOLANA_MINTS, Order, OrderSide
+from trader.shared.models.mints import SOL_MINT
 from trader.shared.notification.notification_service import (
     NotificationService,
     Notifier,
@@ -68,6 +75,8 @@ class _Bucket:
     # vendendo a sobra de um bucket encerrado: a venda passa por
     # `submit_order` de novo, que não pode tentar fechar outra vez
     closing: bool = False
+    # já tentou fechar a conta do token (A15): uma vez por processo
+    rent_checked: bool = False
 
 
 def remaining_budget(budget_usd: Decimal, realized_usd: Decimal) -> Decimal:
@@ -105,7 +114,12 @@ class TradeService:
         self._resolver = IntentResolver(gateway, provider, prices)
 
     def account_id(self, name: str) -> str:
-        return f"{self.mode}:{name}" if self.mode else name
+        return self._prefix + name
+
+    @property
+    def _prefix(self) -> str:
+        """O começo das contas deste modo no ledger."""
+        return f"{self.mode}:" if self.mode else ""
 
     async def open_bucket(
         self,
@@ -155,10 +169,14 @@ class TradeService:
         if not accounts:
             return
         self.wallet.invalidate()
+        self._restore_accounts(accounts)
+
+    def _restore_accounts(self, accounts) -> None:
+        """Relê do ledger os buckets dessas contas (algo mudou fora de uma ordem)."""
         for name, bucket in self._buckets.items():
             if bucket.account.account_id in accounts:
                 bucket.account.restore_from_ledger()
-                # uma venda resolvida pode ter passado do `max_loss_usd`
+                # uma venda resolvida (ou um rent devolvido) muda o realizado
                 self._check_max_loss(name, bucket)
 
     async def _reconcile_wallet(self) -> None:
@@ -168,9 +186,8 @@ class TradeService:
         evento `reconcile_mismatch` e bloqueia compras do token neste processo;
         o dono confere a carteira. Vendas continuam enquanto a carteira as cobre.
         """
-        prefix = f"{self.mode}:" if self.mode else ""
-        for mint, expected in self.gateway.open_positions(prefix).items():
-            balance = await self.wallet.get(mint)
+        for mint, expected in self.gateway.open_positions(self._prefix).items():
+            balance = await self.wallet.fresh(mint)  # A15: não o índice só
             if balance >= expected * RECONCILE_TOLERANCE:
                 continue
             logger.warning(
@@ -402,8 +419,133 @@ class TradeService:
         )
         return await self.submit_order(name, request)
 
+    # --- rent de volta (A15) ----------------------------------------------------
+
+    async def close_token_account(self, name: str) -> RentRefund | None:
+        """Bucket encerrado e sem posição: fecha a conta do token dele.
+
+        Uma tentativa por bucket neste processo (um erro antes do envio deixa
+        tentar de novo), só se nada mais precisa da conta (`_rent_payer`). O
+        rent volta para o bucket que o pagou, que pode não ser este.
+        """
+        bucket = self._bucket(name)
+        if bucket.rent_checked or not _retired_flat(bucket):
+            return None
+        refused = self.gateway.send_refusals()
+        if refused:
+            # a mesma trava dos swaps; a próxima varredura tenta de novo
+            logger.warning(
+                f"Conta do token de {name} fica aberta: {'; '.join(refused)}"
+            )
+            return None
+        mint = str(bucket.account.output_mint)
+        payer = self._rent_payer(name, mint)
+        refund = None
+        if payer is not None:
+            async with self._lock:
+                refund = await self._close(payer, mint)
+        bucket.rent_checked = True
+        return refund
+
+    def _rent_payer(self, name: str, mint: str) -> str | None:
+        """Quem pagou o rent da conta do token, se ela pode ser fechada.
+
+        Não pode: SOL; outro bucket ativo usa o token; há posição aberta dele
+        no ledger; um fechamento dele está pendente; nenhuma compra do bot
+        abriu a conta (`Ledger.rent_payer`).
+        """
+        if mint == SOL_MINT or self._mint_in_use(name, mint):
+            return None
+        if mint in self.gateway.open_positions(self._prefix):
+            return None
+        ledger = self.gateway.ledger
+        pending = ledger.pending_rent_refunds(self._prefix)
+        if any(sent["mint"] == mint for sent in pending):
+            return None
+        return ledger.rent_payer(self._prefix, mint)
+
+    def _mint_in_use(self, name: str, mint: str) -> bool:
+        return any(
+            other != name
+            and bucket.status == BucketStatus.ACTIVE
+            and mint
+            in (str(bucket.account.input_mint), str(bucket.account.output_mint))
+            for other, bucket in self._buckets.items()
+        )
+
+    async def _close(self, payer: str, mint: str) -> RentRefund | None:
+        """Fecha e registra; uma transação que a rede recusou registra a taxa."""
+        try:
+            refund = await self.provider.close_token_account(
+                mint, partial(self._announce_close, payer)
+            )
+        except TransactionFailedOnChainError as ex:
+            # a conta continua aberta: só a taxa foi paga
+            signature = ex.signature or ""
+            fee = await self.provider.fetch_failed_fees([signature])
+            refund = RentRefund(signature, mint, 0, fee)
+        if refund is not None:
+            await self._record_refund(payer, refund)
+        return refund
+
+    def _announce_close(self, payer: str, sent: SentTx) -> None:
+        """Grava o envio antes dele (se falha, nada é enviado)."""
+        self.gateway.add_event(
+            RENT_REFUND_SENT,
+            {"account": payer, "mint": sent.input_mint, **asdict(sent)},
+        )
+
+    async def _record_refund(self, payer: str, refund: RentRefund) -> None:
+        sol_usd = await self.quote_usd(SOL_MINT)
+        self.gateway.add_event(
+            RENT_REFUND,
+            {
+                "account": payer,
+                "mint": refund.mint,
+                "signature": refund.signature,
+                "refund_lamports": refund.refund_lamports,
+                "fee_lamports": refund.fee_lamports,
+                "sol_usd": sol_usd,
+                "net_usd": None if sol_usd is None else refund.net_sol * sol_usd,
+            },
+        )
+        logger.warning(
+            f"Conta de {SOLANA_MINTS.symbol_of(refund.mint)} fechada "
+            f"({refund.signature}): {refund.refund_lamports} lamports de rent "
+            f"de volta para {payer}, taxa {refund.fee_lamports}"
+        )
+        self._restore_accounts({payer})
+
+    async def resolve_rent_refunds(self) -> None:
+        """Fechamentos enviados sem desfecho (processo morto, RPC sem resposta).
+
+        Como as intenções (A3): a rede diz se entrou; pendente, fica para a
+        próxima varredura.
+        """
+        for sent in self.gateway.ledger.pending_rent_refunds(self._prefix):
+            async with self._lock:
+                await self._resolve_close(sent)
+
+    async def _resolve_close(self, sent: dict) -> None:
+        tx = SentTx(**{f.name: sent[f.name] for f in fields(SentTx)})
+        outcome = await self.provider.send_outcome(tx)
+        if outcome == TxOutcome.PENDING:
+            return
+        expired = outcome == TxOutcome.EXPIRED
+        fee = 0 if expired else await self.provider.fetch_failed_fees([tx.signature])
+        rent = tx.out_amount if outcome == TxOutcome.LANDED else 0
+        await self._record_refund(
+            sent["account"], RentRefund(tx.signature, tx.input_mint, rent, fee)
+        )
+
     async def aclose(self) -> None:
         await self.provider.aclose()
+
+
+def _retired_flat(bucket: _Bucket) -> bool:
+    return (
+        bucket.status == BucketStatus.RETIRING and bucket.account.book.position is None
+    )
 
 
 def _position_cost(bucket: _Bucket) -> Decimal:
