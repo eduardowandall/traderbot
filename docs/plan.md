@@ -34,12 +34,13 @@ it before the code. Track progress in §5, record decisions in §9.
 
 **Overall: about 90%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
 and goal 6 is scored on its own so a new goal doesn't hide progress). 780
-tests. Nothing has traded real money yet: the next stretch of work leads to a
-first tiny-budget real run.
+tests. The first real run (A6, 2026-10-06/07) is done: 5 JUP-SOL round
+trips on a ~5 USD wallet, nothing UNCONFIRMED or failed, costs at or below
+the backtest's, and the token account's rent refunded at retirement.
 
 | Goal | Done | Missing | Score |
 |---|---|---|---|
-| 1. Specs as files | `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `backtest`, `/smoke`, `serve` + `connect` for any number of specs; the trade-runner checks each spec's terms against its own policy | No spec has traded real money (A6) | **90%** |
+| 1. Specs as files | `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `backtest`, `/smoke`, `serve` + `connect` for any number of specs; the trade-runner checks each spec's terms against its own policy | Only a tiny-budget spec has traded real money (A6) | **95%** |
 | 2. Manual trades | Removed in stage U | Comes back with a wallet treasury | deferred |
 | 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up (across candle gaps), re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | No crossovers | **90%** |
 | 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | One wallet only | **85%** |
@@ -75,58 +76,6 @@ first tiny-budget real run.
 
 In order. Each item ships on its own with the suite green (`/check`). Size:
 **S** under an hour, **M** several modules, **L** a design change.
-
-### A6. First real run — S (owner, with a checklist)
-- The owner's answers to §7 recorded: pairs, `max_trade_usd`, daily notional,
-  one hot wallet.
-- The Helius key rotated; `real_trading_enabled = true`; the priority-fee cap
-  reviewed for small trades (soak F7: at 5 USD the cap is most of the ~71 bps
-  round trip).
-- A dedicated low-balance wallet; one liquid spec with a tiny budget,
-  backtested and soaked in paper.
-- `serve real` + `connect` started by the owner in a terminal (agent sessions
-  can't).
-- Afterwards: `ledger_dump.py`, the daily report and `live_vs_backtest.py`;
-  write down the exit criteria for raising the budget.
-- **Constraint (owner, 2026-10-06): the wallet holds about 5 USD, all SOL.**
-  At ~120 USD/SOL that is ~0.042 SOL; the 0.02 SOL fee reserve
-  (`DEFAULT_SOL_FEE_RESERVE`) leaves ~0.022 SOL (~2.6 USD) spendable, and
-  `_check_allocation` measures budgets against that. So: a SOL-input spec
-  (no USDC to spend), budget ~2 USD with room for a SOL drop between
-  restarts; the first buy of a new token opens its account (~0.002 SOL,
-  ~0.25 USD rent, refundable only by closing it); the 100,000-lamport
-  priority-fee cap is ~0.012 USD a leg, ~60 bps of a 2 USD trade, so lower
-  it; tight `[real.limits]` (trade, daily notional, daily loss, trades per
-  hour). The goal is a few round trips that exercise the real path, not PnL.
-- **Chosen (2026-10-06):** `docs/examples/spec-real-first-run.json`, JUP-SOL
-  (`USDC-SOL` is refused: the bought token can't be a stablecoin), a 1% draw
-  per tick, out after 10 min or a 1% stop, 60 min cooldown, 1.5 USD a buy,
-  budget 2, max loss 0.5, one day. Backtests at a 20,000-lamport cap: 14
-  round trips a day, -0.10 to -0.15 USD. Policy for the owner to add:
-  `[real.trading]` `real_trading_enabled = true`, `allowed_symbols = ["SOL",
-  "JUP"]`, `max_priority_fee_lamports = 20000`; `[real.limits]`
-  `max_trade_usd = 2`, `max_daily_notional_usd = 40`, `max_trades_per_hour =
-  2`, `max_trades_per_hour_per_bucket = 2`, `max_daily_loss_usd = 1`,
-  `max_consecutive_failures = 2`.
-- **Run 1 (2026-10-06, 06:00-08:41 UTC):** 3 JUP-SOL round trips, every leg
-  through the quote check, inspection and simulation, confirmed at the first
-  send; nothing UNCONFIRMED, no failed tx, flat at the end. Ledger: net
-  -0.001595 SOL (-0.19 USD) = swaps +0.000043, fees -0.000150 (6 x 24,999
-  lamports), rent -0.001488 (the JUP account, first buy only). Without the
-  rent a round trip cost ~0.007 USD (~46 bps); the backtest on the recorded
-  ticks says 0.009 USD (59.8 bps), so it errs on the safe side. Fill vs quote
-  under 3 bps except the first buy (19.7 bps). Findings, fixed in A15:
-  - **F1.** Two of three exits were refused once ("Sem valor minimo") and
-    went through 30-45 s later: the fresh wallet read (`getTokenAccountsByOwner`)
-    came back without the JUP account, one minute after a read that had it.
-  - **F2.** The rent is booked as a cost and never comes back: the account
-    stays open after the sell. It is 93% of the bucket's loss and 36% of its
-    max loss, and makes the round-trip cost read 441 bps.
-  - **F3.** Prices stale for ~4 min (08:04-08:08 UTC): websocket and Price
-    API failed together (a local network blip); the warnings end in an empty
-    message (`str(ex)` of a timeout is empty).
-  - **F4.** 12,306 of ~12,700 lines of the `serve` log are `hpack` DEBUG
-    (with Cloudflare cookies).
 
 ### A7–A12. Perps
 The design is in §8. A7 changes no behaviour and no schema; A8 bumps the
@@ -184,7 +133,7 @@ ledger schema, so it waits for the end of a paper soak.
 | A5 Wallet re-read rule | done | 2026-10-05; in `history.md` |
 | A13 Soak II small fixes | done | 2026-10-05; in `history.md` |
 | A14 Replay fills like live fills | done | 2026-10-05; in `history.md` |
-| A6 First real run | open | Run 1 done 2026-10-06 (findings -> A15); exit criteria for a bigger budget still to write |
+| A6 First real run | done | 2026-10-07; in `history.md` (run 1 findings -> A15; run 2 clean; rent refunded at expiry) |
 | A15 First real run fixes | done | 2026-10-06; in `history.md` |
 | A7 Perps: decoupling | open | |
 | A8 Perps: model, paper, spec | open | Schema bump; after a soak |
@@ -262,9 +211,11 @@ Top risks:
 7. **Perps venue risk.** In 2026 one Solana perps venue was hacked and two
    shut down: the venue sits behind a seam (D4).
 
-Open questions for the owner (answer before A6):
+Open questions for the owner (A6 answered pairs, limits and one hot wallet
+for the first run; see `history.md`):
 - Has the Helius key been rotated?
-- Which pairs, and what maximum notional per trade and per day, in real mode?
+- The next real budget: the proposal at the end of A6 in `history.md` (a
+  10-15 USD wallet, 5 USD a buy, `max_daily_loss_usd = 3`).
 - One hot wallet for every strategy, or one per strategy later?
 
 ## 8. Perps design
@@ -442,3 +393,8 @@ Decisions up to 2026-10-04 are in [`history.md`](history.md).
   closed when its bucket retires flat, and the refund is recorded (credited
   to the bucket that paid the rent); sells re-read the token account directly
   when the wallet read comes up short; `hpack`/`h2` logs go to WARNING.
+- **2026-10-07 (A6 done):** the exit criteria for a bigger budget (5 clean
+  round trips, the rent refunded at retirement, live cost per round trip at
+  or below the backtest's) all hold; A6 moved to `history.md`. The next real
+  budget is the owner's call (§7). Perps (A7) come next; A7 must keep the
+  ids of `docs/examples/`, `ad3606394fc0` included.

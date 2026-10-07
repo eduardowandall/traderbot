@@ -2785,4 +2785,104 @@ From A6 run 1. No schema change: the refund is an event, like
   live: no real close has been sent yet. The A6 run 1 JUP account (1,488,440
   lamports, paid by `real:strategy:ad3606394fc0`) closes the next time that
   bucket is swept as retired: once its one-day TTL is over, when the owner
-  runs `serve real` and connects the spec again.
+  runs `serve real` and connects the spec again. (Done 2026-10-07: the
+  whole 1,488,440 lamports came back, see A6 below.)
+
+#### A6. First real run — S (owner, done 2026-10-07)
+- The owner's answers to §7 recorded: pairs, `max_trade_usd`, daily notional,
+  one hot wallet.
+- The Helius key rotated; `real_trading_enabled = true`; the priority-fee cap
+  reviewed for small trades (soak F7: at 5 USD the cap is most of the ~71 bps
+  round trip).
+- A dedicated low-balance wallet; one liquid spec with a tiny budget,
+  backtested and soaked in paper.
+- `serve real` + `connect` started by the owner in a terminal (agent sessions
+  can't).
+- Afterwards: `ledger_dump.py`, the daily report and `live_vs_backtest.py`;
+  write down the exit criteria for raising the budget.
+- **Constraint (owner, 2026-10-06): the wallet holds about 5 USD, all SOL.**
+  At ~120 USD/SOL that is ~0.042 SOL; the 0.02 SOL fee reserve
+  (`DEFAULT_SOL_FEE_RESERVE`) leaves ~0.022 SOL (~2.6 USD) spendable, and
+  `_check_allocation` measures budgets against that. So: a SOL-input spec
+  (no USDC to spend), budget ~2 USD with room for a SOL drop between
+  restarts; the first buy of a new token opens its account (~0.002 SOL,
+  ~0.25 USD rent, refundable only by closing it); the 100,000-lamport
+  priority-fee cap is ~0.012 USD a leg, ~60 bps of a 2 USD trade, so lower
+  it; tight `[real.limits]` (trade, daily notional, daily loss, trades per
+  hour). The goal is a few round trips that exercise the real path, not PnL.
+- **Chosen (2026-10-06):** `docs/examples/spec-real-first-run.json`, JUP-SOL
+  (`USDC-SOL` is refused: the bought token can't be a stablecoin), a 1% draw
+  per tick, out after 10 min or a 1% stop, 60 min cooldown, 1.5 USD a buy,
+  budget 2, max loss 0.5, one day. Backtests at a 20,000-lamport cap: 14
+  round trips a day, -0.10 to -0.15 USD. Policy for the owner to add:
+  `[real.trading]` `real_trading_enabled = true`, `allowed_symbols = ["SOL",
+  "JUP"]`, `max_priority_fee_lamports = 20000`; `[real.limits]`
+  `max_trade_usd = 2`, `max_daily_notional_usd = 40`, `max_trades_per_hour =
+  2`, `max_trades_per_hour_per_bucket = 2`, `max_daily_loss_usd = 1`,
+  `max_consecutive_failures = 2`.
+- **Run 1 (2026-10-06, 06:00-08:41 UTC):** 3 JUP-SOL round trips, every leg
+  through the quote check, inspection and simulation, confirmed at the first
+  send; nothing UNCONFIRMED, no failed tx, flat at the end. Ledger: net
+  -0.001595 SOL (-0.19 USD) = swaps +0.000043, fees -0.000150 (6 x 24,999
+  lamports), rent -0.001488 (the JUP account, first buy only). Without the
+  rent a round trip cost ~0.007 USD (~46 bps); the backtest on the recorded
+  ticks says 0.009 USD (59.8 bps), so it errs on the safe side. Fill vs quote
+  under 3 bps except the first buy (19.7 bps). Findings, fixed in A15:
+  - **F1.** Two of three exits were refused once ("Sem valor minimo") and
+    went through 30-45 s later: the fresh wallet read (`getTokenAccountsByOwner`)
+    came back without the JUP account, one minute after a read that had it.
+  - **F2.** The rent is booked as a cost and never comes back: the account
+    stays open after the sell. It is 93% of the bucket's loss and 36% of its
+    max loss, and makes the round-trip cost read 441 bps.
+  - **F3.** Prices stale for ~4 min (08:04-08:08 UTC): websocket and Price
+    API failed together (a local network blip); the warnings end in an empty
+    message (`str(ex)` of a timeout is empty).
+  - **F4.** 12,306 of ~12,700 lines of the `serve` log are `hpack` DEBUG
+    (with Cloudflare cookies).
+- **Run 2 (2026-10-06, 14:09-16:38 UTC, A15 build, same spec and bucket):**
+  2 JUP-SOL round trips (-0.0046 and -0.0063 USD), every leg executed at the
+  first send; nothing UNCONFIRMED, no failed tx, flat at the end. The `serve`
+  log is 10 lines (F4 fixed); the websocket dropped 5 times and the Price API
+  covered each time, with no stale price (F3); no exit was refused (F1 not
+  seen again). Fees 24,999 lamports a leg (the 20,000 cap holds). Bucket after
+  5 round trips: net -0.201 USD, of which rent 0.00148844 SOL (~0.178 USD);
+  without it ~0.006 USD (~41 bps) a round trip against the backtest's 60 bps.
+  **Not yet exercised: the rent refund (F2).** It happens only when the
+  bucket retires flat: the one-day TTL counts from `bucket_opened` (~06:00 UTC
+  on 2026-10-06), so `serve real` + `connect` started after ~06:01 UTC on
+  2026-10-07 retires it in the first sweep and closes the JUP account
+  (`rent_refund_sent`, then `rent_refund`; the backtest and
+  `round_trip_costs` then drop the rent). Live vs backtest over both runs
+  (`--mode real`; without it the script reads the paper bucket): 10 live
+  legs, 11 backtest (one more buy after live stopped). With a
+  `random_chance` entry the legs fall at different moments (run 1 up to
+  ~15 min apart, run 2 ~2 min), so per-leg price gaps (-56 to +94 bps) are
+  timing, not fills. The four round trips that ended on `max_hold` in both
+  match: backtest -0.0228 USD, live -0.0210 (rent left out). Costs: live
+  ~0.006 USD a round trip, almost all network fee (2 x 24,999 lamports,
+  ~40 bps at 1.5 USD), so fill slippage is about 1 bps; the backtest's
+  10 bps a leg is what puts it at 60 bps.
+- **Exit criteria for a bigger budget** (all must hold; A6 closes when they
+  do):
+  1. At least 5 clean round trips: nothing UNCONFIRMED or EXECUTING, no
+     failed tx, no exit refused (met by runs 1 and 2 except run 1's F1
+     refusals, fixed in A15).
+  2. The rent refund received: after expiry the sweep closes the JUP
+     account, `rent_refund` is booked to the bucket and `ledger_dump.py`
+     shows `rent_refund_lamports` ~1,488,440 (met 2026-10-07, below).
+  3. Live cost per round trip, rent left out, at or below the backtest's
+     (met: ~41 vs 60 bps).
+- **Then (a proposal for the owner):** a wallet of 10-15 USD; a new spec
+  with 5 USD a buy, so the fixed ~0.006 USD of network fees a round trip is
+  ~12 bps instead of ~40; `max_trade_usd = 5` and `max_daily_loss_usd = 3`
+  in `[real.limits]`, with the other limits scaled to match.
+- **Rent refund (2026-10-07, 06:19-06:20 UTC):** `serve real` + `connect`
+  after the TTL; the first sweep (30 s after start) retired the bucket
+  ("spec vencida"), `connect` stopped by itself, and the same sweep closed
+  the JUP account: 1,488,440 lamports back to
+  `real:strategy:ad3606394fc0` for a 5,000-lamport fee (tx
+  `SxA7KpeE...gc2Dwd`), the whole rent the first buy paid. F2 is closed on
+  the real path; the bucket's net is ~-0.000226 SOL (~-0.03 USD) after 5
+  round trips. A first attempt stopped 3 s after `connect`, before any
+  sweep: the owner has to leave both running for one sweep (~30 s).
+  All three exit criteria hold: A6 is done.
