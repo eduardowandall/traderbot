@@ -9,6 +9,7 @@ from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.trading_service.protocol import OrderRequest
 
@@ -21,7 +22,7 @@ async def test_orders_are_stamped_in_utc_by_default():
     quotes.tick = Tick(datetime.now(UTC), Decimal(100))
     wallet = SimulatedWallet(initial={"USDC": Decimal(100), "SOL": Decimal(1)})
     service = TradeService(
-        paper_provider(wallet, jupiter_client=quotes), memory_gateway()
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)), memory_gateway()
     )
     await service.open_bucket("sol", USDC.mint, SOL.mint)
 

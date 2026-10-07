@@ -15,6 +15,7 @@ from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterCli
 from trader.execution.models.intent import IntentSide, IntentStatus
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import (
     SOLANA_MINTS,
     Interval,
@@ -82,7 +83,9 @@ async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
     quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
     wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
     gateway = memory_gateway()
-    service = TradeService(paper_provider(wallet, jupiter_client=quotes), gateway)
+    service = TradeService(
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)), gateway
+    )
     market_client = _market_client()
     async with served(service, **BONK_SPEC) as trader:
         bot = AsyncWebsocketTradingBot(
@@ -115,7 +118,7 @@ async def test_fills_report_the_bucket_and_no_task_outlives_the_bot(
     quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
     wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
     service = TradeService(
-        paper_provider(wallet, jupiter_client=quotes), memory_gateway()
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)), memory_gateway()
     )
     inbox = Inbox()
     async with served(service, **BONK_SPEC) as trader:

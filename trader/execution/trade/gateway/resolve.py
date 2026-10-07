@@ -6,7 +6,7 @@ antes de acontecer (`intent_sent`, via `send_hook`), então dá para perguntar
 à rede (ou à carteira simulada) o que houve com cada um:
 
 - um envio LANDED: a intenção vira EXECUTED, com custos, ordem e (vendas) o
-  PnL, como `AsyncAccount` faria;
+  PnL, como `SpotAccount` faria;
 - todos FAILED ou EXPIRED: FAILED, com a taxa dos FAILED registrada;
 - nenhum envio, numa intenção que grava envios: FAILED (nunca foi enviada);
 - algum PENDING, ou uma intenção de uma versão sem o registro: continua
@@ -31,6 +31,7 @@ from trader.execution.models.intent import (
     TradeIntent,
     TxOutcome,
 )
+from trader.execution.models.venue import Venue
 from trader.execution.trade.gateway.fills import (
     FailedFees,
     record_fill_safely,
@@ -40,7 +41,6 @@ from trader.execution.trade.gateway.fills import (
 from trader.execution.trade.gateway.gateway import TradeGateway
 from trader.execution.trade.gateway.orders import order_from_fill, priced_mints
 from trader.execution.trade.ledger.intents import INTENT_RESOLVED
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.mints import SOL_MINT
 
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class IntentResolver:
     gateway: TradeGateway
-    provider: AsyncJupiterProvider
+    venue: Venue
     prices: PriceOracle | None = None
     # intenções já avisadas como pendentes neste processo
     _warned: set[str] = field(default_factory=set)
@@ -70,7 +70,7 @@ class IntentResolver:
         sends = self.gateway.ledger.sends_of(record.intent.intent_id)
         if not sends:
             return self._unsent(record)
-        outcomes = [(s, await self.provider.send_outcome(s)) for s in sends]
+        outcomes = [(s, await self.venue.send_outcome(s)) for s in sends]
         failed = [s.signature for s, o in outcomes if o == TxOutcome.FAILED]
         landed = [s for s, o in outcomes if o == TxOutcome.LANDED]
         if landed:
@@ -118,7 +118,7 @@ class IntentResolver:
             record, IntentStatus.EXECUTED, sent.signature, "a transação entrou na rede"
         )
         fill = await settle(
-            self.provider,
+            self.venue,
             result,
             self._fees(intent, usd),
             self._unbooked(record, failed),
@@ -138,7 +138,7 @@ class IntentResolver:
     def _record_fill(
         self, record: IntentRecord, order: Order, entry: Order | None
     ) -> None:
-        """Como `AsyncAccount`: a ordem e, numa venda, o PnL e a sobra."""
+        """Como `SpotAccount`: a ordem e, numa venda, o PnL e a sobra."""
         intent = record.intent
         if entry is None:
             # uma compra; ou uma venda sem entrada no ledger (fica sem PnL)
@@ -154,7 +154,7 @@ class IntentResolver:
             record_leftover(self.gateway, intent.account, entry, order)
 
     def _fees(self, intent: TradeIntent, usd: Mapping[str, Decimal]) -> FailedFees:
-        return FailedFees(self.gateway, self.provider, intent, usd.get(SOL_MINT), None)
+        return FailedFees(self.gateway, self.venue, intent, usd.get(SOL_MINT), None)
 
     def _unbooked(self, record: IntentRecord, failed: Sequence[str]) -> list[str]:
         """Os envios falhos cuja taxa ainda não foi registrada."""

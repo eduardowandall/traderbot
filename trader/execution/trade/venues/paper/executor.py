@@ -16,11 +16,12 @@ from solders.pubkey import Pubkey
 
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.models.account_data import MintBalance
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome, announce_send
 from trader.execution.models.rent import RentRefund
 from trader.execution.trade.venues.jupiter.executor import DEFAULT_SOL_FEE_RESERVE
 from trader.execution.trade.venues.paper.wallet import SimulatedWallet
-from trader.shared.models import SOLANA_MINTS, SwapResult
+from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import SIMULATED, TradeCosts
 from trader.shared.models.mints import SOL_MINT
 
@@ -78,7 +79,7 @@ class SimulatedExecutor:
 
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         in_amount, out_amount = int(quote.inAmount), self._filled_out(quote)
         self.wallet.reload()  # outro processo pode ter aberto a conta do token
         rent = (
@@ -100,7 +101,7 @@ class SimulatedExecutor:
         self.wallet.apply_swap(
             input_mint, in_amount, output_mint, out_amount, fee, rent, signature
         )
-        return SwapResult(
+        return ExecutionResult(
             signature=signature,
             input_mint=input_mint,
             output_mint=output_mint,
@@ -127,7 +128,7 @@ class SimulatedExecutor:
         floor = min(int(quote.otherAmountThreshold or 0), quoted)
         return max(slipped, floor)
 
-    async def fetch_costs(self, result: SwapResult) -> TradeCosts | None:
+    async def fetch_costs(self, result: ExecutionResult) -> TradeCosts | None:
         # os custos simulados já vêm no resultado da execução; uma intenção
         # resolvida depois (A3) os lê do registro da carteira
         if result.costs is not None:

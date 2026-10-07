@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from trader.shared.models.costs import PnLResult
+from trader.shared.models.direction import Direction
 from trader.shared.models.mints import SOLANA_MINTS
 from trader.shared.models.order import Order
 
@@ -45,12 +46,13 @@ class Position:
 
     entry_order: Order
     exit_order: Order | None = None
+    # spot é sempre comprado; vendido só em perps (A8)
+    direction: Direction = Direction.LONG
 
     def unrealized_pnl(self, current_price: Decimal) -> Decimal:
         """PnL não realizado no token de cotação (`current_price` também nele)."""
-        return (
-            current_price - self.entry_order.quote_price
-        ) * self.entry_order.quantity
+        move = current_price - self.entry_order.quote_price
+        return self.direction.sign * move * self.entry_order.quantity
 
     def unrealized_usd(self, price: Decimal) -> Decimal:
         """Marcação a mercado: o que vender agora realizaria, em USD.
@@ -129,6 +131,7 @@ class Position:
             value
             and self.entry_order == value.entry_order
             and self.exit_order == value.exit_order
+            and self.direction == value.direction
         )
 
 

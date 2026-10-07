@@ -25,6 +25,7 @@ from decimal import ROUND_CEILING, Decimal
 
 from trader.backtest.ticks import Tick
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
@@ -32,8 +33,9 @@ from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
 )
 from trader.execution.trade.venues.paper.executor import SimulatedExecutor
 from trader.execution.trade.venues.paper.wallet import SimulatedWallet
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.indicators import to_utc
-from trader.shared.models import SOLANA_MINTS, Mint, OrderSide, SwapResult, TickerData
+from trader.shared.models import SOLANA_MINTS, Mint, OrderSide, TickerData
 from trader.shared.models.costs import (
     BPS,
     LAMPORTS_PER_SOL,
@@ -174,7 +176,7 @@ class ReplayExecutor(SimulatedExecutor):
 
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         result = await super().execute(input_mint, output_mint, quote)
         assert result.costs is not None  # o `SimulatedExecutor` sempre preenche
         sol_usd = self.sol_usd()
@@ -350,7 +352,7 @@ class Backtester:
         # ledger em memória e política sem limites; ordens no horário do tick;
         # os preços USD vêm do tick (orçamento e PnL)
         service = TradeService(
-            provider, gateway, clock=lambda: client.now, prices=prices
+            SpotVenue(provider), gateway, clock=lambda: client.now, prices=prices
         )
         return client, executor, service
 

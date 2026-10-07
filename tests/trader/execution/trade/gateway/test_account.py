@@ -4,16 +4,17 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import memory_gateway, mock_provider
+from factories import memory_gateway, mock_provider, spot_provider
 
 from trader.execution.models.account_data import MintBalance
-from trader.execution.trade.gateway.account import AsyncAccount, WalletShortfallError
+from trader.execution.models.execution import ExecutionResult
+from trader.execution.trade.gateway.account import SpotAccount, WalletShortfallError
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import (
     SOLANA_MINTS,
     Order,
     OrderSide,
     Position,
-    SwapResult,
 )
 
 
@@ -26,7 +27,11 @@ def _make_account(balances=None):
             MintBalance(mint=mo.pubkey, available=Decimal("1.0")),
         ]
     provider.get_account_balance = AsyncMock(return_value=balances)
-    return AsyncAccount(provider, mi.pubkey, mo.pubkey, memory_gateway()), mi, mo
+    return (
+        SpotAccount(SpotVenue(provider), mi.pubkey, mo.pubkey, memory_gateway()),
+        mi,
+        mo,
+    )
 
 
 def _long_position(mi, mo):
@@ -63,7 +68,7 @@ async def test_buy_raises_when_balance_below_minimum():
 
     with pytest.raises(ValueError, match="Sem valor minimo"):
         await acc.buy(Decimal("100"), Decimal("0.1"))
-    acc.provider.buy.assert_not_awaited()  # type: ignore[attr-defined]
+    spot_provider(acc).buy.assert_not_awaited()
 
 
 async def test_sell_raises_when_no_position():
@@ -107,7 +112,7 @@ def _usdc_sol_account(usdc="1000", sol="1", fill_ratio=Decimal("1")):
 
     async def buy(input_mint, output_mint, spend_amount):
         # as compras destes testes são a 100 USDC/SOL
-        return SwapResult(
+        return ExecutionResult(
             "buy-sig",
             str(input_mint),
             str(output_mint),
@@ -116,7 +121,7 @@ def _usdc_sol_account(usdc="1000", sol="1", fill_ratio=Decimal("1")):
         )
 
     async def sell(input_mint, output_mint, quantity):
-        return SwapResult(
+        return ExecutionResult(
             "sell-sig",
             str(output_mint),
             str(input_mint),
@@ -126,7 +131,7 @@ def _usdc_sol_account(usdc="1000", sol="1", fill_ratio=Decimal("1")):
 
     provider.buy = AsyncMock(side_effect=buy)
     provider.sell = AsyncMock(side_effect=sell)
-    return AsyncAccount(provider, USDC.pubkey, SOL.pubkey, memory_gateway())
+    return SpotAccount(SpotVenue(provider), USDC.pubkey, SOL.pubkey, memory_gateway())
 
 
 async def test_buy_records_quote_fill():
@@ -155,7 +160,9 @@ async def test_buy_is_capped_at_spendable_balance():
     order = await acc.buy(Decimal("100"), Decimal("0.5"))
 
     # o valor gasto vai ao provider uma vez, já limitado ao saldo
-    acc.provider.buy.assert_awaited_once_with(USDC.pubkey, SOL.pubkey, Decimal("30"))  # type: ignore[attr-defined]
+    spot_provider(acc).buy.assert_awaited_once_with(
+        USDC.pubkey, SOL.pubkey, Decimal("30")
+    )
     assert order.quantity == Decimal("0.3")
 
 
@@ -196,7 +203,7 @@ async def test_a_sell_the_wallet_cannot_cover_is_refused():
 
     assert refused.value.available == Decimal("0.078")  # 0.098 - reserva 0.02
     assert refused.value.quantity == Decimal("0.1")
-    acc.provider.sell.assert_not_awaited()  # type: ignore[attr-defined]
+    spot_provider(acc).sell.assert_not_awaited()
     assert acc.book.position is not None
 
 
@@ -206,7 +213,7 @@ async def test_sell_refuses_to_touch_sol_fee_reserve():
 
     with pytest.raises(WalletShortfallError):
         await acc.sell(Decimal("100.0"), Decimal("0.1"))
-    acc.provider.sell.assert_not_awaited()  # type: ignore[attr-defined]
+    spot_provider(acc).sell.assert_not_awaited()
 
 
 async def test_every_order_reads_the_wallet_fresh():
@@ -217,7 +224,7 @@ async def test_every_order_reads_the_wallet_fresh():
     await acc.buy(Decimal("100"), Decimal("0.5"))
     await acc.sell(Decimal("110"), Decimal("0.5"))
 
-    reads = acc.provider.get_account_balance.await_count  # type: ignore[attr-defined]
+    reads = spot_provider(acc).get_account_balance.await_count
     assert reads == 3
 
 
@@ -228,11 +235,11 @@ async def test_buy_with_sol_keeps_fee_reserve():
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("1"))]
     )
     provider.buy = AsyncMock(
-        return_value=SwapResult(
+        return_value=ExecutionResult(
             "sig", SOL.mint, USDC.mint, SOL.ui_to_raw("0.98"), USDC.ui_to_raw("98")
         )
     )
-    acc = AsyncAccount(provider, SOL.pubkey, USDC.pubkey, memory_gateway())
+    acc = SpotAccount(SpotVenue(provider), SOL.pubkey, USDC.pubkey, memory_gateway())
 
     # pede 100 USDC a 0.01 SOL/USDC = 1 SOL, mas só 0.98 pode ser gasto
     await acc.buy(Decimal("0.01"), Decimal("100"))
@@ -249,9 +256,9 @@ async def test_pnl_uses_quote_units_when_input_is_not_a_stablecoin():
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("0.059077338"))]
     )
     provider.buy = AsyncMock(
-        return_value=SwapResult("sig", SOL.mint, USDC.mint, 39077338, 4537732)
+        return_value=ExecutionResult("sig", SOL.mint, USDC.mint, 39077338, 4537732)
     )
-    acc = AsyncAccount(provider, SOL.pubkey, USDC.pubkey, memory_gateway())
+    acc = SpotAccount(SpotVenue(provider), SOL.pubkey, USDC.pubkey, memory_gateway())
     fill = Decimal("0.039077338") / Decimal("4.537732")
 
     order = await acc.buy(Decimal("0.0086"), Decimal("4.54"))
@@ -284,7 +291,7 @@ def _wallet(listed, direct):
         return_value=[MintBalance(mint=m.pubkey, available=a) for m, a in listed]
     )
     provider.token_balance = AsyncMock(side_effect=[direct])
-    return WalletBalances(provider), provider
+    return WalletBalances(SpotVenue(provider)), provider
 
 
 async def test_a_fresh_read_missing_the_token_uses_its_account(caplog):

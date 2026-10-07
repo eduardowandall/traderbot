@@ -5,7 +5,8 @@ conhece modo, chave, ledger nem política (quem limita é o gateway/bucket).
 
 A cada tick:
 1. atualiza as barras/indicadores (`IndicatorBank`) uma única vez;
-2. acompanha a posição (horário de entrada, pico, horário da última saída);
+2. acompanha a posição (lado, horário de entrada, pico: o melhor preço desde
+   a entrada, horário da última saída);
 3. com posição: stop (sempre) OU condições de saída; sem posição: entrada, se
    aquecido, antes da expiração e fora do cooldown.
 """
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from trader.shared.indicators import to_utc
 from trader.shared.models import OrderSide, OrderSignal, Position, TickerData
+from trader.shared.models.direction import Direction
 from trader.shared.models.public_data import Interval
 from trader.strategy.spec.conditions import IndicatorBank, TickContext, fired, holds
 from trader.strategy.spec.models import StrategySpec
@@ -49,6 +51,7 @@ class SpecStrategy:
         self._entry_px: Decimal | None = None
         self._entry_time: datetime | None = None
         self._peak: Decimal | None = None
+        self._direction = Direction.LONG  # o da posição aberta (D3)
         self._last_exit: datetime | None = None
         self._last_exit_px: Decimal | None = None
         # preço do último sinal de venda: vira o da saída quando a posição fecha
@@ -132,8 +135,10 @@ class SpecStrategy:
             self._entry_id = entry.order_id
             self._entry_px = entry.quote_price
             self._entry_time = to_utc(entry.timestamp)
+            self._direction = position.direction
             self._peak = self._entry_px
-        self._peak = max(self._peak or price, price)
+        # o melhor preço desde a entrada: o maior comprado, o menor vendido
+        self._peak = self._direction.better(self._peak or price, price)
 
     def _forget_position(self) -> None:
         self._sell_px = None
@@ -141,6 +146,7 @@ class SpecStrategy:
         self._entry_px = None
         self._entry_time = None
         self._peak = None
+        self._direction = Direction.LONG
 
     def _is_warm(self) -> bool:
         warm = len(self.bank) >= self._history
@@ -159,6 +165,7 @@ class SpecStrategy:
             entry_price=self._entry_px,
             entry_time=self._entry_time,
             peak=self._peak,
+            direction=self._direction,
             last_exit_at=self._last_exit,
             last_exit_price=self._last_exit_px,
         )

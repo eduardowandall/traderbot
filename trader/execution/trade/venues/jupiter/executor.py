@@ -37,6 +37,7 @@ from trader.execution.models.errors import (
     TransactionFailedOnChainError,
     TransactionSubmittedError,
 )
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome, announce_send
 from trader.execution.models.rent import RentRefund
 from trader.execution.trade.venues.jupiter.async_rpc_client import (
@@ -50,7 +51,7 @@ from trader.execution.trade.venues.jupiter.tx_inspection import (
     check_programs,
     state_after,
 )
-from trader.shared.models import SOLANA_MINTS, SwapResult
+from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import TradeCosts
 from trader.shared.models.mints import SOL_MINT
 
@@ -67,14 +68,14 @@ class Executor(Protocol):
 
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
-    ) -> SwapResult: ...
+    ) -> ExecutionResult: ...
 
     async def balances(self) -> list[MintBalance]: ...
 
     # saldo de um token lido direto da conta dele (A6 F1), em unidades de UI
     async def token_balance(self, mint: str) -> Decimal: ...
 
-    async def fetch_costs(self, result: SwapResult) -> TradeCosts | None: ...
+    async def fetch_costs(self, result: ExecutionResult) -> TradeCosts | None: ...
 
     # `meta.fee` de uma transação que falhou na rede; None se não achou
     async def fetch_fee(self, signature: str) -> int | None: ...
@@ -141,7 +142,7 @@ class OnChainExecutor:
 
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         tx = await self._get_swap_transaction(quote)
         check_programs(tx)  # antes de assinar: só programas conhecidos
         signed = await self._get_signed_transaction(tx)
@@ -162,7 +163,7 @@ class OnChainExecutor:
         resp = await self._send_transaction_and_wait_for_confirmation(signed.tx)
         # valores da quote; os efetivos (e os custos) vêm de `fetch_costs`,
         # chamado só depois que o ledger marcou a intenção como executada
-        return SwapResult(
+        return ExecutionResult(
             signature=json.loads(resp.to_json())["result"],
             input_mint=input_mint,
             output_mint=output_mint,
@@ -292,7 +293,7 @@ class OnChainExecutor:
         await self._send_transaction_and_wait_for_confirmation(signed.tx)
         return RentRefund(signed.signature, mint, account.lamports)
 
-    async def fetch_costs(self, result: SwapResult) -> TradeCosts | None:
+    async def fetch_costs(self, result: ExecutionResult) -> TradeCosts | None:
         """Custos lidos da transação confirmada."""
         tx = await self.rpc_client.get_confirmed_transaction(result.signature)
         if tx is None:

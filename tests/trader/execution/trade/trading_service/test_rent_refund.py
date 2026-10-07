@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import events_of, memory_gateway
+from factories import events_of, memory_gateway, spot_provider
 from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.message import MessageV0
@@ -34,6 +34,7 @@ from trader.execution.trade.venues.paper.executor import (
     DEFAULT_ACCOUNT_RENT_LAMPORTS,
     DEFAULT_FEE_LAMPORTS,
 )
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.trading_service.protocol import OrderRequest, ReplyStatus
 
@@ -65,7 +66,7 @@ def _setup(jup="0"):
     client.tick = Tick(T0, Decimal("0.5"))
     provider = paper_provider(wallet, jupiter_client=client)
     gateway = memory_gateway(LOOSE)
-    service = TradeService(provider, gateway, mode="paper", prices=_Oracle())
+    service = TradeService(SpotVenue(provider), gateway, mode="paper", prices=_Oracle())
     return service, wallet
 
 
@@ -154,10 +155,10 @@ class TestLeavesTheAccountAlone:
         service.retire("b", "teste")  # encerrado, mas ainda com a posição
         service.retire("a", "teste")
         # a carteira também recusaria (tem JUP): o ledger decide antes
-        service.provider.close_token_account = AsyncMock()  # type: ignore[method-assign]
+        spot_provider(service).close_token_account = AsyncMock()
 
         assert await service.close_token_account("a") is None
-        service.provider.close_token_account.assert_not_awaited()
+        spot_provider(service).close_token_account.assert_not_awaited()
         assert not wallet.needs_account(JUP.mint)
 
     async def test_an_account_the_bot_did_not_open(self):
@@ -200,7 +201,7 @@ class TestUnsettledCloses:
         service, wallet = _setup()
         await _round_trip(service, "a")
         service.retire("a", "teste")
-        service.provider.close_token_account = AsyncMock(  # type: ignore[method-assign]
+        spot_provider(service).close_token_account = AsyncMock(
             side_effect=TransactionFailedOnChainError("falhou", signature="sig-x")
         )
 
@@ -214,13 +215,13 @@ class TestUnsettledCloses:
         service, wallet = _setup()
         await _round_trip(service, "a")
         service.retire("a", "teste")
-        close = service.provider.close_token_account
+        close = spot_provider(service).close_token_account
 
         async def dies_after_send(mint, announce):
             await close(mint, announce)
             raise RuntimeError("processo morto")
 
-        service.provider.close_token_account = dies_after_send  # type: ignore[method-assign]
+        spot_provider(service).close_token_account = dies_after_send
         with pytest.raises(RuntimeError):
             await service.close_token_account("a")
         ledger = service.gateway.ledger

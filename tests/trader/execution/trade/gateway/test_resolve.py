@@ -7,7 +7,13 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import events_of, make_intent, memory_gateway, mock_provider
+from factories import (
+    events_of,
+    make_intent,
+    memory_gateway,
+    mock_provider,
+    spot_provider,
+)
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
@@ -20,6 +26,7 @@ from trader.execution.models.intent import (
 from trader.execution.trade.gateway.resolve import IntentResolver
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.trading_service.protocol import OrderRequest
 
@@ -36,7 +43,9 @@ def _paper_service():
     quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
     wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
     gateway = memory_gateway()
-    service = TradeService(paper_provider(wallet, jupiter_client=quotes), gateway)
+    service = TradeService(
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)), gateway
+    )
     return service, gateway, wallet
 
 
@@ -121,7 +130,7 @@ async def test_a_resolved_loss_past_the_max_loss_retires_the_bucket(monkeypatch)
     await service.open_bucket("b", USDC.mint, BONK.mint, max_loss_usd=Decimal(1))
     assert (await service.submit_order("b", _request(OrderSide.BUY))).filled
     # o preço cai pela metade: a venda perde ~5 USD, além do limite de 1
-    quotes = service.provider.jupiter_client
+    quotes = spot_provider(service).jupiter_client
     assert isinstance(quotes, ReplayQuoteClient)
     quotes.tick = Tick(datetime(2026, 9, 1, 12, 1), Decimal("0.5"))
     _dies_once(monkeypatch, gateway)
@@ -141,7 +150,7 @@ async def test_a_resolved_loss_past_the_max_loss_retires_the_bucket(monkeypatch)
 async def test_an_intent_never_sent_fails():
     gateway = memory_gateway()
     intent = _executing(gateway)
-    resolver = IntentResolver(gateway, mock_provider())
+    resolver = IntentResolver(gateway, SpotVenue(mock_provider()))
 
     assert await resolver.run() == {intent.account}
 
@@ -155,7 +164,7 @@ async def test_an_intent_from_an_older_build_keeps_blocking(caplog):
     intent = _executing(gateway)
     _drop_send_log(gateway, intent.intent_id)
     gateway.ledger.mark_unconfirmed(intent.intent_id, "interrompida")
-    resolver = IntentResolver(gateway, mock_provider())
+    resolver = IntentResolver(gateway, SpotVenue(mock_provider()))
 
     with caplog.at_level(logging.WARNING):
         assert await resolver.run() == set()
@@ -175,7 +184,7 @@ async def test_a_pending_send_keeps_blocking_until_it_lands():
     gateway.ledger.record_send(intent.intent_id, _sent("sig-1"))
     provider = mock_provider()
     provider.send_outcome = AsyncMock(return_value=TxOutcome.PENDING)
-    resolver = IntentResolver(gateway, provider)
+    resolver = IntentResolver(gateway, SpotVenue(provider))
 
     assert await resolver.run() == set()
     assert gateway.ledger.active_intents()
@@ -202,7 +211,7 @@ async def test_failed_sends_pay_their_fee_once():
     provider.send_outcome = AsyncMock(side_effect=[TxOutcome.FAILED, TxOutcome.EXPIRED])
     provider.fetch_failed_fees = AsyncMock(return_value=5000)
 
-    await IntentResolver(gateway, provider).run()
+    await IntentResolver(gateway, SpotVenue(provider)).run()
 
     assert gateway.ledger.get(intent.intent_id).status == IntentStatus.FAILED  # type: ignore[union-attr]
     provider.fetch_failed_fees.assert_not_awaited()  # sig-a já paga; sig-b expirou
@@ -217,7 +226,7 @@ async def test_a_landed_send_after_failed_ones_books_the_new_fees():
     provider.send_outcome = AsyncMock(side_effect=[TxOutcome.FAILED, TxOutcome.LANDED])
     provider.fetch_failed_fees = AsyncMock(return_value=5000)
 
-    await IntentResolver(gateway, provider).run()
+    await IntentResolver(gateway, SpotVenue(provider)).run()
 
     record = gateway.ledger.get(intent.intent_id)
     assert record and record.status == IntentStatus.EXECUTED
@@ -234,7 +243,7 @@ async def test_an_error_in_one_intent_does_not_stop_the_others():
     provider.send_outcome = AsyncMock(side_effect=RuntimeError("bug"))
 
     # a segunda (nunca enviada) se resolve mesmo com a primeira quebrando
-    assert await IntentResolver(gateway, provider).run() == {second.account}
+    assert await IntentResolver(gateway, SpotVenue(provider)).run() == {second.account}
 
 
 # --- o registro de envios no ledger -----------------------------------------
@@ -253,8 +262,8 @@ def test_a_send_is_recorded_only_on_an_active_intent():
 
 
 async def test_the_gateway_records_each_send_before_it_happens():
+    from trader.execution.models.execution import ExecutionResult
     from trader.execution.models.intent import announce_send
-    from trader.shared.models import SwapResult
 
     gateway = memory_gateway()
     intent = make_intent(account="paper:b")
@@ -264,7 +273,7 @@ async def test_the_gateway_records_each_send_before_it_happens():
         announce_send(_sent("sig-1"))
         # já está no ledger quando o envio acontece
         seen.append(gateway.ledger.get(intent.intent_id).signature)  # type: ignore[union-attr]
-        return SwapResult("sig-1", USDC.mint, SOL.mint, 1, 2)
+        return ExecutionResult("sig-1", USDC.mint, SOL.mint, 1, 2)
 
     await gateway.submit(intent, execute)
 

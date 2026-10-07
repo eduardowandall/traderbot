@@ -18,11 +18,12 @@ from trader.execution.models.errors import (
     SwapFailedError,
     TransactionFailedOnChainError,
 )
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus, TxOutcome
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.ledger.reports import FAILED_TX_FEE
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.shared.models import SwapResult
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models.costs import BASE_FEE_LAMPORTS, TradeCosts
 
 FEE = 15_000  # lamports por transação falha
@@ -52,7 +53,7 @@ class FlakyExecutor:
             raise TransactionFailedOnChainError(
                 "slippage", signature=f"fail-{self.calls}"
             )
-        return SwapResult(
+        return ExecutionResult(
             f"ok-{self.calls}",
             input_mint,
             output_mint,
@@ -98,9 +99,9 @@ def _provider(executor: FlakyExecutor) -> AsyncJupiterProvider:
     return AsyncJupiterProvider(executor, quotes)
 
 
-def _account(provider, gateway) -> AsyncAccount:
-    account = AsyncAccount(
-        provider,
+def _account(provider, gateway) -> SpotAccount:
+    account = SpotAccount(
+        SpotVenue(provider),
         Pubkey.from_string(USDC),
         Pubkey.from_string(SOL),
         gateway=gateway,

@@ -5,12 +5,14 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import memory_gateway, mock_provider
+from factories import memory_gateway, mock_provider, spot_provider
 
 from trader.execution.models.account_data import MintBalance
 from trader.execution.models.book import remainder_entry
-from trader.execution.trade.gateway.account import AsyncAccount, WalletShortfallError
-from trader.shared.models import SOLANA_MINTS, Order, OrderSide, SwapResult
+from trader.execution.models.execution import ExecutionResult
+from trader.execution.trade.gateway.account import SpotAccount, WalletShortfallError
+from trader.execution.trade.venues.spot import SpotVenue
+from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.costs import QUOTE, TradeCosts
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -30,7 +32,7 @@ def _account(gateway, sol_balance="10"):
 
     async def buy(input_mint, output_mint, spend_amount):
         # as compras destes testes são a 100 USDC/SOL
-        return SwapResult(
+        return ExecutionResult(
             "buy-sig",
             USDC.mint,
             SOL.mint,
@@ -39,7 +41,7 @@ def _account(gateway, sol_balance="10"):
         )
 
     async def sell(input_mint, output_mint, quantity):
-        return SwapResult(
+        return ExecutionResult(
             f"sell-{quantity}",
             SOL.mint,
             USDC.mint,
@@ -50,7 +52,9 @@ def _account(gateway, sol_balance="10"):
     provider.buy = AsyncMock(side_effect=buy)
     provider.sell = AsyncMock(side_effect=sell)
     provider.fetch_swap_costs = AsyncMock(return_value=TradeCosts(source=QUOTE))
-    account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey, gateway, account_id="t")
+    account = SpotAccount(
+        SpotVenue(provider), USDC.pubkey, SOL.pubkey, gateway, account_id="t"
+    )
     return account, wallet
 
 
@@ -60,7 +64,7 @@ async def test_a_sell_never_exceeds_the_position():
 
     await account.sell(Decimal("110"), Decimal("10"))  # pede o saldo inteiro
 
-    assert account.provider.sell.await_args.kwargs["quantity"] == Decimal("0.1")  # type: ignore[attr-defined]
+    assert spot_provider(account).sell.await_args.kwargs["quantity"] == Decimal("0.1")
     assert account.book.position is None
 
 

@@ -3,12 +3,13 @@ from decimal import Decimal
 
 from factories import make_intent, open_ledger
 
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentSide, PolicyDecision
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.ledger import Ledger, ledger_path
 from trader.execution.trade.policy import Policy
-from trader.shared.models import SOLANA_MINTS, Order, OrderSide, SwapResult
+from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.paths import policy_file
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
@@ -26,7 +27,9 @@ def _order(side):
 def _fill(gateway, side, account="paper:strategy:abc"):
     intent = make_intent(side=side, account=account)
     gateway.ledger.record_intent(intent, PolicyDecision(True))
-    gateway.ledger.mark_executed(intent.intent_id, SwapResult("sig", USDC, SOL, 1, 2))
+    gateway.ledger.mark_executed(
+        intent.intent_id, ExecutionResult("sig", USDC, SOL, 1, 2)
+    )
     gateway.record_fill(intent.intent_id, _order(OrderSide(side)), Decimal("1"))
     return intent
 

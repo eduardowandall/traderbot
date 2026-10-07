@@ -2886,3 +2886,69 @@ From A6 run 1. No schema change: the refund is an event, like
   round trips. A first attempt stopped 3 s after `connect`, before any
   sweep: the owner has to leave both running for one sweep (~30 s).
   All three exit criteria hold: A6 is done.
+
+#### A7. Perps: decoupling — M (done 2026-10-07)
+ `Venue` protocol (execution stops importing the
+concrete Jupiter provider; `SpotVenue` wraps it); `ExecutionResult` replaces
+`SwapResult` in the gateway and `mark_executed`; `BucketAccount` protocol
+(`AsyncAccount` becomes `SpotAccount`; allocation and reconcile through
+`committed_usd()`/`held()`); `direction` on `TickContext` and `Position`
+(default long) used by the five position blocks and `_track`, tested both
+ways; `canonical_json` leaves out default-valued new fields, with a test
+pinning the ids of `docs/examples/`. Done when the example specs' backtests
+are identical and `tests/test_architecture.py` maps the new modules.
+- **Design (2026-10-07).** No behaviour, schema, wire or spec-id change.
+  - `ExecutionResult` (`trader/execution/models/execution.py`, core) is
+    `SwapResult` renamed and moved out of `shared` (only the trade-runner
+    and the backtest use it). The fields stay, so the `intent_executed`
+    payload and the `signature`/`in_amount`/`out_amount` columns are
+    unchanged; A8 adds the perp part as an optional field.
+  - `Venue` (`trader/execution/models/venue.py`, core, a `Protocol`):
+    `native_fee_reserve`, `balances()`, `token_balance(mint)`,
+    `open(input, output, spend)` and `close(input, output, quantity)`
+    returning an `ExecutionResult`, `fetch_costs(result)` (never raises),
+    `fetch_failed_fees(signatures)`, `send_outcome(sent)`,
+    `close_token_account(mint, announce)`, `aclose()`. `positions()` waits
+    for A10. `SpotVenue` (`trader/execution/trade/venues/spot.py`) wraps an
+    `AsyncJupiterProvider` (kept as `.provider`; `wiring` reads its
+    `jupiter_client` and sets `usd_prices` there). The account,
+    `WalletBalances`, `fills`, the resolver and `TradeService` take a
+    `Venue` (attribute `venue`); a test in `test_architecture.py` keeps
+    `trade/gateway` and `trade/trading_service` from importing
+    `trade/venues`. `wiring` and the backtest wrap their provider.
+  - `BucketAccount` (`trader/execution/models/bucket.py`, core,
+    `Protocol`): what `TradeService` uses of an account (`account_id`, the
+    two mints, `book`, the restored times, `restore_from_ledger()`,
+    `buy()`/`sell()`, `get_spendable_balance()`, `committed()`).
+    `AsyncAccount` becomes `SpotAccount`; `committed()` (the quote spent on
+    the open position, was `_position_cost`) feeds the allocation check.
+    BUY/SELL keep their names (they mean enter/exit, D2). The reconcile
+    stays on the ledger's open positions, which covers buckets no
+    `connect` has opened yet; `held()` comes with A8, when perp positions
+    must leave the wallet reconcile.
+  - `Direction` (`trader/shared/models/direction.py`: `LONG`, `SHORT`, a
+    `sign`). `Position.direction` (default `LONG`) signs
+    `unrealized_pnl`; the wire sends it only when it isn't long, so old
+    peers still talk. `TickContext.direction` comes from the position in
+    `_track`; `peak` is the best price since entry (the max long, the min
+    short); `take_profit`, `trailing_take_profit`, `stop_loss` and
+    `trailing_stop` compare in the favourable direction (`max_hold` has
+    none). Tests run them both ways; long results are unchanged.
+  - Spec ids: a test pins the ids of every file in `docs/examples/`
+    (`ad3606394fc0` has a real bucket). Leaving a default-valued new field
+    out of `canonical_json` lands with the first such field (`market`,
+    A8); A7 adds no spec field.
+  - Checked by replaying every example spec with a tick file
+    (`.data/ticks`, fixed costs and seed) before and after: identical JSON.
+- **Result.** Every example spec with a tick recording (8 of 9; the
+  `NOBODY-USDC` one has none) replays to identical `--json` output before and
+  after (fixed fee, network fee and seed); `serve paper` + `connect` smoke runs
+  bought and sold through `SpotVenue` with no error lines. New tests:
+  `test_direction.py` (the four position blocks and the PnL both ways, the
+  wire), `test_venue_seams.py`, `test_example_ids.py`, and the
+  architecture rule that `trade/gateway` and `trade/trading_service` don't
+  import `trade/venues` (the layer map: `execution` may no longer import
+  `venue`). 829 tests. Left for A8 (from `/simplify`): `TradeService` still
+  builds `SpotAccount`; gateway tests still mock the Jupiter provider through
+  `SpotVenue` (`spot_provider`) instead of a `Venue` mock; `Position.direction`
+  isn't persisted.

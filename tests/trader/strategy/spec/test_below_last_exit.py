@@ -7,11 +7,11 @@ from pathlib import Path
 
 from factories import example_spec, make_intent, make_spec, open_ledger
 
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentSide, PolicyDecision
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import Policy
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
-from trader.shared.models.order import SwapResult
 from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
@@ -102,7 +102,7 @@ def test_the_ledger_restores_the_last_sell_price():
     sell = make_intent(account=account, side=IntentSide.SELL)
     for intent in (buy, sell):
         ledger.record_intent(intent, PolicyDecision(True))
-        ledger.mark_executed(intent.intent_id, SwapResult("s", "a", "b", 1, 1))
+        ledger.mark_executed(intent.intent_id, ExecutionResult("s", "a", "b", 1, 1))
     assert ledger.last_exit_price(account) is None  # venda sem ordem
     order = Order("sell-1", SOL, USDC, Decimal(1), Decimal("101.5"), OrderSide.SELL, T0)
     ledger.attach_order(sell.intent_id, order)

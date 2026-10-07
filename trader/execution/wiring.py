@@ -26,6 +26,7 @@ from trader.execution.trade.venues.paper import (
     SimulatedWallet,
     paper_provider,
 )
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.notification.notification_service import Notifier
 from trader.shared.paths import data_dir
 
@@ -109,5 +110,5 @@ def build_trade_service(
     provider.usd_prices = prices.usd_prices
     gateway = TradeGateway.for_mode(mode, policy)  # política + ledger do modo
     return TradeService(
-        provider, gateway, mode=str(mode), prices=prices, notifier=notifier
+        SpotVenue(provider), gateway, mode=str(mode), prices=prices, notifier=notifier
     )

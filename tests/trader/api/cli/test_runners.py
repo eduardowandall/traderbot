@@ -32,6 +32,7 @@ from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.market import HubMarketData
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.shared.models.costs import TradeCosts
@@ -120,7 +121,7 @@ def _runner(price="100", ledger=None, limits=None, candles=None):
     wallet = SimulatedWallet(initial={"USDC": Decimal(100), "SOL": Decimal(1)})
     gateway = TradeGateway(ledger or open_ledger(), LOOSE, False)
     service = TradeService(
-        paper_provider(wallet, jupiter_client=quotes), gateway, mode="paper"
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)), gateway, mode="paper"
     )
     # o hub responde pela Price API falsa (USDC vale 1 sem perguntar)
     return trade_runner(service, limits, {SOL.mint: Decimal(price)}, candles)

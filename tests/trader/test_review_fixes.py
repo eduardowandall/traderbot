@@ -21,15 +21,17 @@ from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.models.account_data import MintBalance
 from trader.execution.models.errors import SwapRejectedError
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.gateway.balances import WalletBalances
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
-from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position, SwapResult
+from trader.execution.trade.venues.spot import SpotVenue
+from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.shared.models.costs import TradeCosts
 from trader.shared.trading_service.protocol import OrderRequest, TradeServiceError
 from trader.strategy.trading_service.remote import RemoteTradeClient
@@ -57,9 +59,11 @@ async def test_a_sell_rereads_the_wallet():
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("1"))]
     )
     provider.sell = AsyncMock(
-        return_value=SwapResult("s", SOL.mint, USDC.mint, SOL.ui_to_raw("0.5"), 50)
+        return_value=ExecutionResult("s", SOL.mint, USDC.mint, SOL.ui_to_raw("0.5"), 50)
     )
-    account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey, memory_gateway())
+    account = SpotAccount(
+        SpotVenue(provider), USDC.pubkey, SOL.pubkey, memory_gateway()
+    )
     entry = Order(
         "buy", USDC.mint, SOL.mint, Decimal("0.5"), Decimal(100), OrderSide.BUY, T0
     )
@@ -97,7 +101,7 @@ async def test_a_read_that_overlaps_a_fill_is_not_cached():
 
     provider = mock_provider()
     provider.get_account_balance = AsyncMock(side_effect=slow_balances)
-    wallet = WalletBalances(provider)
+    wallet = WalletBalances(SpotVenue(provider))
     pending = asyncio.create_task(wallet.get(USDC.pubkey))
     await asyncio.sleep(0)
     wallet.invalidate()  # um fill de outro bucket, no meio da leitura
@@ -146,7 +150,9 @@ def _paper_service(ledger=None):
     quotes.tick = Tick(T0, Decimal(100))
     wallet = SimulatedWallet(initial={"USDC": Decimal(100), "SOL": Decimal(1)})
     gateway = TradeGateway(ledger or open_ledger(), LOOSE, False)
-    return TradeService(paper_provider(wallet, jupiter_client=quotes), gateway)
+    return TradeService(
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)), gateway
+    )
 
 
 async def test_a_sell_keeps_the_key_it_was_sent_with():

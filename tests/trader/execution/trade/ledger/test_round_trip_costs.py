@@ -10,6 +10,7 @@ from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.trade.ledger.reports import _sell_cost
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.models.costs import RoundTripCosts
 from trader.shared.trading_service.protocol import OrderRequest
@@ -85,7 +86,7 @@ async def test_through_paper_and_the_ledger_in_a_window():
         account_rent_lamports=0,
         slippage_bps=0,
     )
-    service = TradeService(provider, memory_gateway(), mode="paper")
+    service = TradeService(SpotVenue(provider), memory_gateway(), mode="paper")
     quotes.tick = Tick(datetime.now(UTC), Decimal(100))
     await service.open_bucket("b", USDC.mint, SOL.mint)
 

@@ -13,6 +13,7 @@ from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     ACTIVE_STATUSES,
     MOVED_FUNDS_STATUSES,
@@ -34,7 +35,7 @@ from trader.execution.trade.ledger.store import (
     _window,
 )
 from trader.shared.models.costs import PnLResult
-from trader.shared.models.order import Order, SwapResult, order_from_json, order_to_json
+from trader.shared.models.order import Order, order_from_json, order_to_json
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class IntentStore(LedgerStore):
             raise KeyError(f"intenção não encontrada: {intent_id}")
         return IntentStatus(row["status"])
 
-    def mark_executed(self, intent_id: str, result: SwapResult) -> bool:
+    def mark_executed(self, intent_id: str, result: ExecutionResult) -> bool:
         return self._transition(
             intent_id,
             "intent_executed",

@@ -4,11 +4,12 @@ from unittest.mock import AsyncMock
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.ledger import Ledger
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.venues import JupiterQuoteResponse
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.order import order_from_json
 
@@ -79,8 +80,12 @@ def _sol_usdc_account(ledger):
         ],
     )
     gateway = TradeGateway(ledger, Policy(), False)
-    return AsyncAccount(
-        provider, USDC.pubkey, SOL.pubkey, gateway=gateway, account_id="paper:SOL-USDC"
+    return SpotAccount(
+        SpotVenue(provider),
+        USDC.pubkey,
+        SOL.pubkey,
+        gateway=gateway,
+        account_id="paper:SOL-USDC",
     )
 
 

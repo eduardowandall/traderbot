@@ -20,9 +20,10 @@ from decimal import Decimal
 
 from trader.execution.models.book import remainder_entry
 from trader.execution.models.errors import failed_signatures_of
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import TradeIntent
+from trader.execution.models.venue import Venue
 from trader.execution.trade.gateway.gateway import TradeGateway
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.shared.models.costs import (
     LAMPORTS_PER_SOL,
     FailedTxFee,
@@ -30,7 +31,7 @@ from trader.shared.models.costs import (
     TradeCosts,
 )
 from trader.shared.models.mints import SOLANA_MINTS
-from trader.shared.models.order import Order, SwapResult, order_to_json
+from trader.shared.models.order import Order, order_to_json
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ OnFailedFee = Callable[[FailedTxFee], None]
 
 @dataclass(frozen=True)
 class Fill:
-    result: SwapResult
+    result: ExecutionResult
     costs: TradeCosts | None = None  # None: custos desconhecidos
 
     def amounts(self) -> tuple[int, int]:
@@ -56,24 +57,24 @@ class Fill:
 
 async def execute_trade(
     gateway: TradeGateway,
-    provider: AsyncJupiterProvider,
+    venue: Venue,
     intent: TradeIntent,
-    call: Callable[[], Awaitable[SwapResult]],
+    call: Callable[[], Awaitable[ExecutionResult]],
     sol_usd: Decimal | None = None,  # do retrato de antes do trade
     on_failed_fee: OnFailedFee | None = None,
 ) -> Fill:
-    failed = FailedFees(gateway, provider, intent, sol_usd, on_failed_fee)
+    failed = FailedFees(gateway, venue, intent, sol_usd, on_failed_fee)
     try:
         result = await gateway.submit(intent, call)
     except Exception as ex:
         await failed.book(failed_signatures_of(ex))
         raise
-    return await settle(provider, result, failed, result.failed_signatures)
+    return await settle(venue, result, failed, result.failed_signatures)
 
 
 async def settle(
-    provider: AsyncJupiterProvider,
-    result: SwapResult,
+    venue: Venue,
+    result: ExecutionResult,
     fees: FailedFees,
     failed: Sequence[str],
 ) -> Fill:
@@ -82,7 +83,7 @@ async def settle(
     Único caminho até `fetch_swap_costs` (o `execute_trade` e a resolução de
     intenções, A3). **Nunca** levanta.
     """
-    costs = await provider.fetch_swap_costs(result)
+    costs = await venue.fetch_costs(result)
     await fees.book(failed)
     return Fill(result, costs)
 
@@ -134,7 +135,7 @@ def record_leftover(
 @dataclass(frozen=True)
 class FailedFees:
     gateway: TradeGateway
-    provider: AsyncJupiterProvider
+    venue: Venue
     intent: TradeIntent
     sol_usd: Decimal | None
     on_fee: OnFailedFee | None
@@ -155,7 +156,7 @@ class FailedFees:
         self._record(fee)
 
     async def _fee(self, signatures: tuple[str, ...]) -> FailedTxFee:
-        lamports = await self.provider.fetch_failed_fees(signatures)
+        lamports = await self.venue.fetch_failed_fees(signatures)
         usd = None
         if self.sol_usd is not None:
             usd = Decimal(lamports) / LAMPORTS_PER_SOL * self.sol_usd

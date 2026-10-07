@@ -3,14 +3,15 @@ from decimal import Decimal
 import pytest
 from factories import SOL, USDC, make_intent, memory_gateway, mock_provider
 
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus
 from trader.execution.trade.gateway import PolicyDeniedError
 from trader.execution.trade.gateway.fills import Fill, execute_trade
 from trader.execution.trade.policy import Policy
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models.costs import TradeCosts
-from trader.shared.models.order import SwapResult
 
-RESULT = SwapResult("sig", USDC, SOL, in_amount=100, out_amount=7)
+RESULT = ExecutionResult("sig", USDC, SOL, in_amount=100, out_amount=7)
 
 
 async def _swap():
@@ -45,7 +46,7 @@ class TestExecuteTrade:
         provider = mock_provider()
         provider.fetch_swap_costs.side_effect = fetch
 
-        fill = await execute_trade(gateway, provider, intent, _swap)
+        fill = await execute_trade(gateway, SpotVenue(provider), intent, _swap)
 
         assert seen == [IntentStatus.EXECUTED]
         assert fill == Fill(RESULT, costs)
@@ -55,7 +56,7 @@ class TestExecuteTrade:
         provider = mock_provider()
 
         with pytest.raises(PolicyDeniedError):
-            await execute_trade(gateway, provider, make_intent(), _swap)
+            await execute_trade(gateway, SpotVenue(provider), make_intent(), _swap)
 
         provider.fetch_swap_costs.assert_not_awaited()
 
@@ -64,7 +65,9 @@ class TestInMemoryGateway:
     async def test_keeps_idempotency(self):
         gateway = memory_gateway()
         intent = make_intent(key="k")
-        await execute_trade(gateway, mock_provider(), intent, _swap)
+        await execute_trade(gateway, SpotVenue(mock_provider()), intent, _swap)
 
         with pytest.raises(Exception, match="duplicada"):
-            await execute_trade(gateway, mock_provider(), make_intent(key="k"), _swap)
+            await execute_trade(
+                gateway, SpotVenue(mock_provider()), make_intent(key="k"), _swap
+            )

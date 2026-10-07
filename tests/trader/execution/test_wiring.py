@@ -1,5 +1,7 @@
 """`trader/execution/wiring.py`: o modo vira componentes com a política do modo."""
 
+from factories import spot_provider
+
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.venues.paper.executor import SimulatedExecutor
 from trader.execution.wiring import build_trade_service
@@ -12,7 +14,7 @@ async def test_paper_charges_the_priority_fee_cap_of_its_policy():
     )
     service = build_trade_service(RunningMode.PAPER)
     with service.gateway:
-        executor = service.provider.executor
+        executor = spot_provider(service).executor
         assert isinstance(executor, SimulatedExecutor)
         assert executor.priority_fee_lamports == 42_000
         # a mesma política no gateway (carregada uma vez)
@@ -29,5 +31,5 @@ async def test_the_process_oracle_prices_the_service_and_the_quote_check():
     service = build_trade_service(RunningMode.PAPER, prices=oracle)
     with service.gateway:
         assert service.prices is oracle
-        assert service.provider.usd_prices == oracle.usd_prices
+        assert spot_provider(service).usd_prices == oracle.usd_prices
         await service.aclose()

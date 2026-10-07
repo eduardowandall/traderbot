@@ -1,9 +1,8 @@
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum, auto
-from typing import Any
 
 from trader.shared.models.costs import TradeCosts, costs_from_dict
 
@@ -20,24 +19,6 @@ class OrderSignal:
     # por que a estratégia sinalizou (ex: condições que dispararam); vai para
     # o `rationale` da intenção no ledger
     rationale: str | None = None
-
-
-@dataclass
-class SwapResult:
-    """Resultado de um swap executado (valores raw, conforme a quote)."""
-
-    signature: str
-    input_mint: str
-    output_mint: str
-    in_amount: int
-    out_amount: int
-    # custos já conhecidos na execução (paper/backtest); em real são
-    # buscados depois, por `fetch_swap_costs`
-    costs: TradeCosts | None = field(default=None, compare=False)
-    # quote usada (LP fees, impacto)
-    quote: Any = field(default=None, compare=False, repr=False)
-    # tentativas anteriores que a rede confirmou como falhas (taxa paga)
-    failed_signatures: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass

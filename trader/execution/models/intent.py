@@ -1,6 +1,6 @@
 """Intenções de trade: tudo que quer executar um swap passa por aqui.
 
-As estratégias (pelo `AsyncAccount` do bucket) criam um `TradeIntent`.
+As estratégias (pelo `SpotAccount` do bucket) criam um `TradeIntent`.
 A política decide (`PolicyDecision`) e o gateway executa e registra o resultado
 no ledger (`IntentRecord`).
 """
@@ -13,8 +13,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum, auto
 
+from trader.execution.models.execution import ExecutionResult
 from trader.shared.models.mints import SOLANA_MINTS, Mint
-from trader.shared.models.order import SwapResult
 
 
 class IntentSide(StrEnum):
@@ -137,9 +137,9 @@ class SentTx:
     # paper: quando foi aplicada (epoch), para saber se saiu do registro
     sent_at: float | None = None
 
-    def to_result(self) -> SwapResult:
+    def to_result(self) -> ExecutionResult:
         """O resultado do swap, se este envio entrou (valores da quote)."""
-        return SwapResult(
+        return ExecutionResult(
             self.signature,
             self.input_mint,
             self.output_mint,

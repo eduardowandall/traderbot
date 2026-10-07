@@ -9,7 +9,7 @@ from unittest import mock
 
 import httpx
 import pytest
-from factories import example_spec, make_spec
+from factories import example_spec, make_spec, spot_provider
 from typer.testing import CliRunner
 
 import main as main_module
@@ -165,7 +165,7 @@ def test_serve_paper_needs_no_private_key(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert runner.service.mode == "paper"
-    executor = runner.service.provider.executor
+    executor = spot_provider(runner.service).executor
     assert isinstance(executor, SimulatedExecutor)
     usdc = SOLANA_MINTS.get_by_symbol("USDC").mint
     assert executor.wallet.balance(usdc) == Decimal("100")

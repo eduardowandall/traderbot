@@ -1,10 +1,11 @@
-"""`AsyncAccount`: a conta de um bucket (um par, uma posição por vez).
+"""`SpotAccount`: a conta spot de um bucket (A7, um `BucketAccount`).
 
-Cuida do que depende da carteira e do par: saldos (com cache), a reserva de
-SOL para taxas, as intenções de compra e venda e a conversão do fill em
-`Order`. O teto do bucket chega pronto em `buy(limit=...)`, no token de cotação (o
-`TradeService` calcula). A posição e o PnL ficam no `PositionBook`
-(`self.book`, camada core); a execução passa por `execute_trade`.
+Um par, uma posição por vez. Cuida do que depende da carteira e do par:
+saldos (com cache), a reserva de SOL para taxas, as intenções de compra e
+venda e a conversão do fill em `Order`. O teto do bucket chega pronto em
+`buy(limit=...)`, no token de cotação (o `TradeService` calcula). A posição
+e o PnL ficam no `PositionBook` (`self.book`, camada core); a execução passa
+por `execute_trade`, no `Venue` do modo.
 """
 
 import logging
@@ -18,7 +19,9 @@ from solders.pubkey import Pubkey
 
 from trader.execution.market.prices import PriceOracle, usd_snapshot
 from trader.execution.models.book import PositionBook, remainder_entry
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentSide, TradeIntent, with_idempotency_key
+from trader.execution.models.venue import Venue
 from trader.execution.trade.gateway.balances import WalletBalances
 from trader.execution.trade.gateway.fills import (
     Fill,
@@ -27,11 +30,9 @@ from trader.execution.trade.gateway.fills import (
 )
 from trader.execution.trade.gateway.gateway import AccountState, TradeGateway
 from trader.execution.trade.gateway.orders import order_from_fill, priced_mints
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.costs import LAMPORTS_PER_SOL, FailedTxFee
 from trader.shared.models.mints import SOL_MINT
-from trader.shared.models.order import SwapResult
 from trader.shared.models.position import Position
 
 SOL = SOLANA_MINTS[SOL_MINT].pubkey
@@ -54,10 +55,10 @@ class WalletShortfallError(ValueError):
         self.entry_id = entry_id
 
 
-class AsyncAccount:
+class SpotAccount:
     def __init__(
         self,
-        provider: AsyncJupiterProvider,
+        venue: Venue,
         input_mint: Pubkey,
         output_mint: Pubkey,
         gateway: TradeGateway,
@@ -70,7 +71,7 @@ class AsyncAccount:
         # o saldo da carteira, dividido pelos buckets do mesmo serviço
         wallet: WalletBalances | None = None,
     ):
-        self.provider = provider
+        self.venue = venue
         self.prices = prices
         # relógio injetável: no backtest é o tempo do tick, para que
         # `Order.timestamp` (e o `max_hold` das estratégias) sigam o replay
@@ -90,7 +91,7 @@ class AsyncAccount:
         # o que o trade não precifica sozinho (Price API, antes do trade)
         self._priced_mints = priced_mints(self._quote, self._token)
 
-        self.wallet = wallet or WalletBalances(provider, clock)
+        self.wallet = wallet or WalletBalances(venue, clock)
         # do ledger (restore): para a estratégia retomar depois de reiniciar
         self.opened_at: datetime | None = None
         self.last_exit_at: datetime | None = None
@@ -98,6 +99,17 @@ class AsyncAccount:
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.account_id}, {self.book.position})"
+
+    def committed(self) -> Decimal:
+        """O custo da posição aberta no token de cotação (0 sem posição).
+
+        É o que a alocação soma ao saldo livre: o que o bucket já comprou
+        conta pelo que gastou.
+        """
+        position = self.book.position
+        if position is None:
+            return Decimal("0")
+        return position.entry_order.quote_amount or Decimal("0")
 
     # --- saldos ------------------------------------------------------------
 
@@ -110,11 +122,11 @@ class AsyncAccount:
     def _spendable(self, mint: Pubkey, balance: Decimal) -> Decimal:
         """Saldo que pode ser gasto; para SOL desconta a reserva de taxas.
 
-        A reserva é do local de execução (`provider.native_fee_reserve`):
+        A reserva é do local de execução (`venue.native_fee_reserve`):
         0.02 SOL on-chain e em paper, zero no backtest (sem taxas de rede).
         """
         if mint == SOL:
-            balance -= self.provider.native_fee_reserve
+            balance -= self.venue.native_fee_reserve
         return max(balance, Decimal("0"))
 
     # --- estado do ledger --------------------------------------------------
@@ -173,7 +185,7 @@ class AsyncAccount:
     async def _execute_order(
         self,
         intent: TradeIntent,
-        call: Callable[[], Awaitable[SwapResult]],
+        call: Callable[[], Awaitable[ExecutionResult]],
         side: OrderSide,
         price: Decimal,
         usd: dict[str, Decimal],
@@ -186,7 +198,7 @@ class AsyncAccount:
         """
         fill = await execute_trade(
             self.gateway,
-            self.provider,
+            self.venue,
             intent,
             call,
             sol_usd=usd.get(SOL_MINT),
@@ -335,7 +347,7 @@ class AsyncAccount:
         )
         order = await self._execute_order(
             intent,
-            lambda: self.provider.buy(self.input_mint, self.output_mint, spend),
+            lambda: self.venue.open(self.input_mint, self.output_mint, spend),
             OrderSide.BUY,
             price,
             usd,
@@ -387,11 +399,7 @@ class AsyncAccount:
         )
         order = await self._execute_order(
             intent,
-            lambda: self.provider.sell(
-                self.input_mint,
-                self.output_mint,
-                quantity=quantity,
-            ),
+            lambda: self.venue.close(self.input_mint, self.output_mint, quantity),
             OrderSide.SELL,
             price,
             usd,

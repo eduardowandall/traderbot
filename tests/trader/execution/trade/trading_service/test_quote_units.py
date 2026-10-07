@@ -15,6 +15,7 @@ from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.trading_service.protocol import OrderRequest, ReplyStatus
 
@@ -45,7 +46,7 @@ def _service(prices) -> TradeService:
     wallet = SimulatedWallet(initial={"SOL": Decimal(2), "USDC": Decimal(10)})
     gateway = TradeGateway(open_ledger(), LOOSE, False)
     return TradeService(
-        paper_provider(wallet, jupiter_client=quotes),
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)),
         gateway,
         mode="paper",
         clock=lambda: T0,

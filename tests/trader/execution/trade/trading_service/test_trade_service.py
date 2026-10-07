@@ -10,12 +10,14 @@ from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.models.intent import IntentSide
 from trader.execution.trade.gateway import TradeGateway
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import (
     TradeService,
     remaining_budget,
 )
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.trading_service.protocol import OrderRequest, ReplyStatus
 
@@ -52,7 +54,7 @@ class Market:
 def _service(tmp_path, wallet, market, policy=LOOSE, ledger=None):
     provider = paper_provider(wallet, jupiter_client=market.client)
     gateway = TradeGateway(ledger or open_ledger(), policy, False)
-    return TradeService(provider, gateway, mode="paper")
+    return TradeService(SpotVenue(provider), gateway, mode="paper")
 
 
 def _wallet(usdc="100"):
@@ -131,7 +133,8 @@ class TestBudget:
         service = _service(tmp_path, _wallet(), market)
         await _open(service, "jup", JUP, Decimal(20))
         await _open(service, "bonk", BONK, Decimal(20))
-        a, b = service._buckets["jup"].account, service._buckets["bonk"].account
+        a, b = (service._buckets[n].account for n in ("jup", "bonk"))
+        assert isinstance(a, SpotAccount) and isinstance(b, SpotAccount)
         assert a.wallet is b.wallet is service.wallet
         # a compra de um invalida o cache de todos: o outro vê o saldo novo
         assert (await service.submit_order("jup", _buy(market, "0.1"))).filled
@@ -274,7 +277,7 @@ class TestLifecycle:
 
     async def test_open_reads_no_balances_without_positions_or_budget(self):
         provider = mock_provider()
-        service = TradeService(provider, memory_gateway())
+        service = TradeService(SpotVenue(provider), memory_gateway())
         await service.open_bucket("a", USDC.mint, JUP.mint)
         provider.get_account_balance.assert_not_awaited()
 
@@ -366,7 +369,9 @@ class TestSellShortfall:
         messages = Inbox()
         provider = paper_provider(wallet, jupiter_client=market.client)
         gateway = TradeGateway(ledger, LOOSE, False)
-        service = TradeService(provider, gateway, mode="paper", notifier=messages)
+        service = TradeService(
+            SpotVenue(provider), gateway, mode="paper", notifier=messages
+        )
         await _open(service, "a", JUP)
         bought = await service.submit_order("a", _buy(market, "0.1"))
         assert bought.filled and bought.order is not None

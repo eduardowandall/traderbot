@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from trader.shared import indicators as ind
+from trader.shared.models.direction import Direction
 from trader.shared.models.public_data import Interval, TickerData
 from trader.strategy.spec import expr as expr_lang
 
@@ -73,7 +74,9 @@ class TickContext:
     # só com posição aberta
     entry_price: Decimal | None = None
     entry_time: datetime | None = None
+    # o melhor preço desde a entrada, no lado da posição (D3)
     peak: Decimal | None = None
+    direction: Direction = Direction.LONG
     # última saída do bucket (None: nunca saiu, ou preço desconhecido)
     last_exit_at: datetime | None = None
     last_exit_price: Decimal | None = None
@@ -151,17 +154,31 @@ def _expr(c, ctx: TickContext) -> bool:
     return expr_lang.holds(c.tree(), ctx)
 
 
+def _toward(ctx: TickContext, base: Decimal | None, pct: Decimal) -> Decimal | None:
+    """`base` movido `pct`% a favor da posição (contra, com `pct` negativo)."""
+    return _scaled(base, ctx.direction.sign * pct)
+
+
+def _beyond(ctx: TickContext, price: Decimal | None, level: Decimal | None) -> bool:
+    """`price` está em `level` ou além dele a favor da posição."""
+    if price is None or level is None:
+        return False
+    return ctx.direction.sign * (price - level) >= 0
+
+
+def _crossed_back(ctx: TickContext, level: Decimal | None) -> bool:
+    """O preço voltou até `level` contra a posição (caiu comprado, subiu vendido)."""
+    return _beyond(ctx, level, ctx.price)
+
+
 def _take_profit(c, ctx: TickContext) -> bool:
-    target = _scaled(ctx.entry_price, c.pct)
-    return target is not None and ctx.price >= target
+    return _beyond(ctx, ctx.price, _toward(ctx, ctx.entry_price, c.pct))
 
 
 def _trailing_take_profit(c, ctx: TickContext) -> bool:
     # arma quando o pico desde a entrada chega ao alvo; segue armado até vender
-    target = _scaled(ctx.entry_price, c.pct)
-    armed = target is not None and ctx.peak is not None and ctx.peak >= target
-    limit = _scaled(ctx.peak, -c.trail_pct)
-    return armed and limit is not None and ctx.price <= limit
+    armed = _beyond(ctx, ctx.peak, _toward(ctx, ctx.entry_price, c.pct))
+    return armed and _crossed_back(ctx, _toward(ctx, ctx.peak, -c.trail_pct))
 
 
 def _max_hold(c, ctx: TickContext) -> bool:
@@ -171,13 +188,11 @@ def _max_hold(c, ctx: TickContext) -> bool:
 
 
 def _stop_loss(c, ctx: TickContext) -> bool:
-    limit = _scaled(ctx.entry_price, -c.pct)
-    return limit is not None and ctx.price <= limit
+    return _crossed_back(ctx, _toward(ctx, ctx.entry_price, -c.pct))
 
 
 def _trailing_stop(c, ctx: TickContext) -> bool:
-    limit = _scaled(ctx.peak, -c.pct)
-    return limit is not None and ctx.price <= limit
+    return _crossed_back(ctx, _toward(ctx, ctx.peak, -c.pct))
 
 
 PREDICATES: dict[str, Callable[[Any, TickContext], bool]] = {

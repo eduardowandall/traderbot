@@ -7,11 +7,12 @@ import pytest
 
 from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.models.errors import SwapRejectedError
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import TxOutcome
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.execution.wiring import build_provider
-from trader.shared.models import SOLANA_MINTS, SwapResult
+from trader.shared.models import SOLANA_MINTS
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
@@ -25,7 +26,7 @@ class Recorder:
 
     async def execute(self, input_mint, output_mint, quote):
         self.executed.append(quote)
-        return SwapResult(
+        return ExecutionResult(
             "sig", input_mint, output_mint, int(quote.inAmount), int(quote.outAmount)
         )
 

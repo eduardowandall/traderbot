@@ -8,6 +8,7 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from trader.execution.models.intent import IntentSide, TradeIntent
 from trader.execution.trade.ledger import Ledger
@@ -71,13 +72,13 @@ def make_order(
 
 def record_executed(ledger: Ledger, intent: TradeIntent, order=None, realized=None):
     """Grava `intent` como executada (e a ordem, com PnL em vendas)."""
+    from trader.execution.models.execution import ExecutionResult
     from trader.execution.models.intent import PolicyDecision
-    from trader.shared.models import SwapResult
 
     ledger.record_intent(intent, PolicyDecision(True))
     ledger.mark_executed(
         intent.intent_id,
-        SwapResult(
+        ExecutionResult(
             f"sig-{intent.intent_id}", intent.spend_mint, intent.receive_mint, 1, 2
         ),
     )
@@ -240,6 +241,15 @@ def bonk_quote():
     return JupiterQuoteResponse.single_route(
         USDC, 50_000_000, BONK, 5_000_000, price_impact_pct="0.005"
     )
+
+
+def spot_provider(owner) -> Any:
+    """O provider (um mock, nos testes) no `SpotVenue` de uma conta ou serviço (A7)."""
+    from trader.execution.trade.venues.spot import SpotVenue
+
+    venue = owner.venue
+    assert isinstance(venue, SpotVenue)
+    return venue.provider
 
 
 def mock_provider(**attrs):

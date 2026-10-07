@@ -7,7 +7,7 @@ from factories import memory_gateway
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.execution.models.intent import SentTx, TxOutcome
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.venues import JupiterQuoteResponse
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import SwapRejectedError
 from trader.execution.trade.venues.paper import (
@@ -19,6 +19,7 @@ from trader.execution.trade.venues.paper import (
 from trader.execution.trade.venues.paper import wallet as wallet_module
 from trader.execution.trade.venues.paper.executor import DEFAULT_FEE_LAMPORTS
 from trader.execution.trade.venues.paper.wallet import APPLIED_LOG_SIZE
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -154,7 +155,7 @@ class TestPaperProvider:
         await provider.aclose()  # não falha
 
     async def test_full_round_trip_through_account(self):
-        # compra e venda pelo AsyncAccount: em paper a venda funciona (em dry
+        # compra e venda pelo SpotAccount: em paper a venda funciona (em dry
         # falhava porque a carteira real não tinha o token)
         wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
         client = AsyncMock(spec=AsyncJupiterClient)
@@ -165,7 +166,9 @@ class TestPaperProvider:
             ]
         )
         provider = paper_provider(wallet, jupiter_client=client)
-        account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey, memory_gateway())
+        account = SpotAccount(
+            SpotVenue(provider), USDC.pubkey, SOL.pubkey, memory_gateway()
+        )
 
         await account.buy(Decimal("100"), Decimal("0.1"))
         await account.sell(Decimal("110"), Decimal("0.1"))

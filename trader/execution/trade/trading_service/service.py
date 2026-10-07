@@ -1,6 +1,7 @@
 """`TradeService`: executa ordens de estratégias, cada uma no seu bucket.
 
-Camada de execução. Um bucket é uma conta lógica (`AsyncAccount`) com
+Camada de execução. Um bucket é uma conta lógica (`BucketAccount`; hoje o
+`SpotAccount`) com
 `account_id = "<modo>:<nome>"` (o ledger já separa posição e PnL por conta)
 e, opcionalmente, um orçamento em USD:
 
@@ -30,21 +31,22 @@ from functools import partial
 from solders.pubkey import Pubkey
 
 from trader.execution.market.prices import PriceOracle, usd_snapshot
+from trader.execution.models.bucket import BucketAccount
 from trader.execution.models.errors import (
     SwapRejectedError,
     TransactionFailedOnChainError,
 )
 from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.models.rent import RENT_REFUND, RENT_REFUND_SENT, RentRefund
+from trader.execution.models.venue import Venue
 from trader.execution.trade.gateway import (
     DuplicateIntentError,
     PolicyDeniedError,
     TradeGateway,
 )
-from trader.execution.trade.gateway.account import AsyncAccount, WalletShortfallError
+from trader.execution.trade.gateway.account import SpotAccount, WalletShortfallError
 from trader.execution.trade.gateway.balances import WalletBalances
 from trader.execution.trade.gateway.resolve import IntentResolver
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.mints import SOL_MINT
 from trader.shared.notification.notification_service import (
@@ -67,7 +69,7 @@ RECONCILE_TOLERANCE = Decimal("0.99")
 
 @dataclass
 class _Bucket:
-    account: AsyncAccount
+    account: BucketAccount
     budget_usd: Decimal | None
     status: BucketStatus = BucketStatus.ACTIVE
     # prejuízo realizado que encerra o bucket (o `max_loss_usd` da spec)
@@ -87,7 +89,7 @@ def remaining_budget(budget_usd: Decimal, realized_usd: Decimal) -> Decimal:
 class TradeService:
     def __init__(
         self,
-        provider: AsyncJupiterProvider,
+        venue: Venue,
         gateway: TradeGateway,
         mode: str | None = None,
         clock: Callable[[], datetime] = partial(datetime.now, UTC),
@@ -96,14 +98,14 @@ class TradeService:
         # avisos ao dono (Telegram, no `serve`); o padrão não envia nada
         notifier: Notifier | None = None,
     ):
-        self.provider = provider
+        self.venue = venue
         self.notifier = notifier or NotificationService()
         self.prices = prices
         # no backtest, `TradeGateway.in_memory()`
         self.gateway = gateway
         self.mode = mode
         self.clock = clock
-        self.wallet = WalletBalances(provider, clock)
+        self.wallet = WalletBalances(venue, clock)
         self._buckets: dict[str, _Bucket] = {}
         self._lock = asyncio.Lock()
         # tokens com menos na carteira do que as posições do ledger
@@ -111,7 +113,7 @@ class TradeService:
         self._reconciled = False
         # (conta, entrada) cuja venda a carteira não cobriu: um aviso só
         self._shortfalls: set[tuple[str, str]] = set()
-        self._resolver = IntentResolver(gateway, provider, prices)
+        self._resolver = IntentResolver(gateway, venue, prices)
 
     def account_id(self, name: str) -> str:
         return self._prefix + name
@@ -137,8 +139,8 @@ class TradeService:
         """
         if name in self._buckets:
             raise ValueError(f"bucket {name} já está aberto")
-        account = AsyncAccount(
-            self.provider,
+        account = SpotAccount(
+            self.venue,
             Pubkey.from_string(input_mint),
             Pubkey.from_string(output_mint),
             gateway=self.gateway,
@@ -219,7 +221,7 @@ class TradeService:
             if b.account.input_mint == quote and b.budget_usd is not None
         ]
         allocated = sum((self._cap(b) or ZERO for b in same), ZERO)
-        held = sum((_position_cost(b) for b in same), ZERO)
+        held = sum((b.account.committed() for b in same), ZERO)
         free = await new.account.get_spendable_balance(quote)
         quote_usd = await self.quote_usd(quote)
         if quote_usd is None:
@@ -371,7 +373,7 @@ class TradeService:
             limit=cap,
         )
 
-    async def _sell(self, account: AsyncAccount, request: OrderRequest) -> Order:
+    async def _sell(self, account: BucketAccount, request: OrderRequest) -> Order:
         try:
             return await account.sell(
                 request.price,
@@ -383,7 +385,7 @@ class TradeService:
             self._shortfall(account, ex)
             raise
 
-    def _shortfall(self, account: AsyncAccount, ex: WalletShortfallError) -> None:
+    def _shortfall(self, account: BucketAccount, ex: WalletShortfallError) -> None:
         """Venda recusada por falta na carteira: bloqueia compras e avisa uma vez.
 
         A estratégia continua pedindo a venda; ela passa quando o token voltar.
@@ -476,13 +478,13 @@ class TradeService:
     async def _close(self, payer: str, mint: str) -> RentRefund | None:
         """Fecha e registra; uma transação que a rede recusou registra a taxa."""
         try:
-            refund = await self.provider.close_token_account(
+            refund = await self.venue.close_token_account(
                 mint, partial(self._announce_close, payer)
             )
         except TransactionFailedOnChainError as ex:
             # a conta continua aberta: só a taxa foi paga
             signature = ex.signature or ""
-            fee = await self.provider.fetch_failed_fees([signature])
+            fee = await self.venue.fetch_failed_fees([signature])
             refund = RentRefund(signature, mint, 0, fee)
         if refund is not None:
             await self._record_refund(payer, refund)
@@ -528,31 +530,24 @@ class TradeService:
 
     async def _resolve_close(self, sent: dict) -> None:
         tx = SentTx(**{f.name: sent[f.name] for f in fields(SentTx)})
-        outcome = await self.provider.send_outcome(tx)
+        outcome = await self.venue.send_outcome(tx)
         if outcome == TxOutcome.PENDING:
             return
         expired = outcome == TxOutcome.EXPIRED
-        fee = 0 if expired else await self.provider.fetch_failed_fees([tx.signature])
+        fee = 0 if expired else await self.venue.fetch_failed_fees([tx.signature])
         rent = tx.out_amount if outcome == TxOutcome.LANDED else 0
         await self._record_refund(
             sent["account"], RentRefund(tx.signature, tx.input_mint, rent, fee)
         )
 
     async def aclose(self) -> None:
-        await self.provider.aclose()
+        await self.venue.aclose()
 
 
 def _retired_flat(bucket: _Bucket) -> bool:
     return (
         bucket.status == BucketStatus.RETIRING and bucket.account.book.position is None
     )
-
-
-def _position_cost(bucket: _Bucket) -> Decimal:
-    position = bucket.account.book.position
-    if position is None:
-        return ZERO
-    return position.entry_order.quote_amount or ZERO
 
 
 def _reasons(ex: PolicyDeniedError | DuplicateIntentError) -> tuple[str, ...]:

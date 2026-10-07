@@ -165,6 +165,13 @@ command to run in a terminal. The rules are tested in
 - **One strategy type**: the bot and the backtester take the `Strategy` protocol
   (`trader/strategy/bot/config.py`), which `SpecStrategy` implements, and share one
   per-tick decision (`trader/strategy/bot/decision.py`).
+- **One seam to the venue** (A7): `trade/gateway` and `trade/trading_service`
+  take a `Venue` (`trader/execution/models/venue.py`; today `SpotVenue` around
+  the Jupiter provider, built in `wiring`/the backtest) and accounts are
+  `BucketAccount`s (`SpotAccount`); they never import `trade/venues` (tested).
+  Tests reach the mock provider with `spot_provider(...)` (`tests/factories.py`).
+  The ids of `docs/examples/` are pinned (`test_example_ids.py`): a new spec
+  field with a default must stay out of `canonical_json`.
 - **One path to a swap**: `TradeGateway.submit` (idempotency -> policy -> ledger
   -> execute), called only by `trader/execution/trade/gateway/fills.py::execute_trade`.
 - **Before a real swap is sent** (B7): the quote must be within 2% of the Price
@@ -175,7 +182,7 @@ command to run in a terminal. The rules are tested in
   `inAmount`. Both refusals are `SwapRejectedError`s. Test fakes of the RPC
   need `inspection_passes()` from `tests/factories.py`.
 - **Nothing raises after EXECUTED**: `fills.settle` (from `execute_trade` and
-  the A3 resolver) is the only caller of `provider.fetch_swap_costs` (never
+  the A3 resolver) is the only caller of `Venue.fetch_costs` (never
   raises), fills are written with `record_fill_safely`, build orders with
   `order_from_fill` (falls back to the quote), `record_fill` failures are
   logged. Nothing that can fail after confirmation goes inside `_do_swap`.

@@ -5,10 +5,10 @@ from decimal import Decimal
 
 from factories import make_intent, make_spec, open_ledger
 
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentSide, PolicyDecision
 from trader.shared.indicators import BarSeries
 from trader.shared.models import Interval
-from trader.shared.models.order import SwapResult
 from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
@@ -33,7 +33,7 @@ def test_the_ledger_reports_when_an_account_opened_and_last_exited():
     sell = make_intent(account="paper:strategy:x", side=IntentSide.SELL)
     for intent in (buy, sell):
         ledger.record_intent(intent, PolicyDecision(True))
-        ledger.mark_executed(intent.intent_id, SwapResult("s", "a", "b", 1, 1))
+        ledger.mark_executed(intent.intent_id, ExecutionResult("s", "a", "b", 1, 1))
 
     opened, exited = ledger.account_times("paper:strategy:x")
 

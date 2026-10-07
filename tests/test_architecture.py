@@ -25,7 +25,8 @@ ALLOWED: dict[str, set[str]] = {
     "market": {"core", "market"},
     "venue": {"core", "market", "venue"},
     "risk": {"core", "risk"},
-    "execution": {"core", "market", "venue", "risk", "execution"},
+    # só o protocolo `Venue` (core, A7): o local concreto vem de quem monta
+    "execution": {"core", "market", "risk", "execution"},
     "strategy-side": {"core", "strategy", "market", "strategy-side"},
     "app": set(),  # composição: pode importar tudo (tratado em `_allowed`)
 }
@@ -210,6 +211,9 @@ def test_layer_checker_catches_a_forbidden_import():
         "trader.execution.trade.ledger",
         "trader.execution.trade.venues.jupiter.async_jupiter_svc",
     }
-    assert _forbidden("trader.execution.trade.gateway.account", source) == set()
+    # a execução importa o ledger (risk), mas não um venue concreto (A7)
+    assert _forbidden("trader.execution.trade.gateway.account", source) == {
+        "trader.execution.trade.venues.jupiter.async_jupiter_svc",
+    }
     assert layer_of("trader.shared.trading_service.protocol") == "core"
     assert layer_of("trader.execution.trade.trading_service.service") == "execution"

@@ -9,19 +9,23 @@ import pytest
 from factories import make_intent, memory_gateway, mock_provider
 
 from trader.execution.models.account_data import MintBalance
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus
 from trader.execution.trade.gateway import PolicyDeniedError
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.gateway.fills import Fill
 from trader.execution.trade.gateway.orders import order_from_fill
-from trader.shared.models import SOLANA_MINTS, OrderSide, SwapResult
+from trader.execution.trade.venues.spot import SpotVenue
+from trader.shared.models import SOLANA_MINTS, OrderSide
 from trader.shared.models.costs import QUOTE, TradeCosts
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
 JUP = SOLANA_MINTS.get_by_symbol("JUP")
 T0 = datetime(2026, 9, 1, 12, 0)
-BUY = SwapResult("sig", USDC.mint, SOL.mint, USDC.ui_to_raw("150"), SOL.ui_to_raw("1"))
+BUY = ExecutionResult(
+    "sig", USDC.mint, SOL.mint, USDC.ui_to_raw("150"), SOL.ui_to_raw("1")
+)
 
 
 class TestOrderFromFill:
@@ -34,7 +38,7 @@ class TestOrderFromFill:
         assert order.quote_amount == Decimal("150")
 
     def test_nothing_valid_still_never_raises(self, caplog):
-        empty = SwapResult("sig", USDC.mint, SOL.mint, 0, 0)
+        empty = ExecutionResult("sig", USDC.mint, SOL.mint, 0, 0)
 
         with caplog.at_level(logging.ERROR):
             order = order_from_fill(Fill(empty), USDC, SOL, OrderSide.BUY, T0)
@@ -43,7 +47,9 @@ class TestOrderFromFill:
         assert "Fill sem quantidade" in caplog.text
 
     def test_a_sell_keeps_the_pair_convention(self):
-        sell = SwapResult("s", SOL.mint, USDC.mint, SOL.ui_to_raw("1"), 160_000_000)
+        sell = ExecutionResult(
+            "s", SOL.mint, USDC.mint, SOL.ui_to_raw("1"), 160_000_000
+        )
 
         order = order_from_fill(Fill(sell), USDC, SOL, OrderSide.SELL, T0)
 
@@ -62,7 +68,9 @@ def _account(gateway):
     )
     provider.buy = AsyncMock(return_value=BUY)
     provider.fetch_swap_costs = AsyncMock(return_value=TradeCosts(source=QUOTE))
-    return AsyncAccount(provider, USDC.pubkey, SOL.pubkey, gateway, account_id="t")
+    return SpotAccount(
+        SpotVenue(provider), USDC.pubkey, SOL.pubkey, gateway, account_id="t"
+    )
 
 
 class TestAccountSurvivesALostWrite:

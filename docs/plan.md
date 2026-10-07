@@ -33,7 +33,7 @@ it before the code. Track progress in §5, record decisions in §9.
 ## 2. Where we are
 
 **Overall: about 94%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
-and goal 6 is scored on its own so a new goal doesn't hide progress). 780
+and goal 6 is scored on its own so a new goal doesn't hide progress). 829
 tests. The first real run (A6, 2026-10-06/07) is done: 5 JUP-SOL round
 trips on a ~5 USD wallet, nothing UNCONFIRMED or failed, costs at or below
 the backtest's, and the token account's rent refunded at retirement.
@@ -45,7 +45,7 @@ the backtest's, and the token account's rent refunded at retirement.
 | 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up (across candle gaps), re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | No crossovers | **90%** |
 | 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | Nothing planned: one wallet is the decision (2026-10-07) | **95%** |
 | 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included | Replays ignore rent | **96%** |
-| 6. Perps | Research, venue choice and design (§8) | Everything else (A7–A12) | **5%** |
+| 6. Perps | Research, venue choice and design (§8); the seams (A7: `Venue`, `BucketAccount`, `ExecutionResult`, direction-aware position blocks, pinned spec ids) | Everything else (A8–A12) | **15%** |
 | (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking and resolution, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | A service entrypoint | **95%** |
 
 ## 3. Principles and decisions that stand
@@ -79,21 +79,15 @@ In order. Each item ships on its own with the suite green (`/check`). Size:
 **S** under an hour, **M** several modules, **L** a design change.
 
 ### A7–A12. Perps
-The design is in §8. A7 changes no behaviour and no schema; A8 bumps the
-ledger schema, so it waits for the end of a paper soak.
+The design is in §8. A7 (the seams, done 2026-10-07) is in `history.md`; A8
+bumps the ledger schema, so it waits for the end of a paper soak.
 
-- **A7. Decoupling — M.** `Venue` protocol (execution stops importing the
-  concrete Jupiter provider; `SpotVenue` wraps it); `ExecutionResult` replaces
-  `SwapResult` in the gateway and `mark_executed`; `BucketAccount` protocol
-  (`AsyncAccount` becomes `SpotAccount`; allocation and reconcile through
-  `committed_usd()`/`held()`); `direction` on `TickContext` and `Position`
-  (default long) used by the five position blocks and `_track`, tested both
-  ways; `canonical_json` leaves out default-valued new fields, with a test
-  pinning the ids of `docs/examples/`. Done when the example specs' backtests
-  are identical and `tests/test_architecture.py` maps the new modules.
 - **A8. Perp model, paper and spec — L.** The `market` block (+ `specs.md`)
   checked against the policy at `hello`; `PerpTerms`, `PerpPosition`,
-  `PerpAccount`; ledger schema +1 (D6) and restore of an open perp position;
+  `PerpAccount` (a `BucketAccount`, A7; the wallet reconcile leaves perp
+  positions out, through a `held()` on the protocol; `TradeService` gets
+  the account kind from the venue instead of building a `SpotAccount`, and
+  the direction is stored with the entry, not only on `Position`); ledger schema +1 (D6) and restore of an open perp position;
   `SimulatedPerpsVenue` and the liquidation check in `serve`'s sweep; policy
   `perps_enabled`, `max_leverage` (default 3), `allowed_perp_markets`,
   exposure as notional; the daily report and notifications show direction,
@@ -135,7 +129,7 @@ ledger schema, so it waits for the end of a paper soak.
 | A14 Replay fills like live fills | done | 2026-10-05; in `history.md` |
 | A6 First real run | done | 2026-10-07; in `history.md` (run 1 findings -> A15; run 2 clean; rent refunded at expiry) |
 | A15 First real run fixes | done | 2026-10-06; in `history.md` |
-| A7 Perps: decoupling | open | |
+| A7 Perps: decoupling | done | 2026-10-07; in `history.md` |
 | A8 Perps: model, paper, spec | open | Schema bump; after a soak |
 | A9 Perps: backtest | open | |
 | A10 Perps: Jupiter read-only | open | Any time after A7 |
@@ -283,7 +277,10 @@ and the process split.
 | C6 | Paper and replays simulate a wallet of tokens | `trade/venues/paper/`, `trader/backtest/replay.py` | Inherent: needs a margin engine | M |
 | C7 | Spec has no direction or leverage; a new field with a default changes every spec id | `strategy/spec/models.py` | Accidental for the id | S |
 
-Total: roughly the size of the old B3 + B2 + B5 together.
+Total: roughly the size of the old B3 + B2 + B5 together. **After A7:** C1
+is gone (execution sees only `Venue`), C2 is split behind `BucketAccount`,
+C4 has its direction, C7 has pinned ids; C3, C5, C6 and the `market` field
+are A8's.
 
 ### 8.5 Decisions (D1–D11)
 - **D1. Venue:** Jupiter Perps, SOL first, then ETH and wBTC.

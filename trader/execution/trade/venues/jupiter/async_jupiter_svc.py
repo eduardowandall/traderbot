@@ -35,12 +35,13 @@ from trader.execution.models.errors import SwapRejectedError as SwapRejectedErro
 from trader.execution.models.errors import (
     TransactionSubmittedError as TransactionSubmittedError,
 )
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.models.rent import RentRefund
 from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.executor import Executor, OnChainExecutor
 from trader.execution.trade.venues.jupiter.swap_costs import quote_info
-from trader.shared.models import SOLANA_MINTS, SwapResult
+from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import (
     BASE_FEE_LAMPORTS,
     QUOTE,
@@ -147,7 +148,7 @@ class AsyncJupiterProvider[E: Executor]:
         output_mint: Pubkey,
         spend_amount: Decimal,
         slippage_bps: int = 50,
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         """Gasta `spend_amount` (unidades de UI do input_mint) comprando o output."""
         raw_quantity = SOLANA_MINTS[input_mint].ui_to_raw(spend_amount)
         return await self.swap_with_details(
@@ -163,7 +164,7 @@ class AsyncJupiterProvider[E: Executor]:
         output_mint: Pubkey,
         quantity: Decimal,
         slippage_bps: int = 50,
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         # venda gasta o output_mint: a conversão usa os decimais dele
         raw_quantity = SOLANA_MINTS[output_mint].ui_to_raw(quantity)
         # venda inverte os mints; sem preço independente, a saída segue
@@ -189,7 +190,7 @@ class AsyncJupiterProvider[E: Executor]:
         slippage_bps: int = 50,
         *,
         fail_closed: bool = True,
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         """As tentativas, com as transações que falharam na rede anotadas.
 
         Elas vão no resultado (`failed_signatures`) ou no erro que encerra as
@@ -220,7 +221,7 @@ class AsyncJupiterProvider[E: Executor]:
         failed: list[str],
         *,
         fail_closed: bool,
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         last_error: Exception | None = None
         deadline = time.monotonic() + SWAP_DEADLINE_SECONDS
         for attempt, slippage in enumerate(self._retry_slippages(slippage_bps)):
@@ -290,7 +291,7 @@ class AsyncJupiterProvider[E: Executor]:
         slippage_bps: int,
         *,
         fail_closed: bool,
-    ) -> SwapResult:
+    ) -> ExecutionResult:
         quote = await self._get_quote_with_route(
             input_mint, output_mint, amount_in, slippage_bps
         )
@@ -335,7 +336,7 @@ class AsyncJupiterProvider[E: Executor]:
             return None
         return (1 - out_usd / in_usd) * 100 if in_usd > 0 else None
 
-    async def fetch_swap_costs(self, result: SwapResult) -> TradeCosts:
+    async def fetch_swap_costs(self, result: ExecutionResult) -> TradeCosts:
         """Custos reais do swap. **Nunca** levanta exceção.
 
         O swap já foi executado: qualquer falha aqui só pode degradar para
@@ -393,7 +394,7 @@ class AsyncJupiterProvider[E: Executor]:
                 self.logger.warning(f"Erro ao fechar {client!r}: {ex}")
 
 
-def _with_quote_info(costs: TradeCosts, result: SwapResult) -> TradeCosts:
+def _with_quote_info(costs: TradeCosts, result: ExecutionResult) -> TradeCosts:
     """Acrescenta os informativos da quote (LP fees, impacto, saída cotada)."""
     quoted_out = int(result.quote.outAmount) if result.quote else result.out_amount
     return replace(costs, quoted_out_amount=quoted_out, **quote_info(result.quote))

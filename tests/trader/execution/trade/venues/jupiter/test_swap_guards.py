@@ -6,13 +6,13 @@ from factories import inspection_passes
 from solders.keypair import Keypair
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.trade.venues import JupiterQuoteResponse
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
     AsyncJupiterProvider,
     SwapRejectedError,
 )
 from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
-from trader.shared.models import SwapResult
 
 
 def _quote(price_impact_pct="0.001"):
@@ -91,7 +91,7 @@ async def test_do_swap_returns_quote_amounts():
 
     result = await provider._do_swap("in", "out", 1000, 50, fail_closed=True)
 
-    assert result == SwapResult("sig", "in", "out", 1000, 990)
+    assert result == ExecutionResult("sig", "in", "out", 1000, 990)
 
 
 async def test_aclose_closes_all_clients_even_if_one_fails():

@@ -3,7 +3,7 @@ Módulo de modelos de dados da API Jupiter.
 """
 
 from .mints import SOLANA_MINTS, Mint
-from .order import Order, OrderSide, OrderSignal, SwapResult
+from .order import Order, OrderSide, OrderSignal
 from .position import Position
 from .public_data import Interval, TickerData
 
@@ -13,7 +13,6 @@ __all__ = [
     "Order",
     "OrderSignal",
     "OrderSide",
-    "SwapResult",
     "Position",
     # Mints
     "Mint",

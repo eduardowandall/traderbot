@@ -12,9 +12,10 @@ from solders.signature import Signature
 from solders.solders import SendTransactionResp
 
 from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.ledger import Ledger
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.venues import JupiterQuoteResponse
@@ -25,6 +26,7 @@ from trader.execution.trade.venues.jupiter.swap_costs import (
     parse_swap_costs,
     quote_info,
 )
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.shared.models.costs import (
     ONCHAIN,
@@ -34,7 +36,6 @@ from trader.shared.models.costs import (
     describe_costs,
     trade_rates,
 )
-from trader.shared.models.order import SwapResult
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
@@ -237,7 +238,7 @@ def _provider():
 
 def _result(**kwargs):
     quote = JupiterQuoteResponse.single_route(USDC.mint, 10, SOL.mint, 7)
-    return SwapResult("sig", USDC.mint, SOL.mint, 10, 7, quote=quote, **kwargs)
+    return ExecutionResult("sig", USDC.mint, SOL.mint, 10, 7, quote=quote, **kwargs)
 
 
 class TestFetchSwapCosts:
@@ -290,8 +291,12 @@ class TestFetchSwapCosts:
         )
         ledger = Ledger()
         gateway = TradeGateway(ledger, Policy(), False)
-        account = AsyncAccount(
-            provider, USDC.pubkey, SOL.pubkey, gateway=gateway, account_id="t"
+        account = SpotAccount(
+            SpotVenue(provider),
+            USDC.pubkey,
+            SOL.pubkey,
+            gateway=gateway,
+            account_id="t",
         )
 
         order = await account.buy(Decimal("100"), Decimal("0.1"))

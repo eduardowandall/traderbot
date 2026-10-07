@@ -21,6 +21,7 @@ from functools import partial
 
 from trader.execution.models.book import remainder_entry
 from trader.execution.models.errors import SwapRejectedError, TransactionSubmittedError
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     IntentRecord,
     IntentSide,
@@ -37,7 +38,7 @@ from trader.execution.trade.policy import (
     send_refusals,
 )
 from trader.shared.models.costs import FailedTxFee, PnLResult
-from trader.shared.models.order import Order, OrderSide, SwapResult, order_from_json
+from trader.shared.models.order import Order, OrderSide, order_from_json
 
 logger = logging.getLogger(__name__)
 
@@ -259,8 +260,8 @@ class TradeGateway:
     async def submit(
         self,
         intent: TradeIntent,
-        execute: Callable[[], Awaitable[SwapResult]],
-    ) -> SwapResult:
+        execute: Callable[[], Awaitable[ExecutionResult]],
+    ) -> ExecutionResult:
         self._authorize(intent)
         result = await self._execute(intent, execute)
         try:
@@ -299,8 +300,8 @@ class TradeGateway:
     async def _execute(
         self,
         intent: TradeIntent,
-        execute: Callable[[], Awaitable[SwapResult]],
-    ) -> SwapResult:
+        execute: Callable[[], Awaitable[ExecutionResult]],
+    ) -> ExecutionResult:
         """Executa e registra falhas; o sucesso é registrado por `submit`.
 
         Durante a execução, cada envio é gravado antes de acontecer

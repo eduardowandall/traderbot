@@ -11,11 +11,12 @@ from factories import memory_gateway, mock_provider
 from solana.exceptions import SolanaRpcException
 
 from trader.execution.models.account_data import MintBalance
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.venues.jupiter.async_rpc_client import (
     AsyncRPCClient,
     is_transient,
 )
+from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -108,7 +109,9 @@ class TestAccountNeverTradesOnAFailedRead:
         provider.get_account_balance = AsyncMock(
             side_effect=[OSError("RPC fora"), good]
         )
-        account = AsyncAccount(provider, USDC.pubkey, SOL.pubkey, memory_gateway())
+        account = SpotAccount(
+            SpotVenue(provider), USDC.pubkey, SOL.pubkey, memory_gateway()
+        )
 
         with pytest.raises(OSError):
             await account.get_balance(USDC.pubkey)

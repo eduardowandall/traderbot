@@ -4,9 +4,10 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import make_intent, mock_provider, open_ledger
+from factories import make_intent, mock_provider, open_ledger, spot_provider
 
 from trader.execution.models.account_data import MintBalance
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     IntentRecord,
     IntentSide,
@@ -19,16 +20,17 @@ from trader.execution.trade.gateway import (
     PolicyDeniedError,
     TradeGateway,
 )
-from trader.execution.trade.gateway.account import AsyncAccount
+from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
     TransactionSubmittedError,
 )
-from trader.shared.models import SOLANA_MINTS, Order, OrderSide, SwapResult
+from trader.execution.trade.venues.spot import SpotVenue
+from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
-RESULT = SwapResult("sig", USDC.mint, SOL.mint, 10_000_000, 100_000_000)
+RESULT = ExecutionResult("sig", USDC.mint, SOL.mint, 10_000_000, 100_000_000)
 
 
 def _gateway(tmp_path, policy=None, real_mode=False):
@@ -137,7 +139,7 @@ class TestSubmit:
         assert await restarted.submit(make_intent(), AsyncMock(return_value=RESULT))
 
 
-# --- integração com AsyncAccount -------------------------------------------------
+# --- integração com SpotAccount -------------------------------------------------
 
 
 def _account(gateway, usdc="1000", sol="1"):
@@ -149,17 +151,21 @@ def _account(gateway, usdc="1000", sol="1"):
         ]
     )
     provider.buy = AsyncMock(
-        return_value=SwapResult(
+        return_value=ExecutionResult(
             "buy-sig", USDC.mint, SOL.mint, USDC.ui_to_raw("10"), SOL.ui_to_raw("0.1")
         )
     )
     provider.sell = AsyncMock(
-        return_value=SwapResult(
+        return_value=ExecutionResult(
             "sell-sig", SOL.mint, USDC.mint, SOL.ui_to_raw("0.1"), USDC.ui_to_raw("11")
         )
     )
-    return AsyncAccount(
-        provider, USDC.pubkey, SOL.pubkey, gateway=gateway, account_id="paper:SOL-USDC"
+    return SpotAccount(
+        SpotVenue(provider),
+        USDC.pubkey,
+        SOL.pubkey,
+        gateway=gateway,
+        account_id="paper:SOL-USDC",
     )
 
 
@@ -187,7 +193,7 @@ class TestAccountWithGateway:
             await account.buy(Decimal("100"), Decimal("0.1"))
 
         assert account.book.position is None
-        account.provider.buy.assert_not_awaited()  # type: ignore[attr-defined]
+        spot_provider(account).buy.assert_not_awaited()
 
     async def test_restart_restores_open_position_and_pnl(self, tmp_path):
         gateway = _gateway(tmp_path)
@@ -228,7 +234,7 @@ class TestAccountWithGateway:
         entry.exit_order = None
         with pytest.raises(DuplicateIntentError):
             await account.sell(Decimal("110"), Decimal("0.1"))
-        assert account.provider.sell.await_count == 1  # type: ignore[attr-defined]
+        assert spot_provider(account).sell.await_count == 1
 
 
 def test_order_timestamp_is_preserved_by_restore(tmp_path):
@@ -246,8 +252,8 @@ def test_order_timestamp_is_preserved_by_restore(tmp_path):
     ledger.record_intent(intent, PolicyDecision(True))
     ledger.mark_executed(intent.intent_id, RESULT)
     ledger.attach_order(intent.intent_id, order)
-    account = AsyncAccount(
-        mock_provider(),
+    account = SpotAccount(
+        SpotVenue(mock_provider()),
         USDC.pubkey,
         SOL.pubkey,
         gateway=TradeGateway(ledger, Policy(), False),
@@ -266,8 +272,12 @@ async def test_non_stablecoin_input_has_unknown_notional(tmp_path):
     provider.get_account_balance = AsyncMock(
         return_value=[MintBalance(mint=SOL.pubkey, available=Decimal("1"))]
     )
-    account = AsyncAccount(
-        provider, SOL.pubkey, USDC.pubkey, gateway=gateway, account_id="paper:USDC-SOL"
+    account = SpotAccount(
+        SpotVenue(provider),
+        SOL.pubkey,
+        USDC.pubkey,
+        gateway=gateway,
+        account_id="paper:USDC-SOL",
     )
 
     with pytest.raises(PolicyDeniedError, match="desconhecido"):
@@ -281,7 +291,7 @@ async def test_non_stablecoin_input_has_unknown_notional(tmp_path):
     )
     account.gateway = allowed
     provider.buy = AsyncMock(
-        return_value=SwapResult("s", SOL.mint, USDC.mint, SOL.ui_to_raw("0.5"), 1)
+        return_value=ExecutionResult("s", SOL.mint, USDC.mint, SOL.ui_to_raw("0.5"), 1)
     )
     await account.buy(Decimal("1"), Decimal("0.5"))
     record = gateway.ledger.list_intents(1)[0]

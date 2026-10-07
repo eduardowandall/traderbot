@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 from factories import make_intent
 
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     IntentSide,
     IntentStatus,
@@ -12,7 +13,7 @@ from trader.execution.models.intent import (
 )
 from trader.execution.trade.ledger import Ledger
 from trader.execution.trade.ledger.store import LedgerFormatError
-from trader.shared.models import SOLANA_MINTS, Order, OrderSide, SwapResult
+from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.order import order_from_json, order_to_json
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
@@ -37,7 +38,7 @@ def _order(side=OrderSide.BUY, quantity="0.1", price="100"):
 
 def _executed(ledger, intent, order=None, pnl=None):
     ledger.record_intent(intent, ALLOW)
-    ledger.mark_executed(intent.intent_id, SwapResult("sig", USDC, SOL, 1, 2))
+    ledger.mark_executed(intent.intent_id, ExecutionResult("sig", USDC, SOL, 1, 2))
     if order:
         ledger.attach_order(intent.intent_id, order, pnl)
 
@@ -53,7 +54,7 @@ def test_records_intent_lifecycle(ledger):
     ledger.record_intent(intent, ALLOW)
     assert ledger.get(intent.intent_id).status == IntentStatus.EXECUTING
 
-    ledger.mark_executed(intent.intent_id, SwapResult("sig", USDC, SOL, 10, 20))
+    ledger.mark_executed(intent.intent_id, ExecutionResult("sig", USDC, SOL, 10, 20))
     record = ledger.get(intent.intent_id)
     assert record.status == IntentStatus.EXECUTED
     assert (record.signature, record.in_amount, record.out_amount) == ("sig", 10, 20)
@@ -80,7 +81,9 @@ class TestIdempotency:
             intent = make_intent(key=f"k-{status_setter}")
             ledger.record_intent(intent, ALLOW)
             if status_setter == "mark_executed":
-                ledger.mark_executed(intent.intent_id, SwapResult("s", "a", "b", 1, 1))
+                ledger.mark_executed(
+                    intent.intent_id, ExecutionResult("s", "a", "b", 1, 1)
+                )
             elif status_setter == "mark_unconfirmed":
                 ledger.mark_unconfirmed(intent.intent_id, "timeout")
             assert ledger.find_by_idempotency_key(intent.idempotency_key)
@@ -188,7 +191,7 @@ class TestPositions:
         ledger.mark_failed(intent.intent_id, "não saiu")
 
         assert not ledger.mark_executed(
-            intent.intent_id, SwapResult("sig", USDC, SOL, 1, 2)
+            intent.intent_id, ExecutionResult("sig", USDC, SOL, 1, 2)
         )
 
         record = ledger.get(intent.intent_id)

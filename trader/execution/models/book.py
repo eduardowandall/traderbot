@@ -1,6 +1,6 @@
 """O livro de um bucket: a posição aberta e o PnL realizado.
 
-Só dados e contas (camada core). Quem executa (`AsyncAccount`) abre e
+Só dados e contas (camada core). Quem executa (`SpotAccount`) abre e
 fecha posições aqui; o ledger é a fonte da verdade, e após um reinício o
 livro é reconstruído com `PositionBook.restored(...)`.
 

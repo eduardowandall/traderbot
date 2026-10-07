@@ -51,11 +51,11 @@ the ledger or the policy.
 | app | commands and wiring | `main.py`, `trader/api/cli/` (`serve`, `connect`, `backtest`), `trader/execution/runner.py`, `trader/execution/wiring.py` (mode -> components), `trader/execution/notification/` (daily report), `trader/backtest/` |
 | strategy-side | the loop that knows no mode, key or ledger | `trader/strategy/bot/` (`async_websocket_bot.py`, `decision.py`, `config.py`), `trader/strategy/trading_service/` (`client.py`, `remote.py`), `trader/strategy/runner.py` |
 | strategy | specs: pure signals | `trader/strategy/spec/` (`models.py`, `expr.py`, `parse.py`, `strategy.py`, `conditions.py`) |
-| execution | buckets, the account, the one path to a swap | `trader/execution/trade/trading_service/` (`service.py`, `local.py`), `trader/execution/trade/gateway/` (`account.py`, `gateway.py`, `fills.py`, `orders.py`) |
+| execution | buckets, the account, the one path to a swap; reaches a venue only through the `Venue` protocol (A7, tested) | `trader/execution/trade/trading_service/` (`service.py`, `local.py`), `trader/execution/trade/gateway/` (`account.py`: `SpotAccount`, a `BucketAccount`; `gateway.py`, `fills.py`, `orders.py`) |
 | risk | limits and the audit log | `trader/execution/trade/policy/`, `trader/execution/trade/ledger/` |
-| venue | moves funds | `trader/execution/trade/venues/jupiter/` (`async_jupiter_svc.py` provider, `executor.py` + `async_rpc_client.py` real), `trader/execution/trade/venues/paper/` (paper) |
+| venue | moves funds | `trader/execution/trade/venues/spot.py` (`SpotVenue`: the `Venue` that wraps the provider), `trader/execution/trade/venues/jupiter/` (`async_jupiter_svc.py` provider, `executor.py` + `async_rpc_client.py` real), `trader/execution/trade/venues/paper/` (paper) |
 | market | read-only prices and candles (`hub.py`: one price feed for every bot; `pair.py`: the token in the quote token) | `trader/execution/market/` (`data.py`, `hub.py`, `prices.py`, `jupiter/`: `async_jupiter_client.py`, `candles.py`), `trader/shared/market/` (`feed.py`, `pair.py`, no network) |
-| core | plain data | `trader/shared/models/`, `trader/execution/models/`, `trader/shared/trading_service/` (`protocol.py`, `wire.py`), `trader/shared/notification/`, `trader/shared/spec/` (`terms.py`, `validate.py`), `trader/shared/indicators.py`, `trader/shared/paths.py`, `trader/shared/logging_config.py` |
+| core | plain data and protocols | `trader/shared/models/` (`direction.py`: long/short, D3), `trader/execution/models/` (`venue.py` `Venue`, `bucket.py` `BucketAccount`, `execution.py` `ExecutionResult`), `trader/shared/trading_service/` (`protocol.py`, `wire.py`), `trader/shared/notification/`, `trader/shared/spec/` (`terms.py`, `validate.py`), `trader/shared/indicators.py`, `trader/shared/paths.py`, `trader/shared/logging_config.py` |
 
 ## 3. One paper buy, hop by hop
 
@@ -72,7 +72,7 @@ the ledger or the policy.
 | S2 | `trader/api/cli/runners.py` `serve` | Takes the mode's lock, builds the `PriceHub`, the service and a `TradeRunner`, writes `.data/trader-paper.json`. | One process per mode holds the wallet and the ledger. |
 | S3 | `trader/execution/wiring.py:65` `build_trade_service` | paper → `paper_provider(SimulatedWallet)`; real → `AsyncJupiterProvider.on_chain(key)`. Adds `TradeGateway.for_mode` (ledger + policy) and the USD price oracle (the hub). | The **only** place a mode turns into components. |
 | S4 | `trader/api/cli/runners.py` `connect` → `trader/strategy/runner.py` `strategy_bot` | Loads the spec, builds a `RemoteTradeClient` with `spec.terms()` and a `HubMarketData` over the `price` and `candles` ops, then `AsyncWebsocketTradingBot(BotConfig(...))`. At `hello`, the trade-runner validates the terms against its policy (`TradeRunner._valid_terms`). | The bot only ever sees its bucket (`TradeClient`); a spec that could never trade is refused before it starts. |
-| S5 | `trader/strategy/bot/async_websocket_bot.py:156` `_startup` | `trader.open()` → `hello` → `TradeService.open_bucket` (`service.py:83`): marks `bucket_opened` once, rebuilds the position and PnL from the ledger (`AsyncAccount.restore_from_ledger` → `TradeGateway.restore`, `gateway.py:177`), reconciles against the wallet. | A restart continues where it stopped. |
+| S5 | `trader/strategy/bot/async_websocket_bot.py:156` `_startup` | `trader.open()` → `hello` → `TradeService.open_bucket` (`service.py:83`): marks `bucket_opened` once, rebuilds the position and PnL from the ledger (`SpotAccount.restore_from_ledger` → `TradeGateway.restore`, `gateway.py:177`), reconciles against the wallet. | A restart continues where it stopped. |
 | S6 | `async_websocket_bot.py:173` `_resume_strategy` | `strategy.resume(last_exit_at, opened_at, last_exit_price)`. | Cooldown, re-arm and `ttl_days` survive restarts. |
 | S7 | `async_websocket_bot.py:156` | Fetches `strategy.warmup()` candles (through the `candles` op) and seeds the indicators (`strategy.setup`). | Entries wait for converged indicators. |
 
@@ -88,10 +88,10 @@ the ledger or the policy.
 | 6 | `account.py:259` `_usd_snapshot`, `:262` `_intent` | USD snapshot of both sides and SOL from the process's price oracle (the hub; stablecoins are 1), **before** the trade; builds the `TradeIntent` (spend amount, USD notional, idempotency key). | After EXECUTED nothing may fail, so no fetch happens later. |
 | 7 | `trader/execution/trade/gateway/fills.py:50` `execute_trade` | The one pipeline for every trade: `gateway.submit`, then costs. Whether the swap filled or not, attempts the chain confirmed as failed get their fee read and booked (`failed_tx_fee` event, `PositionBook.charge`), never raising. | Enforces the order "EXECUTED first, costs second"; a failed transaction still cost the bucket its fee. |
 | 8 | `trader/execution/trade/gateway/gateway.py:214` `submit` → `:238` `_authorize` → `trader/execution/trade/ledger/ledger.py:34` `authorize` | In one `BEGIN IMMEDIATE` transaction: idempotency lookup, `policy_state()` (daily notional, trades/hour, loss, breaker since this process started, unresolved intents), `policy.evaluate` (`policy/policy.py:294`, pure), insert the intent as EXECUTING or DENIED. | Two processes can never pass the same limit or reuse a key. |
-| 9 | `gateway.py:254` `_execute` → `providers/jupiter/async_jupiter_svc.py:98` `buy` → `:153` `swap_with_details` → `_attempts` → `_do_swap` | Raw amount from the intent's spend; quote, price-impact cap, the quote's value against the Price API (≤ 2% below; on in real and paper), up to 3 attempts with rising slippage and a 60s deadline. Signatures of attempts that failed on-chain leave on the result or the final error (`failed_signatures`). | Retries are safe only before broadcast. |
-| 10 | `trader/execution/trade/venues/paper/executor.py:64` `SimulatedExecutor.execute` → `paper/wallet.py:94` `apply_swap` | The output is the quote's minus `slippage_bps` (10), never below its `otherAmountThreshold`. Under a file lock: re-read, debit input + fee (base + the policy's priority-fee cap) + first-time rent, credit output, write atomically. Returns a `SwapResult` with the simulated costs. | Paper behaves like the chain (fees, rent, slippage) across processes. |
+| 9 | `gateway.py:254` `_execute` → `SpotVenue.open` (`venues/spot.py`) → `venues/jupiter/async_jupiter_svc.py:98` `buy` → `:153` `swap_with_details` → `_attempts` → `_do_swap` | Raw amount from the intent's spend; quote, price-impact cap, the quote's value against the Price API (≤ 2% below; on in real and paper), up to 3 attempts with rising slippage and a 60s deadline. Signatures of attempts that failed on-chain leave on the result or the final error (`failed_signatures`). | Retries are safe only before broadcast. |
+| 10 | `trader/execution/trade/venues/paper/executor.py:64` `SimulatedExecutor.execute` → `paper/wallet.py:94` `apply_swap` | The output is the quote's minus `slippage_bps` (10), never below its `otherAmountThreshold`. Under a file lock: re-read, debit input + fee (base + the policy's priority-fee cap) + first-time rent, credit output, write atomically. Returns an `ExecutionResult` with the simulated costs. | Paper behaves like the chain (fees, rent, slippage) across processes. |
 | 11 | `trader/execution/trade/ledger/intents.py:142` `mark_executed` | EXECUTING → EXECUTED with the signature and amounts. A failure here leaves the row EXECUTING, which blocks the account. | Fail closed: never buy twice after an unrecorded swap. |
-| 12 | `async_jupiter_svc.py:222` `fetch_swap_costs` (from `fills.py`) | Real mode reads the confirmed transaction; paper already has the costs. Never raises. | Costs are recorded, never assumed. |
+| 12 | `Venue.fetch_costs` → `async_jupiter_svc.py:222` `fetch_swap_costs` (from `fills.py`) | Real mode reads the confirmed transaction; paper already has the costs. Never raises. | Costs are recorded, never assumed. |
 | 13 | `account.py:174` `_to_order` → `trader/execution/trade/gateway/orders.py:33` `order_from_fill` | Real amounts, else the quote's; USD rates; never raises. | A trade that happened is never lost. |
 | 14 | `account.py:194` `_record_fill` → `gateway.py:197` `record_fill` → `intents.py:179` `attach_order` | Stores the order JSON, cost and PnL columns on the (EXECUTED) row; a failure is logged, not raised. `book.open(order)` (`models/book.py:99`) opens the position in memory. | The ledger is the truth; the book is its in-memory copy. |
 | 15 | `service.py:163` (after `_place`) | `_check_max_loss`: realized loss past `max_loss_usd` retires the bucket; `_close_if_retiring` (`:173`) sells a leftover once per order. | Exits don't depend on the strategy. |
@@ -124,7 +124,7 @@ after, and a send without an outcome is resolved on later sweeps
 | State | Where | Notes |
 |---|---|---|
 | Intents, orders, PnL, events | `data_dir()/ledger-<mode>.sqlite3` (`trader/execution/trade/ledger/`) | **The source of truth.** One schema, versioned by `PRAGMA user_version`; an older file is refused (move or delete it). Costs without a trade (`failed_tx_fee`), rent refunds (`rent_refund_sent`, `rent_refund`) and the sent daily reports (`daily_report`) are events. |
-| Position and PnL totals of a bucket | `AsyncAccount.book` (`models/book.py`) | Rebuilt from the ledger at startup (`gateway.restore`), then kept in step by each fill. |
+| Position and PnL totals of a bucket | `SpotAccount.book` (`models/book.py`) | Rebuilt from the ledger at startup (`gateway.restore`), then kept in step by each fill. |
 | Signal state (entry price, peak, cooldown, re-arm, expiry) | `SpecStrategy` | Restored through `resume()` from the bucket snapshot. |
 | Paper balances | `data_dir()/paper-wallet.json` (`paper/wallet.py`) | Created with 100 USDC + 0.5 SOL; delete it to start over. |
 | Policy | `policy_file()` (`policy.toml`, untracked) | Model: `policy.example.toml`. Paper has roomy limits by default. |
@@ -216,6 +216,11 @@ quote token; money is in USD. `SpecStrategy` (`strategy_spec/strategy.py`):
 3. without one: enters only when warm (`spec.history()` bars), not expired,
    out of the cooldown, re-armed after the last exit, and the conditions hold;
 4. every signal carries a rationale (`"spec 1c21... buy: rsi14<30"`).
+
+The position blocks (`take_profit`, `trailing_take_profit`, `stop_loss`,
+`trailing_stop`) compare in the position's direction (`TickContext.direction`,
+from `Position.direction`; `peak` is the best price since entry). Spot is
+always long; short comes with perps (A8).
 
 Each condition type is a model in `models.py` plus a pure predicate in
 `conditions.PREDICATES`; tests keep both in step with each other and with
@@ -310,6 +315,6 @@ Any request that fails answers `{"ok": false, "error": "<Type>: <msg>", "kind": 
 
 ## 10. Where it's going
 
-The roadmap is [`plan.md`](plan.md): next, a first tiny-budget real run, then
-perpetual futures. Specs stay
+The roadmap is [`plan.md`](plan.md): the first tiny-budget real run is done
+(A6) and the seams for perpetual futures are in (A7); perps come next. Specs stay
 files written from [`specs.md`](specs.md).
