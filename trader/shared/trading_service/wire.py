@@ -13,7 +13,6 @@ from decimal import Decimal
 from typing import Any
 
 from trader.shared.models import Order, OrderSide, Position
-from trader.shared.models.direction import Direction
 from trader.shared.models.order import order_from_json, order_to_json
 from trader.shared.models.public_data import TickerData
 from trader.shared.trading_service.protocol import (
@@ -52,14 +51,8 @@ def _order_back(data: dict | None) -> Order | None:
 def position_to_dict(position: Position | None) -> dict | None:
     if position is None:
         return None
-    data: dict[str, Any] = {
-        "entry": _order(position.entry_order),
-        "exit": _order(position.exit_order),
-    }
-    if position.direction != Direction.LONG:
-        # só quando não é o padrão: um par de outra versão segue entendendo
-        data["direction"] = str(position.direction)
-    return data
+    # o lado vai na ordem de entrada (`Order.perp`, A8)
+    return {"entry": _order(position.entry_order), "exit": _order(position.exit_order)}
 
 
 def position_from_dict(data: dict | None) -> Position | None:
@@ -67,8 +60,7 @@ def position_from_dict(data: dict | None) -> Position | None:
         return None
     entry = _order_back(data["entry"])
     assert entry is not None
-    direction = Direction(data.get("direction", Direction.LONG))
-    return Position(entry, _order_back(data.get("exit")), direction)
+    return Position(entry, _order_back(data.get("exit")))
 
 
 def snapshot_to_dict(s: BucketSnapshot) -> dict:

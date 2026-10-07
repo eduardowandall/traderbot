@@ -23,6 +23,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Protocol
 
+from solders.instruction import Instruction
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.solders import SendTransactionResp, TransactionConfirmationStatus
@@ -277,11 +278,9 @@ class OnChainExecutor:
                 owner=self.pubkey,
             )
         )
-        signed = await self.rpc_client.sign_instructions([instruction], self.keypair)
-        check_programs(signed.tx)
-        await self.rpc_client.simulate_transaction(signed.tx)
-        announce(
-            SentTx(
+
+        def sent(signed: SignedTx) -> SentTx:
+            return SentTx(
                 signed.signature,
                 mint,
                 SOL_MINT,
@@ -289,9 +288,41 @@ class OnChainExecutor:
                 account.lamports,
                 signed.last_valid_block_height,
             )
+
+        # nenhum token sai: só o rent volta (e a taxa sai em SOL)
+        signed = await self.send_instructions(
+            [instruction], sent, announce, SOL_MINT, 0
         )
-        await self._send_transaction_and_wait_for_confirmation(signed.tx)
         return RentRefund(signed.signature, mint, account.lamports)
+
+    async def send_instructions(
+        self,
+        instructions: list[Instruction],
+        sent: Callable[[SignedTx], SentTx],
+        announce: Callable[[SentTx], None],
+        spend_mint: str,
+        spend_max: int,
+        extra_programs: frozenset[str] = frozenset(),
+    ) -> SignedTx:
+        """Uma transação nossa: assina, confere, simula, grava o envio, envia.
+
+        Antes de enviar: só programas conhecidos (mais `extra_programs`) e uma
+        simulação com as contas da carteira em que só `spend_mint` sai, até
+        `spend_max` (e SOL para taxas). `announce` grava o envio antes dele
+        (se falha, nada é enviado). Depois do envio, as falhas são as dos
+        swaps: `TransactionFailedOnChainError` ou `TransactionSubmittedError`.
+        """
+        signed = await self.rpc_client.sign_instructions(instructions, self.keypair)
+        check_programs(signed.tx, extra_programs)
+        before = await self.rpc_client.wallet_state(self.pubkey)
+        simulation = await self.rpc_client.simulate_transaction(
+            signed.tx, before.addresses(self.pubkey)
+        )
+        after = state_after(before, simulation.value.accounts)
+        check_balances(before, after, spend_mint, spend_max)
+        announce(sent(signed))
+        await self._send_transaction_and_wait_for_confirmation(signed.tx)
+        return signed
 
     async def fetch_costs(self, result: ExecutionResult) -> TradeCosts | None:
         """Custos lidos da transação confirmada."""

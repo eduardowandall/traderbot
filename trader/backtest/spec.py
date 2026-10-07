@@ -12,6 +12,8 @@ from decimal import Decimal
 from trader.backtest.replay import Backtester, BacktestResult
 from trader.backtest.ticks import Tick, ticks_from_candles
 from trader.execution.market.jupiter.candles import MAX_CANDLES
+from trader.execution.models.perp import perp_terms_for
+from trader.execution.trade.venues.paper.perps import DEFAULT_BORROW_BPS_HOUR
 from trader.shared.indicators import bar_index
 from trader.shared.market import MarketData
 from trader.shared.market.pair import ratio_candles
@@ -55,6 +57,8 @@ class ReplayCosts:
     fee_bps: Decimal = Decimal("30")
     slippage_bps: Decimal = Decimal("10")
     network_fee_usd: Decimal = DEFAULT_NETWORK_FEE_USD
+    # perps (A9): empréstimo por hora, em bps do tamanho
+    borrow_bps_hour: Decimal = DEFAULT_BORROW_BPS_HOUR
 
 
 def spec_backtester(
@@ -64,7 +68,8 @@ def spec_backtester(
     seed: str,
     warmup: Sequence[TickerData] = (),
 ) -> Backtester:
-    """O backtest de uma spec: o orçamento e a perda máxima dela."""
+    """O backtest de uma spec: o orçamento e a perda máxima dela; numa perp, o
+    motor de perps do paper (A9)."""
     return Backtester(
         SpecStrategy(spec),
         spec.symbol,
@@ -77,6 +82,8 @@ def spec_backtester(
         budget_usd=spec.budget_usd,
         max_loss_usd=spec.max_loss_usd,
         warmup=warmup,
+        perp=perp_terms_for(spec.symbol, spec.market, spec.exit.stop.pct),
+        borrow_bps_hour=costs.borrow_bps_hour,
     )
 
 
@@ -87,6 +94,7 @@ async def backtest_spec(
     seed: str = "0",
     slippage_bps: Decimal = ReplayCosts.slippage_bps,
     network_fee_usd: Decimal = ReplayCosts.network_fee_usd,
+    borrow_bps_hour: Decimal = ReplayCosts.borrow_bps_hour,
 ) -> dict:
     bars = bars_in(ticks, spec.timeframe)
     if bars < spec.history() + MIN_EVAL_BARS:
@@ -94,7 +102,7 @@ async def backtest_spec(
             f"{bars} barras de {spec.timeframe} < aquecimento de "
             f"{spec.history()} barras + {MIN_EVAL_BARS} avaliadas: use mais candles"
         )
-    costs = ReplayCosts(fee_bps, slippage_bps, network_fee_usd)
+    costs = ReplayCosts(fee_bps, slippage_bps, network_fee_usd, borrow_bps_hour)
     result = await spec_backtester(spec, ticks, costs, seed).run()
     return {
         "spec_id": spec.spec_id(),

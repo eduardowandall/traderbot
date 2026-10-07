@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from trader.execution.market.hub import PriceHub
 from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.execution.market.prices import PriceOf, price_fn
+from trader.execution.models.perp import perp_terms_for
 from trader.execution.trade.trading_service.service import TradeService
 from trader.shared.logging_config import error_text
 from trader.shared.market import CandleSource
@@ -231,6 +232,7 @@ class TradeRunner:
             budget_usd=spec.budget_usd,
             source=f"serve:{spec.name}",
             max_loss_usd=spec.max_loss_usd,
+            perp=perp_terms_for(spec.symbol, spec.market, spec.stop_pct),
         )
         self.specs[name] = spec
         # a posição restaurada e a perda máxima já atingida o serviço loga
@@ -247,16 +249,19 @@ class TradeRunner:
             await self.sweep()
 
     async def sweep(self, now: datetime | None = None) -> None:
-        """Resolve intenções pendentes, encerra specs vencidas e vende sobras."""
+        """Resolve pendências, confere liquidações, encerra specs vencidas e
+        vende sobras. Uma etapa que falha não impede as outras."""
         now = now or datetime.now(UTC)
-        try:
-            await self.service.resolve_intents()
-        except Exception as ex:
-            logger.error(f"Resolução de intenções falhou: {ex}")
-        try:
-            await self.service.resolve_rent_refunds()
-        except Exception as ex:
-            logger.error(f"Resolução de fechamentos de conta falhou: {error_text(ex)}")
+        steps = (
+            ("Resolução de intenções", self.service.resolve_intents),
+            ("Resolução de fechamentos de conta", self.service.resolve_rent_refunds),
+            ("Conferência de liquidações", self.service.check_liquidations),  # A8
+        )
+        for label, step in steps:
+            try:
+                await step()
+            except Exception as ex:
+                logger.error(f"{label} falhou: {error_text(ex)}")
         for name, spec in list(self.specs.items()):
             try:
                 await self._sweep_one(name, spec, now)

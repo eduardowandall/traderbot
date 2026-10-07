@@ -59,7 +59,7 @@ def test_spot_account_commits_what_the_open_position_spent():
 
 
 def test_the_executed_payload_keeps_the_swap_result_fields():
-    # o evento `intent_executed` guarda `asdict(result)`: sem mudança de formato
+    # o evento `intent_executed` guarda `asdict(result)`: os campos do swap, + perp
     assert list(asdict(RESULT)) == [
         "signature",
         "input_mint",
@@ -69,4 +69,5 @@ def test_the_executed_payload_keeps_the_swap_result_fields():
         "costs",
         "quote",
         "failed_signatures",
+        "perp",  # A8: None no spot
     ]

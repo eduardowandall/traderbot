@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "sol-perp-short",
+  "agent_id": "claude",
+  "rationale": "A9 example: a 3x SOL short on Jupiter Perps that fades a spike. Entry when SOL is 1.5% over its 60-bar low and RSI(14) is over 65; out on a 1.5% take-profit (the price falling), a 2% stop (the price rising, well inside the 16.55% limit at 3x) or after 4 hours. 10 USD of collateral (30 USD of exposure) a time inside a 30 USD budget. Not tuned: it shows the perp backtest, not an edge.",
+  "symbol": "SOL-USDC",
+  "timeframe": "1_MINUTE",
+  "market": {"kind": "perp", "venue": "jupiter", "direction": "short", "leverage": 3},
+  "entry": {
+    "mode": "all",
+    "conditions": [
+      {"type": "rebound_from_low", "window": 60, "pct": 1.5},
+      {"type": "rsi_above", "period": 14, "value": 65}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 2},
+    "mode": "any",
+    "conditions": [
+      {"type": "take_profit", "pct": 1.5},
+      {"type": "max_hold", "minutes": 240}
+    ]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 10},
+  "budget_usd": 30,
+  "max_loss_usd": 15,
+  "cooldown_minutes": 30,
+  "ttl_days": 7
+}

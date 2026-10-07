@@ -91,8 +91,12 @@ def programs_of(tx: VersionedTransaction) -> set[str]:
     return {str(keys[ix.program_id_index]) for ix in tx.message.instructions}
 
 
-def check_programs(tx: VersionedTransaction) -> None:
-    unknown = programs_of(tx) - ALLOWED_PROGRAMS
+def check_programs(
+    tx: VersionedTransaction, extra: frozenset[str] = frozenset()
+) -> None:
+    """Só programas conhecidos; `extra`, os que quem chama também permite (o da
+    Jupiter Perps, nos pedidos de perp, A11b)."""
+    unknown = programs_of(tx) - ALLOWED_PROGRAMS - extra
     if unknown:
         raise TransactionInspectionError(
             f"transação chama programas fora da lista: {sorted(unknown)}"

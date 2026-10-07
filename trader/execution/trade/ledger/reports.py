@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from trader.execution.models.intent import IntentSide, IntentStatus
+from trader.execution.models.perp import terms_from_json
 from trader.execution.models.rent import RENT_REFUND, RENT_REFUND_SENT
 from trader.execution.trade.ledger.store import LedgerStore, _int, _window
 from trader.shared.models import SOLANA_MINTS
@@ -247,13 +248,24 @@ def _sell_cost(entry: _Fields, sell: _Fields) -> tuple[Decimal, Decimal] | None:
     if not (entry["price"] and sell["price"] and entry["out_amount"]):
         return None
     share = Decimal(sell["in_amount"] or entry["out_amount"]) / entry["out_amount"]
-    move = Decimal(sell["price"]) / Decimal(entry["price"]) - 1
+    leverage, sign = _exposure(entry)
+    move = (Decimal(sell["price"]) / Decimal(entry["price"]) - 1) * sign
     net_quote = sell["net_pnl_quote"]
     if net_quote is not None:
-        spend = Decimal(entry["spend_amount"]) * share
+        # numa perp, o gasto é o colateral: a exposição é ele x alavancagem
+        spend = Decimal(entry["spend_amount"]) * share * leverage
         quote_usd = Decimal(sell["quote_usd_price"] or "1")
         return (spend * move - Decimal(net_quote)) * quote_usd, spend * quote_usd
     if entry["notional_usd"] is None or sell["realized_pnl_usd"] is None:
         return None
+    # `notional_usd` de uma perp já é a exposição
     notional = Decimal(entry["notional_usd"]) * share
     return notional * move - Decimal(sell["realized_pnl_usd"]), notional
+
+
+def _exposure(entry: _Fields) -> tuple[Decimal, Decimal]:
+    """(alavancagem, sinal do lado) da entrada: (1, 1) no spot (A9)."""
+    terms = terms_from_json(entry["perp_json"])
+    if terms is None:
+        return Decimal(1), Decimal(1)
+    return terms.leverage, terms.direction.sign

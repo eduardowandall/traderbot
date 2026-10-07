@@ -23,6 +23,7 @@ from trader.execution.trade.policy import Policy
 from trader.execution.trade.venues.paper import SimulatedWallet
 from trader.execution.wiring import paper_wallet_path
 from trader.shared.models import SOLANA_MINTS
+from trader.shared.models.perp import perp_to_dict
 
 
 def _parse_args() -> argparse.Namespace:
@@ -61,6 +62,8 @@ def _buckets(ledger: Ledger, accounts: list[str]) -> tuple[dict, dict]:
                 "quantity": entry.quantity,
                 "cost": entry.quote_amount,
                 "price": entry.price,
+                # perp (A8): a posição fica no venue; `cost` é o colateral
+                "perp": perp_to_dict(entry.perp),
             }
     return positions, pnl
 

@@ -17,6 +17,7 @@ from trader.backtest import load_ticks
 from trader.backtest.costs import MeasuredCosts, resolve_costs
 from trader.backtest.spec import (
     DEFAULT_BACKTEST_CANDLES,
+    ReplayCosts,
     backtest_spec,
     fetch_ticks,
 )
@@ -56,6 +57,10 @@ def backtest(
         help="Taxa de rede por perna, em USD (padrão: 5000 lamports + "
         "max_priority_fee_lamports da política real, ao preço do SOL agora)",
     ),
+    borrow_bps_hour: str | None = typer.Option(
+        None,
+        help="Perps: empréstimo por hora em bps do tamanho (padrão: 1, o do paper)",
+    ),
     seed: str = typer.Option("0", help="Semente do `random_chance`"),
     as_json: bool = typer.Option(
         False, "--json", help="Um objeto JSON no stdout, com todos os trades"
@@ -75,6 +80,7 @@ def backtest(
         "fee_bps": fee_bps,
         "slippage_bps": slippage_bps,
         "network_fee_usd": network_fee_usd,
+        "borrow_bps_hour": borrow_bps_hour,
     }
     try:
         result = _backtest(spec_file, candles, ticks, costs, seed)
@@ -94,16 +100,18 @@ def _backtest(
     costs: dict[str, str | None],
     seed: str,
 ) -> dict:
-    """`costs`: fee_bps, slippage_bps e network_fee_usd, como digitados.
+    """`costs`: fee_bps, slippage_bps, network_fee_usd e borrow_bps_hour, como
+    digitados.
 
     Sem `fee_bps` ou `network_fee_usd`, os dois são medidos agora (B9);
-    o resultado traz a medição em `measured_costs`.
+    o resultado traz a medição em `measured_costs`. Numa perp (A9) a taxa e o
+    slippage do par não se aplicam (o motor de perps cobra as dele).
     """
     spec = parse_spec(spec_file.read_text(encoding="utf-8"))
     tick_list = (
         load_ticks(ticks) if ticks is not None else asyncio.run(_candles(spec, candles))
     )
-    fee, slippage, network = (
+    fee, slippage, network, borrow = (
         None if value is None else _decimal(value, name.replace("_", "-"))
         for name, value in costs.items()
     )
@@ -117,6 +125,7 @@ def _backtest(
             seed=seed,
             slippage_bps=slippage,
             network_fee_usd=network,
+            borrow_bps_hour=ReplayCosts.borrow_bps_hour if borrow is None else borrow,
         )
     )
     return {**result, "measured_costs": measured and asdict(measured)}

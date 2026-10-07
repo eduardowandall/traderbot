@@ -5,6 +5,7 @@ from decimal import Decimal
 from enum import StrEnum, auto
 
 from trader.shared.models.costs import TradeCosts, costs_from_dict
+from trader.shared.models.perp import PerpFill, perp_from_dict
 
 
 class OrderSide(StrEnum):
@@ -46,6 +47,8 @@ class Order:
     # vendas: False quando a venda foi parcial e o resto segue aberto
     # (ordens antigas, sem o campo, sempre fecharam a posição)
     closes_position: bool = True
+    # perna de perp (A8): o lado, o tamanho e o colateral (ver `perp.py`)
+    perp: PerpFill | None = None
 
     @property
     def quote_price(self) -> Decimal:
@@ -99,4 +102,5 @@ def order_from_json(data: str) -> Order:
     raw["costs"] = costs_from_dict(raw.get("costs"))
     raw["side"] = OrderSide(raw["side"])
     raw["timestamp"] = datetime.fromisoformat(raw["timestamp"])
+    raw["perp"] = perp_from_dict(raw.get("perp"))
     return Order(**raw)

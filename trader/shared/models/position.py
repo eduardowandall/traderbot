@@ -1,10 +1,12 @@
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from trader.shared.models.costs import PnLResult
 from trader.shared.models.direction import Direction
 from trader.shared.models.mints import SOLANA_MINTS
 from trader.shared.models.order import Order
+from trader.shared.models.perp import describe_open
 
 ZERO = Decimal("0")
 
@@ -46,8 +48,20 @@ class Position:
 
     entry_order: Order
     exit_order: Order | None = None
-    # spot é sempre comprado; vendido só em perps (A8)
-    direction: Direction = Direction.LONG
+
+    @property
+    def direction(self) -> Direction:
+        """O lado vem da ordem de entrada: spot é sempre comprado (A8)."""
+        perp = self.entry_order.perp
+        return Direction.LONG if perp is None else perp.direction
+
+    def perp_line(self, now: datetime) -> str | None:
+        """Numa perp: lado, alavancagem, liquidação e o empréstimo acumulado."""
+        entry = self.entry_order
+        if entry.perp is None:
+            return None
+        borrow = entry.perp.borrow_at(entry.timestamp, now)
+        return describe_open(entry.perp, borrow)
 
     def unrealized_pnl(self, current_price: Decimal) -> Decimal:
         """PnL não realizado no token de cotação (`current_price` também nele)."""
@@ -62,6 +76,8 @@ class Position:
         custo é preço x quantidade da entrada.
         """
         entry = self.entry_order
+        if entry.perp is not None:
+            return _perp_unrealized(entry, price)
         cost = None
         if entry.quote_amount is not None:
             cost = _times(entry.quote_amount, entry.quote_usd)
@@ -131,8 +147,19 @@ class Position:
             value
             and self.entry_order == value.entry_order
             and self.exit_order == value.exit_order
-            and self.direction == value.direction
         )
+
+
+def _perp_unrealized(entry: Order, price: Decimal) -> Decimal:
+    """Perp: o patrimônio a `price` (sem o empréstimo) menos o colateral postado.
+
+    O colateral é o token de cotação, uma stablecoin (USD).
+    """
+    perp = entry.perp
+    assert perp is not None
+    posted = entry.quote_amount if entry.quote_amount is not None else ZERO
+    fees = _times(entry.costs.native_cost_sol, entry.sol_usd) if entry.costs else None
+    return perp.equity(price) - posted - (fees or ZERO)
 
 
 def _complete(entry_costs, exit_costs) -> bool:

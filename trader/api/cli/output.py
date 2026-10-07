@@ -15,6 +15,7 @@ from typing import Any
 import typer
 
 from trader.shared.models.costs import BASE_FEE_LAMPORTS, RoundTripCosts
+from trader.shared.models.perp import PERP_FEE_RATE
 from trader.strategy.spec.parse import SpecParseError
 
 # trades listados no resumo (o JSON traz todos)
@@ -78,13 +79,30 @@ def backtest_summary(result: dict) -> str:
         f"{'-' if win is None else f'{win:.1f}%'}",
         f"  sinais recusados: {result['rejected_signals']}; posição aberta no fim: "
         f"{'sim' if result['open_position'] else 'não'}",
-        f"  custos: {result['fee_bps']} bps de taxa + {result['slippage_bps']} bps "
-        f"de slippage + {result['network_fee_usd']} USD de rede por perna",
+        _costs_line(result),
         f"  {_round_trip_line(result['round_trip_costs'])}",
     ]
     if result.get("measured_costs"):
         lines.insert(-1, f"  {_measured_line(result['measured_costs'])}")
     return "\n".join(lines + _trade_lines(result["trades"]))
+
+
+def _costs_line(result: dict) -> str:
+    perp = result.get("perp")
+    network = f"{result['network_fee_usd']} USD de rede por perna"
+    if perp is None:
+        return (
+            f"  custos: {result['fee_bps']} bps de taxa + {result['slippage_bps']} "
+            f"bps de slippage + {network}"
+        )
+    # A9: o motor de perps cobra as taxas dele; a do par não se aplica
+    return (
+        f"  perp {perp['direction']} {perp['leverage']}x: taxas ${perp['fees_usd']:.4f}"
+        f" ({(PERP_FEE_RATE * 100).normalize()}% + impacto por ponta), empréstimo "
+        f"${perp['borrow_usd']:.4f} "
+        f"({perp['borrow_bps_hour']} bps/h), {perp['liquidations']} liquidação(ões);"
+        f" {network}"
+    )
 
 
 def _measured_line(m: dict) -> str:
@@ -111,6 +129,8 @@ def _trade_lines(trades: list[dict]) -> list[str]:
     for t in trades[:SHOWN_TRADES]:
         pnl = t["realized_pnl"]
         suffix = "" if pnl is None else f"  pnl {pnl:+.4f} USD"
+        if t.get("liquidated"):
+            suffix += "  [!] LIQUIDADA"
         lines.append(
             f"    {_when(t['timestamp'])}  {t['side']:<4} {t['quantity']:.6f} "
             f"@ {t['price']:.4f}{suffix}"

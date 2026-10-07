@@ -30,7 +30,7 @@ as B7 are what code comments cite).
 uv run main.py serve paper                      # trade-runner: key, wallet, ledger
 uv run main.py connect <spec.json> [--trader FILE] [--seed N] [--record-ticks FILE]   # one per spec, no key
 uv run --env-file .env main.py serve real       # the owner only
-uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--json]
+uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--borrow-bps-hour 1] [--json]
 ```
 - **Trading is `serve` + `connect` only** (B14; there is no `run`). One
   `serve <mode>` per mode (`trader/api/cli/lock.py`, an OS lock on
@@ -216,6 +216,22 @@ command to run in a terminal. The rules are tested in
   (`rent_refund_sent` before the send, `rent_refund` after; events, no schema
   change). Shown by the backtest, the daily report,
   `live_vs_backtest.py` and `ledger_dump.py`.
+- **Perps (A8, paper only).** A spec with `market` (`PerpMarket`,
+  `trader/shared/spec/terms.py`) gets a `PerpAccount`
+  (`trade/gateway/perp_account.py`) on the mode's `PerpVenue`
+  (`SimulatedPerpsVenue`, `trade/venues/paper/perps.py`; real has none until
+  A11). A perp leg rides the spot path: `TradeIntent.perp` (`PerpTerms`, ledger
+  `instrument`/`perp_json`), `ExecutionResult.perp`/`Order.perp` (`PerpFill`,
+  `trader/shared/models/perp.py`; `quantity` = size in base, `quote_amount` =
+  collateral posted/returned, so PnL = back - posted); `Position.direction`
+  comes from the entry's `perp`. One position per market and side; sells close
+  it all. Exposure (collateral x leverage) is the notional the policy sees
+  (`perps_enabled`, `max_leverage`, `allowed_perp_markets`). The sweep books
+  liquidations (`check_liquidations` -> `Ledger.record_external`, outside the
+  policy, then `PerpVenue.acknowledge`). One position per market and side is
+  checked at the buy (`PerpVenue.has_position`), before any intent. The resolver leaves perp intents blocking. `backtest` replays perps
+  through `ReplayPerpsVenue` (A9; `Policy.unlimited()` allows them;
+  `round_trip_costs` measures a perp on its exposure and direction).
 - **Ledger schema** is one `_SCHEMA` with a `user_version` in
   `trader/execution/trade/ledger/store.py`. There are no migrations: an older file is refused
   (`LedgerFormatError`); bump `SCHEMA_VERSION` when the schema changes.
@@ -263,3 +279,21 @@ command to run in a terminal. The rules are tested in
 - The price websocket (`trench-stream.jup.ag`, several mints per subscription)
   and candles (`datapi.jup.ag`) are undocumented frontend endpoints; the hub
   backs prices with the Price API V3, candles have no fallback.
+- Jupiter Perps (A10, read-only): `trader/execution/market/perps/` decodes the
+  program's accounts by its Anchor IDL (`perpetuals_idl.json`, a trimmed
+  community copy; `idl.py` is the Borsh reader) over JSON-RPC
+  (`HELIUS_RPC_URL`, else the public RPC; never logged). The borrow rate is
+  the custody's jump-rate curve; the price Jupiter uses is the Doves
+  aggregated feed; a position is a PDA. Paper opens at the live borrow rate.
+  If `tests/live/test_live_perps.py` fails, the IDL may have changed.
+  A11a: `encode.py` builds Anchor instructions from the same IDL, and
+  `trade/venues/jupiter_perps/requests.py` builds the open, venue-stop and
+  close requests as unsigned transactions (counter = sha256 of the
+  idempotency key); the live suite simulates them on mainnet. A11b:
+  `JupiterPerpsVenue` signs and sends them through
+  `OnChainExecutor.send_instructions` (the spot path: program allowlist +
+  perps, balance simulation, send logged first), waits for the keeper (60 s),
+  and is given to `serve real` only with `perps_enabled` in `[real]`. The
+  account places the venue stop after each open and sells at once if it
+  can't; venue exits (its stop fired, a liquidation) are booked from the
+  keeper's USDC payout in the sweep.

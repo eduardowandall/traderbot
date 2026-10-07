@@ -12,8 +12,10 @@ from collections.abc import Callable
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
+from trader.execution.market.perps.reader import JupiterPerpsReader
 from trader.execution.market.prices import JupiterPriceOracle, PriceOracle
 from trader.execution.models.mode import RunningMode
+from trader.execution.models.venue import PerpVenue
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import load_policy
 from trader.execution.trade.trading_service.service import TradeService
@@ -21,11 +23,14 @@ from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
     DEFAULT_MAX_QUOTE_DEVIATION_PCT,
     AsyncJupiterProvider,
 )
+from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
+from trader.execution.trade.venues.jupiter_perps.venue import JupiterPerpsVenue
 from trader.execution.trade.venues.paper import (
     DEFAULT_PAPER_BALANCES,
     SimulatedWallet,
     paper_provider,
 )
+from trader.execution.trade.venues.paper.perps import SimulatedPerpsVenue
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.notification.notification_service import Notifier
 from trader.shared.paths import data_dir
@@ -65,6 +70,7 @@ def build_provider(
     mode: RunningMode,
     max_priority_fee_lamports: int,  # da política do modo
     on_wallet_created: Callable[[str], None] = lambda message: None,
+    wallet: SimulatedWallet | None = None,  # paper: a carteira já aberta
     **limits,
 ) -> AsyncJupiterProvider:
     """Provider real (com chave) ou paper (carteira simulada, sem chave).
@@ -76,7 +82,7 @@ def build_provider(
     limits.setdefault("max_quote_deviation_pct", DEFAULT_MAX_QUOTE_DEVIATION_PCT)
     if mode == RunningMode.PAPER:
         return paper_provider(
-            open_paper_wallet(on_wallet_created),
+            wallet or open_paper_wallet(on_wallet_created),
             priority_fee_lamports=max_priority_fee_lamports,
             **limits,
         )
@@ -85,6 +91,29 @@ def build_provider(
         max_priority_fee_lamports=max_priority_fee_lamports,
         **limits,
     )
+
+
+def _perps_venue(
+    provider: AsyncJupiterProvider,
+    wallet: SimulatedWallet | None,
+    prices: PriceOracle,
+    enabled: bool,
+    fee_cap: int,
+) -> PerpVenue | None:
+    """O venue de perps do modo: o paper na carteira simulada (A8, com a taxa
+    de empréstimo ao vivo, A10); o real só com `perps_enabled` (A11b)."""
+    if wallet is not None:
+        return SimulatedPerpsVenue(
+            wallet,
+            prices,
+            priority_fee_lamports=fee_cap,
+            borrow_rates=JupiterPerpsReader(),
+        )
+    executor = provider.executor
+    if not enabled or not isinstance(executor, OnChainExecutor):
+        return None
+    # a chave fica no executor do spot: um caminho de envio só
+    return JupiterPerpsVenue(executor, JupiterPerpsReader(), provider, fee_cap)
 
 
 def build_trade_service(
@@ -103,12 +132,18 @@ def build_trade_service(
     ledger do gateway.
     """
     policy = load_policy(mode=str(mode))
-    provider = build_provider(
-        mode, policy.max_priority_fee_lamports, on_wallet_created, **limits
-    )
+    fee_cap = policy.max_priority_fee_lamports
+    wallet = open_paper_wallet(on_wallet_created) if mode == RunningMode.PAPER else None
+    provider = build_provider(mode, fee_cap, on_wallet_created, wallet, **limits)
     prices = prices or JupiterPriceOracle(provider.jupiter_client)
     provider.usd_prices = prices.usd_prices
     gateway = TradeGateway.for_mode(mode, policy)  # política + ledger do modo
+    perps = _perps_venue(provider, wallet, prices, policy.perps_enabled, fee_cap)
     return TradeService(
-        SpotVenue(provider), gateway, mode=str(mode), prices=prices, notifier=notifier
+        SpotVenue(provider),
+        gateway,
+        mode=str(mode),
+        prices=prices,
+        notifier=notifier,
+        perps=perps,
     )

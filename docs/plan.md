@@ -45,7 +45,7 @@ the backtest's, and the token account's rent refunded at retirement.
 | 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up (across candle gaps), re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | No crossovers | **90%** |
 | 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | Nothing planned: one wallet is the decision (2026-10-07) | **95%** |
 | 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included | Replays ignore rent | **96%** |
-| 6. Perps | Research, venue choice and design (§8); the seams (A7: `Venue`, `BucketAccount`, `ExecutionResult`, direction-aware position blocks, pinned spec ids) | Everything else (A8–A12) | **15%** |
+| 6. Perps | Design (§8); the seams (A7); perps in paper (A8) and backtests (A9); Jupiter Perps read live (A10); the open, stop and close requests built and simulated on mainnet, and the reconcile (A11a) | Sending and the first real run (A11b), hardening (A12) | **70%** |
 | (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking and resolution, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | A service entrypoint | **95%** |
 
 ## 3. Principles and decisions that stand
@@ -79,35 +79,149 @@ In order. Each item ships on its own with the suite green (`/check`). Size:
 **S** under an hour, **M** several modules, **L** a design change.
 
 ### A7–A12. Perps
-The design is in §8. A7 (the seams, done 2026-10-07) is in `history.md`; A8
-bumps the ledger schema, so it waits for the end of a paper soak.
+The design is in §8. A7 (the seams), A8 (perps in paper, schema 3), A9 (the
+perp backtest) and A10 (reading Jupiter Perps) are done (2026-10-07, in
+`history.md`).
 
-- **A8. Perp model, paper and spec — L.** The `market` block (+ `specs.md`)
-  checked against the policy at `hello`; `PerpTerms`, `PerpPosition`,
-  `PerpAccount` (a `BucketAccount`, A7; the wallet reconcile leaves perp
-  positions out, through a `held()` on the protocol; `TradeService` gets
-  the account kind from the venue instead of building a `SpotAccount`, and
-  the direction is stored with the entry, not only on `Position`); ledger schema +1 (D6) and restore of an open perp position;
-  `SimulatedPerpsVenue` and the liquidation check in `serve`'s sweep; policy
-  `perps_enabled`, `max_leverage` (default 3), `allowed_perp_markets`,
-  exposure as notional; the daily report and notifications show direction,
-  leverage, liquidation price and accrued borrow. Done when a short spec in
-  paper opens, holds, stops out and is liquidated in a forced test, with the
-  ledger and PnL right after a restart.
-- **A9. Perp backtest — M.** The replay uses the perp engine;
-  `--borrow-bps-hour`; liquidation on the candle path; the summary shows
-  liquidations and fees; two example specs.
-- **A10. Jupiter Perps read-only — M.** IDL decoding (`anchorpy` or
-  hand-written Borsh, after a spike); `positions()`, oracle price, borrow rate;
-  paper uses the live borrow rate; live tests read the pool and custody and an
-  empty position. No schema change: can run any time after A7.
 - **A11. Jupiter Perps execution — L.** Requests, keeper wait, idempotent
   `counter` (D8); the required venue stop, closing the position if it can't be
   placed (D7); reconcile against position accounts (D10). Real perps stay off
   until the owner opens and closes a minimal position with a tiny budget.
+  Split by the owner on 2026-10-07 into A11a (build and simulate, nothing
+  sent) and A11b (send, keeper wait, first real run); longs and shorts both.
+  - **Spike (2026-10-07).** Hand-encoded Anchor instructions
+    (`sha256("global:<snake_name>")[:8]` + Borsh params, the IDL's account
+    order, an absent optional account passed as the program id) simulate
+    cleanly on mainnet (`simulateTransaction`, `sigVerify` off,
+    `replaceRecentBlockhash`): `createIncreasePositionMarketRequest` for a
+    short (USDC collateral) and for a long (USDC in, swapped by the keeper,
+    `jupiterMinimumOut` set), with a public exchange wallet as the payer;
+    `createDecreasePositionMarketRequest` (entire position) and
+    `createDecreasePositionRequest2` (a trigger: the venue stop) as the owner
+    of a public open short, read-only. The trigger needs the custody's
+    `dovesAgOracle` (the plain `dovesOracle` fails with 6002) and its Pyth
+    account. PDAs: `perpetuals` = `["perpetuals"]`, the event authority
+    `["__event_authority"]`, a request `["position_request", position,
+    counter LE u64, 1 increase | 2 decrease]` with its token account the ATA
+    of the request (off-curve). About 95k compute units. Request creation
+    took collateral as small as 1 USD; the keeper's own minimum at execution
+    is not known yet (A11b's first run).
+- **A11b. Perp requests, sent — L.** Sign and send through `serve real`
+  (the key stays there): `JupiterPerpsVenue` (a `PerpVenue`) logs each send
+  first (A3), waits for the keeper (60 s, D8), maps a keeper rejection to
+  REJECTED and a missing outcome to UNCONFIRMED; places the venue stop after
+  every open and closes the position if it can't (D7, `perp_stop_failed`);
+  tx inspection allows the perps program; the reconcile runs at start and
+  in the sweep; the A3 resolver learns perp requests. Done when the owner
+  opens and closes a minimal real perp (both sides) with a tiny budget.
+  Notes from the A11a review: sign and inspect through the spot path
+  (`AsyncRPCClient.sign_instructions` and its simulation, as
+  `close_token_account` does) instead of a second builder; set the compute
+  limit from the simulated units and the price from recent fees capped by
+  the policy (today every request pays the whole cap); the sweep reads the
+  derived position and request addresses in one `getMultipleAccounts`, never
+  `getProgramAccounts`; read the position before any resend (a request
+  account disappears once executed, D8).
+  - **Design (2026-10-07).** Real perps run only in `serve real` with
+    `perps_enabled` in `[real]`; paper and the backtest don't change.
+    - **Sending** (one path with the spot swaps): `OnChainExecutor` gains
+      `send_instructions(instructions, spends)`, the part of
+      `close_token_account` that signs (`sign_instructions`), checks the
+      programs (the allowlist now takes the perps program when the caller
+      passes it), simulates with the wallet's accounts and checks that only
+      the given token leaves, up to the given amount (USDC collateral for an
+      open, nothing for a close or a stop), logs the send (`announce_send`,
+      A3) and sends and confirms with the same error mapping (failed on chain
+      / submitted). `close_token_account` uses it too.
+    - **Fees:** the compute limit is the units of an unsigned simulation
+      x 1.3; the price is the 75th percentile of the recent priority fees on
+      the perps pool (`getRecentPrioritizationFees`), capped so the
+      priority never passes `max_priority_fee_lamports`.
+    - **`JupiterPerpsVenue`** (`trade/venues/jupiter_perps/venue.py`, a
+      `PerpVenue`): `open_perp` reads the Doves price (and, for a long, a
+      USDC->SOL Jupiter quote for `jupiterMinimumOut`, at the provider's
+      slippage), sends the open request, then waits for the keeper: polls
+      the request and the position accounts (one `getMultipleAccounts`,
+      every 2 s, 60 s). Executed (the position grew): the fill is the
+      position account (entry price, size, collateral). The request gone
+      and the position unchanged: rejected (`SwapRejectedError`, REJECTED,
+      the keeper returns the collateral). Neither in time:
+      `TransactionSubmittedError` (UNCONFIRMED). `close_perp` does the same
+      with the close request, and its fill is the USDC that came back (the
+      owner's USDC account before the send and after the keeper; orders run
+      one at a time under the service lock), at the Doves price.
+    - **Venue stop (D7):** `PerpVenue.place_stop(terms, entry fill)` (paper:
+      nothing to do). `PerpAccount.buy` calls it right after recording the
+      open, at the spec's stop or half the distance to liquidation,
+      whichever is closer (`PerpTerms` gains `stop_pct`, kept in
+      `perp_json`: no schema change). If it fails: event
+      `perp_stop_failed` and an immediate sell through the normal path
+      (rationale: the venue stop could not be placed). Placed:
+      `perp_stop_placed` with the request address. After a close, a stop
+      request still on chain is logged and recorded (`perp_stop_left`): the
+      owner cancels it in the Jupiter UI (cancelling from the bot is A12).
+    - **Exits the venue made** (the stop fired, a liquidation): the sweep's
+      `liquidations()` reads the open buckets' position addresses in one
+      call; a position gone or at size 0 is an exit: its payout is the
+      owner's USDC change in the latest transaction on the position account
+      (`getSignaturesForAddress` limit 1 + `getTransaction`), 0 meaning
+      liquidated. It is booked like A8's liquidations (outside the policy).
+      `reconcile_perps` at start: positions the ledger doesn't know are
+      `perp_mismatch` events and block perp entries in that market.
+    - **Not here (A12):** the A3 resolver keeps a perp intent blocking (the
+      owner checks the position); cancelling a leftover stop from the bot.
+    - **Tests:** the venue with fake RPC/reader/executor (open executed,
+      rejected, timed out; close; stop placed, failed -> closed; an external
+      exit booked with its payout, and 0 as a liquidation); the send path
+      against the spot fakes; the fee pick. Nothing live sends.
+  - **Built (2026-10-07), waiting for the owner's run.** As designed:
+    `OnChainExecutor.send_instructions` (the rent close uses it too, now
+    with the balance simulation); `JupiterPerpsVenue`
+    (`trade/venues/jupiter_perps/venue.py`); `PerpVenue.open_perp`/
+    `close_perp` take the intent's key, plus `place_stop`/`stop_left`;
+    `PerpTerms.stop_pct`; `PerpAccount` places the stop after a recorded open
+    and sells at once if it fails (`perp_stop_failed`), checks for a leftover
+    stop after a close (`perp_stop_left`), and books a venue exit at its
+    payout (`venue_exit`; 0 is a liquidation, `perp_liquidated`);
+    `perp_mismatch` when a bucket opens and the venue has a position the
+    ledger doesn't; `wiring` gives real mode the venue only with
+    `perps_enabled` in `[real]`. The reader gained `priority_fee`,
+    `token_amount` and `last_payout`. Recent fees on the pool read 0 on
+    2026-10-07, so the price is the floor (a quarter of the cap). Tests:
+    `test_perps_venue.py` (13), `test_send_instructions.py`, two more in
+    `test_perp_buckets.py`. 907 tests; a paper `/smoke` of a fast short is
+    clean.
+  - **Owner checklist for the first real perp run:** archive or keep the
+    ledger as you prefer (schema 3); fund the hot wallet with USDC for the
+    collateral (Jupiter's keeper minimum is unknown: try 10 USDC) and keep
+    ~0.05 SOL for fees and the request/position accounts' rent; in
+    `policy.toml` `[real.trading]` set `perps_enabled = true`,
+    `allowed_symbols` with SOL and USDC, and `[real.limits]` `max_trade_usd`
+    at least the exposure (collateral x leverage); a spec with `market`
+    (e.g. a 2x short, 10 USDC, `max_hold` 10 min, a 2% stop); `serve real`
+    + `connect` in a terminal. Watch the `serve` log for `perp_stop_placed`
+    after the open, check the position and its stop in the Jupiter UI, and
+    after the close look for `perp_stop_left` (cancel that stop in the UI).
+    Then the same for a long. Report the keeper's minimum and timing.
 - **A12. Hardening — M.** Oracle staleness (entries denied on a stale venue
   oracle); partial closes; adding collateral; shared perp state reads through
-  the price hub.
+  the price hub. From the A11b `/simplify` review (left out of A11b, which
+  waits for the owner's run):
+  - the venue stop as its own gateway intent (key `{key}:stop`): idempotency,
+    `intent_sent` and the resolver for free, instead of the `announce`
+    callback on `PerpVenue.place_stop` and the `perp_stop_sent` event;
+  - `stop_left` reads the stop address from the ledger's `perp_stop_placed`
+    (the venue's in-memory `_stops` is lost on a restart), and cancelling it
+    from the bot;
+  - the A11a `reconcile_perps` (unused) run once at the first open in one
+    batched read, replacing the per-bucket `_check_venue_position`;
+  - a typed perp payload on `SentTx` instead of addresses in the mint fields
+    (needed by the perp resolver);
+  - compute budgeting inside `OnChainExecutor.send_instructions` (one
+    simulation per send; the rent close would get it too);
+  - one mode branch in `wiring` that builds the spot provider and the perp
+    venue together;
+  - paper venue stops that fire in the sweep, so paper runs the D7 path.
 
 ### Backlog (numbered when scheduled)
 - One round trip per `connect` tick (old B10 C7).
@@ -130,10 +244,11 @@ bumps the ledger schema, so it waits for the end of a paper soak.
 | A6 First real run | done | 2026-10-07; in `history.md` (run 1 findings -> A15; run 2 clean; rent refunded at expiry) |
 | A15 First real run fixes | done | 2026-10-06; in `history.md` |
 | A7 Perps: decoupling | done | 2026-10-07; in `history.md` |
-| A8 Perps: model, paper, spec | open | Schema bump; after a soak |
-| A9 Perps: backtest | open | |
-| A10 Perps: Jupiter read-only | open | Any time after A7 |
-| A11 Perps: Jupiter execution | open | |
+| A8 Perps: model, paper, spec | done | 2026-10-07; in `history.md`; the owner archives the ledgers before running it (schema 3) |
+| A9 Perps: backtest | done | 2026-10-07; in `history.md` |
+| A10 Perps: Jupiter read-only | done | 2026-10-07; in `history.md` |
+| A11a Perps: requests built and simulated | done | 2026-10-07; in `history.md` |
+| A11b Perps: requests sent, first real run | waiting for the owner | Built 2026-10-07; the owner's first real perp run (checklist in §4) |
 | A12 Perps: hardening | open | |
 
 ## 6. Known issues and limitations
@@ -170,6 +285,14 @@ bumps the ledger schema, so it waits for the end of a paper soak.
   fee is a fixed USD amount per leg. The live vs
   backtest comparison assumes the bucket started the window flat with its
   whole budget.
+- **Paper perps are a model** (A8, and the backtest, A9): the spot price stands in for the
+  venue oracle (the Doves price is read, not used yet: A12), borrow is
+  Jupiter's live rate when the position opens (A10; the backtest takes
+  `--borrow-bps-hour`), kept for the life of the position while the real one
+  moves with utilization, and the impact fee is linear. A liquidation is only seen while a
+  `connect` has its bucket open. A perp intent left EXECUTING blocks the mode
+  until the owner checks (no send log until A11). Sells close the whole
+  position (partial closes: A12).
 - **One tick per second** from the hub: conditions that count ticks, like
   `random_chance`, fire at a steady rate.
 - **The daily report needs Telegram**; without it the day is still marked as

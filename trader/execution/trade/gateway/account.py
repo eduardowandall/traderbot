@@ -21,7 +21,7 @@ from trader.execution.market.prices import PriceOracle, usd_snapshot
 from trader.execution.models.book import PositionBook, remainder_entry
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentSide, TradeIntent, with_idempotency_key
-from trader.execution.models.venue import Venue
+from trader.execution.models.venue import PostTrade, Venue
 from trader.execution.trade.gateway.balances import WalletBalances
 from trader.execution.trade.gateway.fills import (
     Fill,
@@ -72,6 +72,8 @@ class SpotAccount:
         wallet: WalletBalances | None = None,
     ):
         self.venue = venue
+        # quem busca os custos depois de executar (a perp troca, A8)
+        self.post_trade: PostTrade = venue
         self.prices = prices
         # relógio injetável: no backtest é o tempo do tick, para que
         # `Order.timestamp` (e o `max_hold` das estratégias) sigam o replay
@@ -198,7 +200,7 @@ class SpotAccount:
         """
         fill = await execute_trade(
             self.gateway,
-            self.venue,
+            self.post_trade,
             intent,
             call,
             sol_usd=usd.get(SOL_MINT),

@@ -2,7 +2,7 @@
 
 O id é o bucket: um id novo abre outro bucket e deixa o antigo (posição,
 PnL, conta de token a fechar) para trás. `ad3606394fc0` é o bucket real do
-A6. Um campo novo da spec com valor padrão precisa ficar fora do
+A6 (o arquivo saiu em 2026-10-07, com o bucket arquivado). Um campo novo da spec com valor padrão precisa ficar fora do
 `canonical_json` (A8, `market`); mudar o comportamento de uma spec daqui
 muda o id, e a linha muda junto, de propósito.
 """
@@ -18,11 +18,13 @@ EXAMPLES = PROJECT_ROOT / "docs" / "examples"
 IDS = {
     "spec-jup-sol-expr.json": "4c4dcb9b28aa",
     "spec-random.json": "3f82df8aa389",
-    "spec-real-first-run.json": "ad3606394fc0",
     "spec-scalp-test.json": "555d793e2f18",
     "spec-soak-metronome.json": "733e9d719fd6",
     "spec-soak-revert.json": "e104dba8efcd",
     "spec-sol-dip.json": "8bb94a8356d2",
+    "spec-sol-perp-long.json": "053f32754697",
+    "spec-sol-perp-short.json": "9ee89cd395a6",
+    "spec-sol-short.json": "fd41130ea6d3",
     "spec-target-value.json": "132be7f10464",
     "spec-wma-composer.json": "5422d6605a9a",
 }

@@ -22,7 +22,7 @@ from trader.execution.models.book import remainder_entry
 from trader.execution.models.errors import failed_signatures_of
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import TradeIntent
-from trader.execution.models.venue import Venue
+from trader.execution.models.venue import PostTrade
 from trader.execution.trade.gateway.gateway import TradeGateway
 from trader.shared.models.costs import (
     LAMPORTS_PER_SOL,
@@ -57,7 +57,7 @@ class Fill:
 
 async def execute_trade(
     gateway: TradeGateway,
-    venue: Venue,
+    venue: PostTrade,
     intent: TradeIntent,
     call: Callable[[], Awaitable[ExecutionResult]],
     sol_usd: Decimal | None = None,  # do retrato de antes do trade
@@ -73,7 +73,7 @@ async def execute_trade(
 
 
 async def settle(
-    venue: Venue,
+    venue: PostTrade,
     result: ExecutionResult,
     fees: FailedFees,
     failed: Sequence[str],
@@ -135,7 +135,7 @@ def record_leftover(
 @dataclass(frozen=True)
 class FailedFees:
     gateway: TradeGateway
-    venue: Venue
+    venue: PostTrade
     intent: TradeIntent
     sol_usd: Decimal | None
     on_fee: OnFailedFee | None

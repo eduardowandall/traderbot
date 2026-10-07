@@ -2,14 +2,16 @@
 
 Era o `SwapResult` (em `shared`): só o trade-runner e o backtest o usam. Os
 campos são os mesmos, então o evento `intent_executed` e as colunas
-`signature`/`in_amount`/`out_amount` do ledger não mudam. Perps (A8) somam a
-parte deles como um campo opcional.
+`signature`/`in_amount`/`out_amount` do ledger não mudam. Uma perna de perp
+(A8) traz também o `perp`: `in_amount`/`out_amount` são o colateral (raw do
+token de cotação) e o tamanho (raw do token base), no sentido da perna.
 """
 
 from dataclasses import dataclass, field
 from typing import Any
 
 from trader.shared.models.costs import TradeCosts
+from trader.shared.models.perp import PerpFill
 
 
 @dataclass
@@ -28,3 +30,5 @@ class ExecutionResult:
     quote: Any = field(default=None, compare=False, repr=False)
     # tentativas anteriores que a rede confirmou como falhas (taxa paga)
     failed_signatures: tuple[str, ...] = field(default=(), compare=False)
+    # perna de perp: preço do oráculo, tamanho, colateral, taxas (A8)
+    perp: PerpFill | None = field(default=None, compare=False)

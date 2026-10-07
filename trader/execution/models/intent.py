@@ -14,6 +14,7 @@ from decimal import Decimal
 from enum import StrEnum, auto
 
 from trader.execution.models.execution import ExecutionResult
+from trader.execution.models.perp import PerpTerms
 from trader.shared.models.mints import SOLANA_MINTS, Mint
 
 
@@ -64,6 +65,8 @@ class TradeIntent:
     # venda: já se sabe antes de executar que ela fecha a posição (limitada ao
     # saldo, ou a posição toda)? O restore usa isso se a ordem não foi gravada
     closes_position: bool | None = None
+    # perna de perp (A8): o mercado, o lado e a alavancagem; None no spot
+    perp: PerpTerms | None = None
     idempotency_key: str = field(default_factory=lambda: uuid.uuid4().hex)
     intent_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: datetime = field(default_factory=_now)

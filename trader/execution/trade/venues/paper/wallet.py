@@ -41,6 +41,9 @@ class SimulatedWallet:
         # token, a conta é criada e paga rent (como on-chain)
         self._open: set[str] = set()
         self._applied: list[dict] = []
+        # posições de perp abertas (A8), por "<mercado>:<lado>": o venue
+        # simulado (`perps.py`) é quem sabe o que guardar em cada uma
+        self._perps: dict[str, dict] = {}
         # horário do swap mais novo que já saiu do registro (None: nenhum)
         self.trimmed_at: float | None = None
         if self.path and self.path.exists():
@@ -65,6 +68,7 @@ class SimulatedWallet:
         self._raw = {mint: int(raw) for mint, raw in data["balances"].items()}
         # arquivos antigos não têm a lista: quem tem saldo já tem conta
         self._open = set(data.get("open_accounts", self._funded()))
+        self._perps = dict(data.get("perps", {}))
         log = data.get("applied", {})
         if isinstance(log, list):  # o primeiro formato do registro: só a lista
             self._applied, self.trimmed_at = log, None
@@ -83,6 +87,7 @@ class SimulatedWallet:
             for symbol, amount in balances.items()
         }
         self._open = set(self._funded())
+        self._perps = {}
         with _file_lock(self.path):  # um bot rodando não pode sobrescrever o reset
             self._save()
 
@@ -118,6 +123,55 @@ class SimulatedWallet:
         self.reload()
         return {mint: self.balance(mint) for mint, raw in self._raw.items() if raw}
 
+    def perps(self) -> dict[str, dict]:
+        """As posições de perp abertas, relidas do arquivo (A8)."""
+        self.reload()
+        return dict(self._perps)
+
+    def apply_perp(
+        self,
+        key: str,
+        record: dict | None,
+        moves: dict[str, int],
+        signature: str | None = None,
+    ) -> None:
+        """Abre (`record`) ou fecha (None) a posição `key` e move os saldos.
+
+        `moves`: mint -> raw (negativo debita). Como `apply_swap`: sob o lock,
+        relê, confere o saldo, grava e só então muda a memória. Abrir uma
+        posição que já existe, ou fechar uma que não existe, é recusado.
+        """
+        with _file_lock(self.path):
+            self._read()
+            if (key in self._perps) == (record is not None):
+                state = "já existe" if record is not None else "não existe"
+                raise InsufficientFundsError(f"posição perp {key} {state}")
+            raw = self._moved(moves)
+            perps = {k: v for k, v in self._perps.items() if k != key}
+            if record is not None:
+                perps[key] = record
+            applied, trimmed_at = self._applied, self.trimmed_at
+            if signature is not None:
+                applied, trimmed_at = self._logged(
+                    signature, 0, 0, -moves.get(SOL_MINT, 0), 0
+                )
+            self._write(raw, self._open, applied, trimmed_at, perps)
+            self._raw, self._perps = raw, perps
+            self._applied, self.trimmed_at = applied, trimmed_at
+
+    def _moved(self, moves: dict[str, int]) -> dict[str, int]:
+        raw = dict(self._raw)
+        for mint, amount in moves.items():
+            if raw.get(mint, 0) + amount < 0:
+                symbol = SOLANA_MINTS[mint].symbol
+                raise InsufficientFundsError(
+                    f"Saldo simulado insuficiente de {symbol}: tem "
+                    f"{self.balance(mint)}, precisa "
+                    f"{SOLANA_MINTS.raw_to_ui(mint, -amount)}"
+                )
+            raw[mint] = raw.get(mint, 0) + amount
+        return raw
+
     def apply_swap(
         self,
         input_mint: str,
@@ -149,7 +203,7 @@ class SimulatedWallet:
                 applied, trimmed_at = self._logged(
                     signature, in_amount, out_amount, fee_lamports, rent_lamports
                 )
-            self._write(raw, opened, applied, trimmed_at)
+            self._write(raw, opened, applied, trimmed_at, self._perps)
             self._raw, self._open = raw, opened
             self._applied, self.trimmed_at = applied, trimmed_at
 
@@ -173,7 +227,7 @@ class SimulatedWallet:
             applied, trimmed_at = self._logged(
                 signature, 0, rent_lamports, fee_lamports, -rent_lamports
             )
-            self._write(raw, opened, applied, trimmed_at)
+            self._write(raw, opened, applied, trimmed_at, self._perps)
             self._raw, self._open = raw, opened
             self._applied, self.trimmed_at = applied, trimmed_at
         return True
@@ -205,24 +259,14 @@ class SimulatedWallet:
         out_amount: int,
         sol: int,
     ) -> tuple[dict[str, int], set[str]]:
-        need = {input_mint: in_amount}
-        need[SOL_MINT] = need.get(SOL_MINT, 0) + sol
-        for mint, amount in need.items():
-            if amount and self.raw_balance(mint) < amount:
-                symbol = SOLANA_MINTS[mint].symbol
-                raise InsufficientFundsError(
-                    f"Saldo simulado insuficiente de {symbol}: "
-                    f"tem {self.balance(mint)}, precisa "
-                    f"{SOLANA_MINTS.raw_to_ui(mint, amount)}"
-                )
-        raw = dict(self._raw)
-        for mint, amount in need.items():
-            raw[mint] = raw.get(mint, 0) - amount
+        moves = {input_mint: -in_amount}
+        moves[SOL_MINT] = moves.get(SOL_MINT, 0) - sol
+        raw = self._moved(moves)
         raw[output_mint] = raw.get(output_mint, 0) + out_amount
         return raw, self._open | {output_mint}
 
     def _save(self) -> None:
-        self._write(self._raw, self._open, self._applied, self.trimmed_at)
+        self._write(self._raw, self._open, self._applied, self.trimmed_at, self._perps)
 
     def _write(
         self,
@@ -230,6 +274,7 @@ class SimulatedWallet:
         opened: set[str],
         applied: list[dict],
         trimmed_at: float | None,
+        perps: dict[str, dict],
     ) -> None:
         if self.path is None:
             return
@@ -242,6 +287,7 @@ class SimulatedWallet:
                     "balances": raw,
                     "open_accounts": sorted(opened),
                     "applied": {"swaps": applied, "trimmed_at": trimmed_at},
+                    "perps": perps,
                 },
                 indent=2,
                 sort_keys=True,

@@ -16,6 +16,7 @@ from trader.shared import logging_config
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import describe_costs
 from trader.shared.models.order import Order
+from trader.shared.models.perp import describe_fill
 from trader.shared.models.position import Position
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
@@ -208,10 +209,11 @@ class AsyncWebsocketTradingBot:
         log_placed_order(order)
         # o bucket depois do fill: PnL realizado e, com posição, a marcação
         after = await self.trader.bucket()
+        perp = "" if order.perp is None else f"\n{describe_fill(order.perp)}"
         self.notification_service.send_message(
             f"Ordem executada: {order.side.upper()} "
             f"{order.quantity:.8f} {self.symbol} @ "
-            f"USD {order.price:.8f}\n{bucket_line(after, current_price)}"
+            f"USD {order.price:.8f}{perp}\n{bucket_line(after, current_price)}"
         )
 
     async def _on_error(self, ex: Exception, backoff: float) -> float:
@@ -264,7 +266,8 @@ def bucket_line(snapshot: BucketSnapshot, price: Decimal) -> str:
     if snapshot.position is not None and snapshot.quote_usd:
         unrealized = snapshot.position.unrealized_usd(price * snapshot.quote_usd)
         line += f"; aberto ~${unrealized:+.4f} a {price:.8f}"
-    return line
+    perp = snapshot.position and snapshot.position.perp_line(datetime.now(UTC))
+    return f"{line}; {perp}" if perp else line
 
 
 def log_position(position: Position, current_price: Decimal, quote_usd: Decimal | None):
@@ -278,7 +281,10 @@ def log_position(position: Position, current_price: Decimal, quote_usd: Decimal 
     usd = position.unrealized_usd(current_price * quote_usd) if quote_usd else None
     unrealized = "" if usd is None else f" (~${usd:+.4f})"
 
+    side = str(position.direction).upper()
+    perp = position.perp_line(datetime.now(UTC))
+    extra = f" [{perp}]" if perp else ""
     bot_logger.debug(
-        f"LONG {position.entry_order.quantity:.8f} @ {format_price(position.entry_order.quote_price)}. PNL: {pnl_str}{unrealized}",
+        f"{side} {position.entry_order.quantity:.8f} @ {format_price(position.entry_order.quote_price)}. PNL: {pnl_str}{unrealized}{extra}",
         extra={"markup": True},
     )

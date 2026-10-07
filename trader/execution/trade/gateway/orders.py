@@ -64,6 +64,48 @@ def order_from_fill(
     )
 
 
+def perp_order_from_fill(
+    fill: Fill,
+    quote: Mint,
+    token: Mint,
+    side: OrderSide,
+    now: datetime,
+    signal_price: Decimal,
+    usd: Mapping[str, Decimal],
+    requested_quantity: Decimal,
+) -> Order:
+    """Uma perna de perp (A8): o tamanho no token base, o colateral em cotação.
+
+    O preço é o do oráculo (`ExecutionResult.perp`), não colateral / tamanho;
+    o colateral é uma stablecoin, então o preço já é USD. Nunca levanta.
+    """
+    result = fill.result
+    perp = result.perp
+    assert perp is not None
+    size_raw, collateral_raw = _by_side(
+        fill, token, result.in_amount, result.out_amount
+    )
+    rates = _rates(quote, token, perp.price, perp.price, usd)
+    return Order(
+        order_id=result.signature,
+        input_mint=quote.mint,
+        output_mint=token.mint,
+        quantity=token.raw_to_ui(size_raw),
+        price=perp.price,
+        side=side,
+        timestamp=now,
+        requested_quantity=requested_quantity,
+        requested_price=signal_price,
+        fill_price=perp.price,
+        quote_amount=quote.raw_to_ui(collateral_raw),
+        quote_usd=rates.quote_usd,
+        sol_usd=rates.sol_usd,
+        sol_in_quote=rates.sol_in_quote,
+        costs=fill.costs,
+        perp=perp,
+    )
+
+
 def _amounts(fill: Fill, quote: Mint, token: Mint) -> tuple[Decimal, Decimal]:
     """(quantidade do token, valor em cotação): efetivos, senão os da quote."""
     for in_raw, out_raw in (fill.amounts(), _quoted(fill)):

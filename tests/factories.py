@@ -352,6 +352,28 @@ def signs(rpc, last_valid_block_height: int = 1_000):
     return rpc
 
 
+def signs_instructions(rpc, last_valid_block_height: int = 1_000):
+    """Um RPC falso que monta e assina de verdade as instruções (sem rede)."""
+    from unittest.mock import AsyncMock
+
+    from solders.hash import Hash
+    from solders.message import MessageV0
+    from solders.transaction import VersionedTransaction
+
+    from trader.execution.trade.venues.jupiter.async_rpc_client import SignedTx
+
+    def sign(instructions, keypair):
+        message = MessageV0.try_compile(
+            keypair.pubkey(), instructions, [], Hash.default()
+        )
+        return SignedTx(
+            VersionedTransaction(message, [keypair]), last_valid_block_height
+        )
+
+    rpc.sign_instructions = AsyncMock(side_effect=sign)
+    return rpc
+
+
 def simulation(lamports: int = 10**9, tokens=()):
     """Resposta de simulação com a carteira e as contas de token pedidas."""
     from types import SimpleNamespace
@@ -372,3 +394,20 @@ class Inbox:
 
     async def aclose(self) -> None:
         return None
+
+
+class PerpOracle:
+    """Um `PriceOracle` de teste: SOL a `price` USD, mudável com `set` (A8)."""
+
+    def __init__(self, price="100"):
+        from trader.shared.models.mints import SOL_MINT
+
+        self.mint = SOL_MINT
+        self.prices: dict[str, Decimal] = {}
+        self.set(price)
+
+    def set(self, price) -> None:
+        self.prices[self.mint] = Decimal(str(price))
+
+    async def usd_prices(self, mints) -> dict[str, Decimal]:
+        return {m: self.prices[m] for m in mints if m in self.prices}

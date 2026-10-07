@@ -264,6 +264,24 @@ def test_backtest_with_candles(tmp_path, fake_market):
     assert fake_market.closed
 
 
+def test_backtest_runs_a_perp(tmp_path, fake_market):
+    market = {"kind": "perp", "venue": "jupiter", "direction": "short", "leverage": 3}
+    exit_ = {
+        "stop": {"type": "stop_loss", "pct": 5},
+        "conditions": [{"type": "max_hold", "minutes": 60}],
+    }
+    path = _spec_file(tmp_path, **SWING | {"market": market, "exit": exit_})
+    args = ("--candles", "60", "--fee-bps", "0", "--network-fee-usd", "0.003")
+    body = json.loads(
+        _invoke("backtest", path, *args, "--borrow-bps-hour", "5", "--json").stdout
+    )
+    assert body["ok"], body
+    assert body["perp"]["direction"] == "short"
+    assert body["perp"]["borrow_bps_hour"] == "5"
+    text = _invoke("backtest", path, *args).stdout
+    assert "perp short 3x" in text and "(1 bps/h)" in text
+
+
 def test_backtest_reports_the_cost_per_round_trip(tmp_path, fake_market):
     path = _spec_file(tmp_path, **SWING)
     body = json.loads(_invoke("backtest", path, "--candles", "60", "--json").stdout)

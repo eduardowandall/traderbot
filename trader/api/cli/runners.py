@@ -122,7 +122,11 @@ def _load_strategy(spec_file: Path, seed: str | None) -> SpecStrategy:
 
 def limits_from_policy(policy: Policy) -> SpecLimits:
     return SpecLimits(
-        max_trade_usd=policy.max_trade_usd, allowed_symbols=policy.allowed_symbols
+        max_trade_usd=policy.max_trade_usd,
+        allowed_symbols=policy.allowed_symbols,
+        perps_enabled=policy.perps_enabled,
+        max_leverage=policy.max_leverage,
+        allowed_perp_markets=policy.allowed_perp_markets,
     )
 
 

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "sol-perp-long",
+  "agent_id": "claude",
+  "rationale": "A9 example: a 2x SOL long on Jupiter Perps that buys a dip. Entry when SOL is 1.5% under its 60-bar high and RSI(14) is under 35; out on a 1.5% take-profit, a 3% stop (well inside the 24.88% limit at 2x) or after 4 hours, since borrow grows every hour. 10 USD of collateral (20 USD of exposure) a time inside a 30 USD budget. Not tuned: it shows the perp backtest, not an edge.",
+  "symbol": "SOL-USDC",
+  "timeframe": "1_MINUTE",
+  "market": {"kind": "perp", "venue": "jupiter", "direction": "long", "leverage": 2},
+  "entry": {
+    "mode": "all",
+    "conditions": [
+      {"type": "dip_from_high", "window": 60, "pct": 1.5},
+      {"type": "rsi_below", "period": 14, "value": 35}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 3},
+    "mode": "any",
+    "conditions": [
+      {"type": "take_profit", "pct": 1.5},
+      {"type": "max_hold", "minutes": 240}
+    ]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 10},
+  "budget_usd": 30,
+  "max_loss_usd": 15,
+  "cooldown_minutes": 30,
+  "ttl_days": 7
+}

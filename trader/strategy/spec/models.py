@@ -34,8 +34,10 @@ from trader.shared.spec.terms import (
     NAME_PATTERN,
     SPEC_ID_PATTERN,
     SYMBOL_PATTERN,
+    PerpMarket,
     SpecTerms,
     check_money_and_expiry,
+    check_perp,
     expiry,
 )
 from trader.strategy.spec import expr as expr_lang
@@ -485,6 +487,11 @@ class StrategySpec(_Block):
         str | None,
         Field(pattern=SPEC_ID_PATTERN, description="Id da spec que esta substitui"),
     ] = None
+    # sem ele, spot; fora do `canonical_json` quando None (os ids não mudam)
+    market: Annotated[
+        PerpMarket | None,
+        Field(description="Perp (A8): direction long/short e leverage; omita no spot"),
+    ] = None
 
     @model_validator(mode="after")
     def _invariants(self):
@@ -492,7 +499,15 @@ class StrategySpec(_Block):
         check_money_and_expiry(
             self.budget_usd, self.max_loss_usd, self.expires_at, self.ttl_days
         )
+        check_perp(self.market, self.exit.stop.pct, self.max_hold_minutes())
         return self
+
+    def max_hold_minutes(self) -> int | None:
+        """O `max_hold` que sempre sai (com `exit.mode: any`), se houver."""
+        if self.exit.mode != "any":
+            return None
+        holds = [c.minutes for c in self.exit.conditions if isinstance(c, MaxHold)]
+        return min(holds, default=None)
 
     def expiry(self, start: datetime) -> datetime:
         """Quando a spec expira, para uma execução que começou em `start`."""
@@ -516,7 +531,9 @@ class StrategySpec(_Block):
         specs que operam igual têm o mesmo id, e reescrever a justificativa
         não quebra o `supersedes`.
         """
-        data = _canonical(self.model_dump(mode="python", exclude=METADATA_FIELDS))
+        # um campo novo com valor padrão fica de fora: os ids antigos valem
+        omit = METADATA_FIELDS | ({"market"} if self.market is None else set())
+        data = _canonical(self.model_dump(mode="python", exclude=omit))
         return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
     def spec_id(self) -> str:
@@ -536,6 +553,9 @@ class StrategySpec(_Block):
             sizing_field="sizing.usd" if fixed else "sizing.pct",
             expires_at=self.expires_at,
             ttl_days=self.ttl_days,
+            market=self.market,
+            stop_pct=self.exit.stop.pct if self.market else None,
+            max_hold_minutes=self.max_hold_minutes() if self.market else None,
         )
 
 

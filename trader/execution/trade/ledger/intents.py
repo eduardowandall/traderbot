@@ -24,6 +24,7 @@ from trader.execution.models.intent import (
     SentTx,
     TradeIntent,
 )
+from trader.execution.models.perp import PERP, SPOT, terms_from_json, terms_to_json
 from trader.execution.trade.ledger.reports import FAILED_TX_FEE
 from trader.execution.trade.ledger.store import (
     LedgerStore,
@@ -41,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 INTENT_SENT = "intent_sent"
 INTENT_RESOLVED = "intent_resolved"
+# uma perna que o venue executou sem nós (uma liquidação, A8)
+INTENT_EXTERNAL = "intent_external"
 
 
 class IntentStore(LedgerStore):
@@ -87,8 +90,9 @@ class IntentStore(LedgerStore):
             "INSERT INTO intents (intent_id, idempotency_key, created_at, "
             "updated_at, source, account, side, spend_mint, receive_mint, "
             "spend_amount, notional_usd, price, quantity, rationale, "
-            "closes_position, status, decision_reasons, policy_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "closes_position, status, decision_reasons, policy_version, "
+            "instrument, perp_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 intent.intent_id,
                 intent.idempotency_key,
@@ -108,6 +112,8 @@ class IntentStore(LedgerStore):
                 str(status),
                 json.dumps(list(decision.reasons)),
                 decision.policy_version,
+                SPOT if intent.perp is None else PERP,
+                terms_to_json(intent.perp),
             ),
         )
 
@@ -163,6 +169,34 @@ class IntentStore(LedgerStore):
             in_amount=result.in_amount,
             out_amount=result.out_amount,
         )
+
+    def record_external(
+        self, intent: TradeIntent, result: ExecutionResult, reason: str
+    ) -> bool:
+        """Uma perna que o venue fez sem pedido nosso (liquidação), já EXECUTED.
+
+        Fora da política: aconteceu. A chave de idempotência evita registrar
+        duas vezes (False: já estava).
+        """
+        with self._write():
+            if self.find_by_idempotency_key(intent.idempotency_key) is not None:
+                return False
+            decision = PolicyDecision(True, (reason,), "external")
+            self._insert(intent, decision, IntentStatus.EXECUTED)
+            payload = {
+                "intent": asdict(intent),
+                "reason": reason,
+                "result": asdict(result),
+            }
+            self._update_locked(
+                intent.intent_id,
+                INTENT_EXTERNAL,
+                payload,
+                signature=result.signature,
+                in_amount=result.in_amount,
+                out_amount=result.out_amount,
+            )
+        return True
 
     def record_send(self, intent_id: str, sent: SentTx) -> None:
         """Grava o envio (evento e assinatura) antes de ele acontecer.
@@ -429,6 +463,7 @@ def _record(row: sqlite3.Row) -> IntentRecord:
         closes_position=(
             None if row["closes_position"] is None else bool(row["closes_position"])
         ),
+        perp=terms_from_json(row["perp_json"]),
     )
     return IntentRecord(
         intent=intent,

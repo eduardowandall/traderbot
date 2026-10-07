@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from trader.shared.models import SOLANA_MINTS, Mint
+from trader.shared.models.perp import DEFAULT_MAX_LEVERAGE, DEFAULT_PERP_MARKETS
 from trader.shared.spec.terms import SpecTerms
 
 # prazo máximo de uma spec; vai para a seção [strategies] da política (B1)
@@ -40,6 +41,10 @@ class SpecLimits:
     max_trade_usd: Decimal
     allowed_symbols: tuple[str, ...] = ()  # vazio = todos do registro
     max_days: int = DEFAULT_MAX_DAYS
+    # perps (A8): desligadas por padrão; a política do modo liga
+    perps_enabled: bool = False
+    max_leverage: Decimal = DEFAULT_MAX_LEVERAGE
+    allowed_perp_markets: tuple[str, ...] = DEFAULT_PERP_MARKETS
 
 
 Rule = Callable[[SpecTerms, SpecLimits, datetime], Iterator[SpecError]]
@@ -75,10 +80,11 @@ def _allowed(token: Mint, quote: Mint, limits: SpecLimits) -> Iterator[SpecError
 
 def _sizing(terms: SpecTerms, limits: SpecLimits, now: datetime):
     path, usd = terms.sizing_field, terms.max_trade_usd
-    if usd > limits.max_trade_usd:
+    exposure = terms.exposure_usd  # numa perp, o gasto x alavancagem
+    if exposure > limits.max_trade_usd:
         # acima do limite por trade toda compra seria recusada pela política
         yield SpecError(
-            path, f"{usd} USD acima do limite por trade {limits.max_trade_usd}"
+            path, f"{exposure} USD acima do limite por trade {limits.max_trade_usd}"
         )
     if usd > terms.budget_usd:
         yield SpecError(path, f"{usd} USD acima do budget_usd {terms.budget_usd}")
@@ -93,7 +99,35 @@ def _expiry(terms: SpecTerms, limits: SpecLimits, now: datetime):
         yield SpecError(path, f"mais de {limits.max_days} dias no futuro")
 
 
-RULES: tuple[Rule, ...] = (_symbol, _sizing, _expiry)
+def _perp(terms: SpecTerms, limits: SpecLimits, now: datetime):
+    market = terms.market
+    if market is None:
+        return
+    if not limits.perps_enabled:
+        yield SpecError("market", "perps desligadas na política (perps_enabled)")
+    if market.leverage > limits.max_leverage:
+        yield SpecError(
+            "market.leverage",
+            f"{market.leverage}x acima do máximo {limits.max_leverage}x",
+        )
+    yield from _perp_pair(terms.symbol, limits)
+
+
+def _perp_pair(symbol: str, limits: SpecLimits) -> Iterator[SpecError]:
+    try:
+        base, quote = SOLANA_MINTS.get_pair(symbol)
+    except ValueError:
+        return  # `_symbol` já reclamou
+    allowed = limits.allowed_perp_markets  # vazio = todos
+    if allowed and base.symbol not in allowed:
+        yield SpecError("symbol", f"mercado perp não permitido: {base.symbol}")
+    if quote.symbol != "USDC":
+        # o colateral é o token de cotação (D5); os pedidos da Jupiter entram
+        # e saem pela conta de USDC (A11a)
+        yield SpecError("symbol", f"o colateral de uma perp é USDC, não {quote.symbol}")
+
+
+RULES: tuple[Rule, ...] = (_symbol, _sizing, _expiry, _perp)
 
 
 def validate(

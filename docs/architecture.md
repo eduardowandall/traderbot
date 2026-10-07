@@ -54,7 +54,7 @@ the ledger or the policy.
 | execution | buckets, the account, the one path to a swap; reaches a venue only through the `Venue` protocol (A7, tested) | `trader/execution/trade/trading_service/` (`service.py`, `local.py`), `trader/execution/trade/gateway/` (`account.py`: `SpotAccount`, a `BucketAccount`; `gateway.py`, `fills.py`, `orders.py`) |
 | risk | limits and the audit log | `trader/execution/trade/policy/`, `trader/execution/trade/ledger/` |
 | venue | moves funds | `trader/execution/trade/venues/spot.py` (`SpotVenue`: the `Venue` that wraps the provider), `trader/execution/trade/venues/jupiter/` (`async_jupiter_svc.py` provider, `executor.py` + `async_rpc_client.py` real), `trader/execution/trade/venues/paper/` (paper) |
-| market | read-only prices and candles (`hub.py`: one price feed for every bot; `pair.py`: the token in the quote token) | `trader/execution/market/` (`data.py`, `hub.py`, `prices.py`, `jupiter/`: `async_jupiter_client.py`, `candles.py`), `trader/shared/market/` (`feed.py`, `pair.py`, no network) |
+| market | read-only prices and candles (`hub.py`: one price feed for every bot; `pair.py`: the token in the quote token), and the Jupiter Perps state (A10) | `trader/execution/market/` (`data.py`, `hub.py`, `prices.py`, `jupiter/`: `async_jupiter_client.py`, `candles.py`; `perps/`: `idl.py`, `reader.py`), `trader/shared/market/` (`feed.py`, `pair.py`, no network) |
 | core | plain data and protocols | `trader/shared/models/` (`direction.py`: long/short, D3), `trader/execution/models/` (`venue.py` `Venue`, `bucket.py` `BucketAccount`, `execution.py` `ExecutionResult`), `trader/shared/trading_service/` (`protocol.py`, `wire.py`), `trader/shared/notification/`, `trader/shared/spec/` (`terms.py`, `validate.py`), `trader/shared/indicators.py`, `trader/shared/paths.py`, `trader/shared/logging_config.py` |
 
 ## 3. One paper buy, hop by hop
@@ -123,10 +123,10 @@ after, and a send without an outcome is resolved on later sweeps
 
 | State | Where | Notes |
 |---|---|---|
-| Intents, orders, PnL, events | `data_dir()/ledger-<mode>.sqlite3` (`trader/execution/trade/ledger/`) | **The source of truth.** One schema, versioned by `PRAGMA user_version`; an older file is refused (move or delete it). Costs without a trade (`failed_tx_fee`), rent refunds (`rent_refund_sent`, `rent_refund`) and the sent daily reports (`daily_report`) are events. |
+| Intents, orders, PnL, events | `data_dir()/ledger-<mode>.sqlite3` (`trader/execution/trade/ledger/`) | **The source of truth.** One schema, versioned by `PRAGMA user_version`; an older file is refused (move or delete it). Costs without a trade (`failed_tx_fee`), rent refunds (`rent_refund_sent`, `rent_refund`) and the sent daily reports (`daily_report`) are events. Schema 3 (A8) adds `instrument`/`perp_json`; a liquidation is an `intent_external` leg plus a `perp_liquidated` event. |
 | Position and PnL totals of a bucket | `SpotAccount.book` (`models/book.py`) | Rebuilt from the ledger at startup (`gateway.restore`), then kept in step by each fill. |
 | Signal state (entry price, peak, cooldown, re-arm, expiry) | `SpecStrategy` | Restored through `resume()` from the bucket snapshot. |
-| Paper balances | `data_dir()/paper-wallet.json` (`paper/wallet.py`) | Created with 100 USDC + 0.5 SOL; delete it to start over. |
+| Paper balances | `data_dir()/paper-wallet.json` (`paper/wallet.py`) | Created with 100 USDC + 0.5 SOL; delete it to start over. Open paper perps sit under `perps`, one per market and side (`paper/perps.py`). |
 | Policy | `policy_file()` (`policy.toml`, untracked) | Model: `policy.example.toml`. Paper has roomy limits by default. |
 | Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. `websockets` at INFO, `hpack`/`h2` at WARNING; the bot writes the ticker and open-position lines once per bar (`_log_bar`), prices with 8 significant digits (`format_price`). |
 
@@ -182,7 +182,15 @@ with three substitutions:
   divides the two series with `market/pair.py`'s `ratio_candles`), the service
   gets `ReplayPrices` as its price oracle, and equity is measured in USD;
 - the gateway is `TradeGateway.in_memory()` (in-memory ledger, no policy
-  limits, since ledger timestamps are wall-clock).
+  limits, since ledger timestamps are wall-clock; perps allowed).
+
+A perp spec (A9) adds a fourth: the service gets `ReplayPerpsVenue` (the
+paper engine with the tick as oracle and clock, and the network fee as a leg
+cost like `ReplayExecutor`, `with_network_fee`), the bucket opens with the
+spec's `PerpTerms`, and before the strategy's step each tick asks
+`check_liquidations`. Equity adds what closing the open perp would return
+(`SimulatedPerpsVenue.equity_at`); the result carries a `PerpSummary` and
+liquidated trades are marked.
 
 It uses the same `decision.order_for` as the bot, the replay clock and a fixed
 seed, so the same input and the same costs always give the same result (a
@@ -313,8 +321,48 @@ Any request that fails answers `{"ok": false, "error": "<Type>: <msg>", "kind": 
 `StalePriceError` into `PriceUnavailableError` and anything else into
 `TradeServiceError`.
 
-## 10. Where it's going
+## 10. Perps in paper (A8)
+
+A spec with `market` (`"direction": "short", "leverage": 3`) is checked at
+`hello` like any other plus the perp rules (`validate.py::_perp`, the
+spec's own stop and `max_hold` checks in `terms.py::check_perp`), and the
+runner opens its bucket with `PerpTerms`. `TradeService` builds a
+`PerpAccount` (a `SpotAccount` whose buy and sell go to the `PerpVenue`), so
+the hops above are the same from 3 to 8 and from 11 to 16: the intent carries
+`perp`, the policy adds `_perp_entry` and sees the exposure, the ledger stores
+`instrument`/`perp_json`. Hop 9-10 is `SimulatedPerpsVenue.open_perp`: the
+hub's spot price as the oracle, collateral debited from the paper wallet,
+0.06% + impact in fees, the position under `perps`; `close_perp` pays back
+collateral + PnL - borrow - fees. Hop 13 is `orders.py::perp_order_from_fill`
+(size in base, collateral in quote, the oracle price, `Order.perp`). On every
+sweep `check_liquidations` asks the venue about the open perp buckets; a
+liquidated one is booked with `Ledger.record_external` (the whole collateral
+lost) and `perp_liquidated`, and only then does the venue drop it
+(`acknowledge`), so a failed write is retried on the next sweep. Fill messages and the daily report add side,
+leverage, liquidation price and accrued borrow (`Position.perp_line`).
+
+**The real venue, read-only (A10).** `JupiterPerpsReader`
+(`market/perps/reader.py`) reads the JLP pool, a market's custody (fees,
+utilization, the jump-rate borrow curve), the Doves aggregated price and a
+wallet's position PDA through `getMultipleAccounts`, decoding with the
+vendored IDL (`idl.py`). In paper, `wiring` hands it to
+`SimulatedPerpsVenue` as `borrow_rates`: a position opens at the market's
+live borrow rate (the default if the read fails). Execution on the real venue
+is A11: the requests (open, the venue stop, close) are built and simulated
+(`trade/venues/jupiter_perps/requests.py`, A11a; `reconcile.py` compares the
+ledger with the venue's positions). A11b: in `serve real` with
+`perps_enabled`, `JupiterPerpsVenue` sends them through the spot executor's
+`send_instructions` (program allowlist, balance simulation, the send logged
+first) and waits for the keeper (the request and position accounts, 60 s):
+executed fills from the position (open) or the USDC that came back (close);
+dropped is REJECTED; no answer is UNCONFIRMED. `PerpAccount` places the
+venue stop after each recorded open and sells at once if it can't; the
+sweep books exits the venue made (its stop, a liquidation) from the keeper's
+payout.
+
+## 11. Where it's going
 
 The roadmap is [`plan.md`](plan.md): the first tiny-budget real run is done
-(A6) and the seams for perpetual futures are in (A7); perps come next. Specs stay
+(A6), and perps run in paper and in backtests (A7-A9); next the Jupiter Perps
+adapter (A10, A11). Specs stay
 files written from [`specs.md`](specs.md).

@@ -17,7 +17,13 @@ from trader.shared.trading_service.protocol import OrderRequest
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
-ENTRY = {"price": "100", "out_amount": 1000, "spend_amount": "10", "notional_usd": "10"}
+ENTRY = {
+    "price": "100",
+    "out_amount": 1000,
+    "spend_amount": "10",
+    "notional_usd": "10",
+    "perp_json": None,  # spot
+}
 
 
 def _sell(**fields):

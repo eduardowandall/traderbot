@@ -2925,7 +2925,8 @@ are identical and `tests/test_architecture.py` maps the new modules.
     BUY/SELL keep their names (they mean enter/exit, D2). The reconcile
     stays on the ledger's open positions, which covers buckets no
     `connect` has opened yet; `held()` comes with A8, when perp positions
-    must leave the wallet reconcile.
+    must leave the wallet reconcile. (Superseded in A8: `open_positions`
+    skips entries with a `perp`, which also covers unopened buckets.)
   - `Direction` (`trader/shared/models/direction.py`: `LONG`, `SHORT`, a
     `sign`). `Position.direction` (default `LONG`) signs
     `unrealized_pnl`; the wire sends it only when it isn't long, so old
@@ -2952,3 +2953,283 @@ are identical and `tests/test_architecture.py` maps the new modules.
   builds `SpotAccount`; gateway tests still mock the Jupiter provider through
   `SpotVenue` (`spot_provider`) instead of a `Venue` mock; `Position.direction`
   isn't persisted.
+
+#### A8. Perps: model, paper and spec — L (done 2026-10-07)
+ The `market` block (+ `specs.md`)
+checked against the policy at `hello`; `PerpTerms`, `PerpPosition`,
+`PerpAccount` (a `BucketAccount`, A7; the wallet reconcile leaves perp
+positions out, through a `held()` on the protocol; `TradeService` gets
+the account kind from the venue instead of building a `SpotAccount`, and
+the direction is stored with the entry, not only on `Position`) [as built:
+the reconcile skips perp entries in `open_positions`, and the account kind
+comes from the spec's market (`open_bucket(perp=...)`)]; ledger schema +1 (D6) and restore of an open perp position;
+`SimulatedPerpsVenue` and the liquidation check in `serve`'s sweep; policy
+`perps_enabled`, `max_leverage` (default 3), `allowed_perp_markets`,
+exposure as notional; the daily report and notifications show direction,
+leverage, liquidation price and accrued borrow. Done when a short spec in
+paper opens, holds, stops out and is liquidated in a forced test, with the
+ledger and PnL right after a restart.
+- **Design (2026-10-07).** The owner archives `.data/ledger-*.sqlite3`
+  before running this build (schema 2 -> 3, no migration; decided
+  2026-10-07). A perp leg rides the existing swap-shaped path (intent ->
+  gateway -> ledger -> `Order` -> `PositionBook`) with the perp parts
+  added, so idempotency, policy, breaker, restore and PnL stay one code
+  path. Spot is unchanged and spot spec ids too (pinned).
+  - **Spec and terms.** `market` (`PerpMarket` in
+    `trader/shared/spec/terms.py`: `kind: "perp"`, `venue: "jupiter"`,
+    `direction`, `leverage` 1.1-250) on `StrategySpec` and `SpecTerms`;
+    `canonical_json` leaves it out when it's `None`. `symbol` stays
+    `BASE-QUOTE` (`SOL-USDC`): the base is the market, the quote a USD
+    stablecoin, the collateral (D5). The spec itself requires a `max_hold`
+    exit and a stop (`stop_loss`/`trailing_stop`) of at most half the
+    liquidation distance after fees (`pct <= 50 / leverage - 0.12`); the
+    terms carry `stop_pct` and `max_hold_minutes` so the trade-runner
+    re-checks them at `hello` (`validate.py`), with `perps_enabled`,
+    `max_leverage` and `allowed_perp_markets`. Sizing and `budget_usd`
+    count collateral; the exposure (collateral x leverage) is what
+    `max_trade_usd` and the daily notional see.
+  - **Policy.** `perps_enabled` (default off; on in `PAPER_DEFAULTS`),
+    `max_leverage` (3), `allowed_perp_markets` (`["SOL"]`, the only one in
+    the registry). `evaluate` refuses a perp entry that breaks them; exits
+    are never blocked.
+  - **Models.** `Direction` stays in `shared`; `PerpTerms` (market mint,
+    direction, leverage) on `TradeIntent.perp`; `PerpFill`
+    (`trader/shared/models/perp.py`: price, size USD, collateral, fees,
+    borrow, liquidation price, liquidated) on `ExecutionResult.perp` and
+    `Order.perp`, so the entry order carries the direction and the
+    `Position` takes it from there (restore included). Order convention for
+    a perp leg: `quantity` is the size in the base token, `fill_price` the
+    oracle fill price, `quote_amount` the collateral posted (entry) or
+    returned (exit); the existing PnL then is collateral back - collateral
+    posted (D9). `Position.unrealized_usd` is direction-aware and, for a
+    perp, takes off the accrued borrow and the close fee.
+  - **Ledger (schema 3).** `intents.instrument` (`spot`/`perp`) and
+    `intents.perp_json` (the `PerpTerms`). `open_positions` (the wallet
+    reconcile) counts spot only. A liquidation is recorded as an EXECUTED
+    exit leg outside the policy (`Ledger.record_external`, rationale
+    `liquidation`): the whole collateral is a realized loss and counts for
+    `max_loss_usd`.
+  - **Venue and account.** `PerpVenue` (protocol, beside `Venue`):
+    `open_perp(collateral, market, amount, terms)`,
+    `close_perp(collateral, market, terms)`, `position(market, direction)`
+    and `liquidations(now)`, plus the common post-trade calls.
+    `SimulatedPerpsVenue` (`trader/execution/trade/venues/paper/perps.py`)
+    keeps positions under `perps` in `paper-wallet.json` (one per market and
+    side, like Jupiter), prices from the process oracle (the hub; spot
+    stands in for the venue oracle), and the Jupiter fee model from §8.2:
+    0.06% of size each way, a linear impact fee, an hourly borrow fee
+    (default 1 bps of size an hour; A10 brings the live rate), liquidation
+    at 0.2% of size; each leg also pays the base fee + priority cap in SOL
+    like spot paper. `PerpAccount` (`trade/gateway/perp_account.py`, a
+    `BucketAccount`) spends collateral from the wallet and always closes
+    the whole position (partial closes are A12). `TradeService` takes the
+    perp venue beside the spot one (`None` in real: perp buckets are
+    refused until A11), picks the account kind from the spec's market, and
+    refuses a second open perp bucket on the same market and side.
+  - **Sweep.** `serve`'s sweep asks the perp venue for liquidations at the
+    current price and books each one on its bucket (`perp_liquidated`
+    event, Telegram). The A3 resolver leaves a perp intent blocking (the
+    owner checks); a perp send log comes with A11.
+  - **Reports.** `connect`'s fill messages and the daily report show
+    direction, leverage, liquidation price and accrued borrow. `backtest`
+    refuses a perp spec until A9.
+  - **Done when** a short `SOL-USDC` spec in paper opens, holds, stops out,
+    and is liquidated in a forced test (prices moved past the liquidation
+    price), with the ledger and PnL right after a restart; plus
+    `docs/examples/spec-sol-short.json` and a `/smoke` of it.
+- **Result.** As designed, with these details: `Position.direction` is
+  derived from the entry order's `perp` (no separate field, nothing extra on
+  the wire); `PerpAccount` is a `SpotAccount` subclass (restore, intents and
+  the USD snapshot shared; `post_trade` points at the perp venue);
+  `PerpVenue.liquidations(open_)` checks only the positions of buckets this
+  `serve` has open (another bucket's is checked when it connects); the
+  `serve` sweep is a list of steps. `ledger_dump.py` shows an open perp's
+  `PerpFill`. Tests: `test_perp_buckets.py` (the "done when": a 3x short opens,
+  stops out, reopens, is liquidated past its liquidation price, and a fresh
+  service on the same ledger and wallet has the same PnL; an open short is
+  restored and closed after a restart; one bucket per market and side; no perp
+  venue in real; the policy's switch and exposure limit),
+  `test_paper_perps.py` (fees, borrow, liquidation math, the wallet),
+  `test_perp_spec.py` (spec, terms, `hello` rules), and the backtest refusal.
+  `docs/examples/spec-sol-short.json` (id pinned). A `/smoke` of a fast copy
+  of it (20% draw, 2 min `max_hold`) opened, closed and reopened in 260 s: the
+  round trips cost ~0.05 USD each at 30 USD of exposure (0.036 in perp fees +
+  2 x 105,000 lamports). 857 tests. `/code-review` and `/simplify`: one
+  position per market and side is checked at the buy, against the venue
+  (`PerpVenue.has_position`), so a retired v1 never blocks v2 and a clash is
+  a clean refusal with no intent; equity has one formula (`PerpFill.equity`,
+  with the venue's close fee), so the stored liquidation price is where the
+  paper venue liquidates; a
+  liquidation is booked before the venue forgets it (`acknowledge`), so a
+  failed ledger write is retried; `spec_backtester` refuses perps, so
+  `live_vs_backtest.py` does too.
+
+#### A9. Perps: backtest — M (done 2026-10-07)
+ The replay uses the perp engine;
+`--borrow-bps-hour`; liquidation on the candle path; the summary shows
+liquidations and fees; two example specs.
+- **Design (2026-10-07).** The replay is the paper path already
+  (`TradeService` -> gateway -> in-memory wallet), so a perp spec replays
+  through the same `PerpAccount` and the A8 engine, not a second model.
+  - `ReplayPerpsVenue` (`trader/backtest/replay.py`, a
+    `SimulatedPerpsVenue`): the in-memory replay wallet, `ReplayPrices`
+    (the tick is the oracle), the tick clock (borrow accrues in replay
+    time), and the network fee as a per-leg cost exactly like
+    `ReplayExecutor` (one shared helper; the replay wallet holds no SOL).
+    `Backtester` takes `perp: PerpTerms | None` and `borrow_bps_hour`,
+    builds the service with it, and opens the bucket with the terms.
+  - **Liquidation on the candle path:** before the strategy's step on each
+    tick, `service.check_liquidations()`; ticks already walk each candle
+    open -> low -> high -> close, so the adverse extreme of every bar is
+    seen. A liquidation becomes a trade marked `liquidated`.
+  - **Equity** adds the open perp's value at the tick (what a close would
+    return: `SimulatedPerpsVenue.equity_at`, 0 once liquidated) and takes
+    off the network fees, like spot.
+  - **Result and summary:** `BacktestResult.perp` (direction, leverage,
+    borrow bps/h, liquidations, perp fees and borrow paid in USD), `None`
+    for spot; trades get `liquidated`. The text summary prints the perp
+    costs instead of the pair's bps line and flags liquidated trades.
+    `fee_bps`/`slippage_bps` don't apply to a perp (the engine prices it);
+    the network fee is still measured or given.
+  - **CLI:** `backtest --borrow-bps-hour N` (default 1, the paper value);
+    `refuse_perps` goes away, so `live_vs_backtest.py` replays perps too
+    (`ReplayCosts.borrow_bps_hour`).
+  - **Examples:** `spec-sol-perp-long.json` (2x long on a dip) and
+    `spec-sol-perp-short.json` (3x short on a spike), both backtested.
+  - **Check:** the spot backtests of `docs/examples/` are identical to
+    before (the JSON with the new `perp`/`liquidated` keys left out).
+- **Result.** As designed, plus: `Policy.unlimited()` (the replay's) allows
+  perps with no leverage cap, and an empty `allowed_perp_markets` now means
+  every market (like `allowed_symbols`); `Ledger.round_trip_costs` measures a
+  perp leg on its exposure (spend x leverage) and in its direction, and a
+  liquidation leg carries the liquidation price. The spot check ran on
+  synthetic ticks (a seeded 6-day random walk; `.data/ticks` had been
+  cleared): the seven spot examples with ticks replay to identical JSON. On
+  those ticks `spec-sol-perp-long` made 61 round trips (+1.15 USD, fees
+  1.46, borrow 0.11, ~16 bps a trip) and `spec-sol-perp-short` 75 (-2.98
+  USD, ~15 bps a trip); no liquidations (their stops are far inside).
+  `test_perp_backtest.py`: a gap past the liquidation price liquidates before
+  the stop (all collateral lost, equity 20 of 30), borrow accrues on the
+  replay clock, equity marks the open perp, the round-trip cost is ~12 bps on
+  the exposure for a short. `docs/examples/spec-real-first-run.json` was
+  removed by the owner (its bucket is archived) and left the pinned ids. 863
+  tests. `/simplify`: `check_liquidations` returns the booked exit orders, so a
+  liquidation is recorded like any exit (its borrow counts in the summary, no
+  close fee); one `perp_terms_for` builds the terms for `serve` and the
+  backtest; the replay prices perps straight from the tick. Skipped: a shared
+  network-fee holder for both replay venues and caching the parsed fill per
+  tick (~7% of a perp replay). 864 tests.
+
+#### A10. Perps: Jupiter read-only — M (done 2026-10-07)
+ IDL decoding (`anchorpy` or
+hand-written Borsh, after a spike); `positions()`, oracle price, borrow rate;
+paper uses the live borrow rate; live tests read the pool and custody and an
+empty position. No schema change: can run any time after A7.
+- **Spike (2026-10-07).** Hand-written Borsh, no `anchorpy`: a ~80-line
+  reader driven by the program's Anchor IDL (the community copy,
+  `julianfssen/jupiter-perps-anchor-idl-parsing`) decoded the live JLP pool
+  and SOL custody through the public RPC, discriminators included
+  (`sha256("account:<Name>")[:8]`; accounts are 2000 bytes, zero-padded).
+  The SOL custody reads 6 bps to open and 6 to close (our 0.06%). The price
+  that moves is the Doves aggregated feed (`custody.dovesAgOracle`,
+  `AgPriceFeed`: price x 10^expo, a few seconds old); the plain
+  `dovesOracle` was months stale. Borrow is the jump-rate model on
+  `custody.jumpRateState` (annual bps; `targetUtilizationRate` x 1e9),
+  utilization `assets.locked / assets.owned`, hourly = annual / 8760: SOL
+  was ~14% used, ~1450 bps a year, ~0.17 bps an hour (paper's 1 bps/h is
+  6x too high). Sources: the IDL repo and Jupiter's governance posts on the
+  jump-rate model (discuss.jup.ag, Gauntlet and Chaos Labs).
+- **Design.** All read-only, in the market layer (never moves funds):
+  `trader/execution/market/perps/`: `idl.py` (the IDL-driven Borsh reader
+  and the discriminator check), `perpetuals_idl.json` (only the accounts
+  and types of the vendored IDL, plus Doves' `AgPriceFeed`) and `reader.py`
+  (`JupiterPerpsReader`: `pool()`, `custody(mint)`, `borrow_bps_hour(mint)`,
+  `oracle_price(mint)` with its timestamp, `position(owner, terms)` by PDA
+  `["position", owner, pool, custody, collateral custody, side]`, a long's
+  collateral custody being its own and a short's USDC). It speaks JSON-RPC
+  `getMultipleAccounts` at Confirmed over `httpx`, to `HELIUS_RPC_URL` when
+  set, else the public mainnet RPC. Program, pool and custody addresses are
+  constants; a custody's decoded mint is checked against the market's.
+  - **Paper:** `SimulatedPerpsVenue` takes a borrow-rate source; `wiring`
+    gives paper the reader's live rate, read when a position opens and kept
+    in its `PerpFill.borrow_bps_hour`; a failed read falls back to the
+    default with a warning. The fee stays 0.06% (matches the custody), and
+    prices stay the hub's (the Doves feed is exposed, not used yet: A12
+    routes perp state through the hub). The backtest keeps
+    `--borrow-bps-hour`.
+  - **Tests:** unit tests decode recorded account bytes (fixtures captured
+    from mainnet, so offline); `tests/live/test_live_perps.py` reads the
+    pool (its custodies include SOL's), the SOL custody (mint, 9 decimals,
+    6/6 bps), a borrow rate in a sane band, a fresh oracle price within 5%
+    of the Price API, and an empty position for a fresh keypair.
+- **Result.** As designed. The reader worked live: SOL custody utilization
+  14.4%, borrow 0.166 bps an hour, fees 6/6 bps, Doves price 116.04 (2 s
+  old), no position for a fresh wallet. The position PDA formula matched 354
+  of 354 real SOL positions listed from the program. A `/smoke` of a fast
+  short opened and closed at the live rate (0.1663 bps/h kept in the fill).
+  Unit tests decode real account bytes captured that day
+  (`tests/trader/execution/market/perps_accounts.json`, a real open short
+  with its owner zeroed); `tests/live/test_live_perps.py` (3 tests) passes
+  against mainnet. Not used yet: the Doves price (paper keeps the hub's spot
+  price; A12) and the custody's live fee bps (it matches 0.06%; the live
+  test fails if it changes). 879 tests. `/simplify`: the reader retries 429/5xx with the
+  market layer's `HTTP_RETRY` and reports the RPC's own error; paper reads the
+  borrow rate at most every 5 minutes, waits at most 5 s (the open runs under
+  the order lock) and falls back to the last good rate before the default;
+  the decoder refuses enum variants with fields (they would misalign every
+  later field); the unused USDT custody and a duplicate `BPS` are gone.
+  Deferred to A11: one RPC-URL helper shared with the venue (A11 must never
+  fall back to the public RPC), reading custodies from `pool.custodies`
+  instead of the constant table (a second market), and the full upstream IDL
+  pinned to a commit (A11 needs the instructions and `PositionRequest`).
+
+#### A11a. Perps: requests built and simulated — M (done 2026-10-07)
+
+- **Design (2026-10-07).** Nothing here signs or sends; real `serve`
+  keeps no perp venue until A11b.
+  - The vendored IDL gains the three request instructions, their params
+    types and the `PositionRequest` account; `idl.py` gains the Borsh
+    encoder (the decoder's mirror) and `encode_instruction(name, params)`
+    (discriminator + args).
+  - `trader/execution/trade/venues/jupiter_perps/requests.py`: the account
+    metas and PDAs, and `open_request` (side, collateral in USDC raw, size
+    USD, the price limit: long pays at most price x (1 + slippage), short
+    at least price x (1 - slippage); a long's `jupiterMinimumOut` from a
+    USDC->SOL quote), `stop_request` (a trigger at the spec's stop price,
+    above for a short, below for a long, entire position, desired mint
+    USDC) and `close_request` (market, entire position, USDC back). The
+    request counter is `sha256(idempotency key)[:8]` as a u64 (D8): the
+    same intent always targets the same request account, so a resend
+    after a crash fails instead of opening twice. `build_transaction`
+    wraps them with the compute budget (limit 200k; price from the
+    policy's `max_priority_fee_lamports`) as an unsigned v0 message.
+  - `simulate(rpc, tx)` returns the units and logs or raises
+    an error with the program's last log line (as built: `PerpsReadError`,
+    from `JupiterPerpsReader.simulate`).
+  - Reconcile (D10): `reconcile_perps(ledger entries, venue positions)`
+    lists open ledger perps with no position on the venue and venue
+    positions the ledger doesn't know; the service will turn each into a
+    `perp_mismatch` event and stop entries in that market (wired in A11b,
+    unit-tested here).
+  - Tests: offline, the encoder against known bytes (a Borsh round trip
+    through the decoder, and the discriminators); `tests/live/` simulates
+    an open short and an open long (payer: a public exchange wallet that
+    holds SOL and USDC) and, when the program has one, a market close and
+    a trigger on an open short found on chain (its owner as payer, never
+    logged).
+- **Result.** As designed. All four requests built by the module simulate
+  on mainnet: open short 98.6k units, open long 89.6k, close 87.9k, stop
+  89.7k. The encoder reproduces the spike's bytes; the reader gained
+  `simulate` (read-only) and `program_accounts` (memcmp filters, for the
+  live test now and for finding a wallet's positions in A11b). Live: 5 tests
+  in `test_live_perps.py` (the close/stop one skips if the program has no
+  open SOL short). 887 tests. `/simplify`: the reader's three RPC calls share
+  one `_rpc` helper; `memcmp` filters go in base64 (no hand-made base58);
+  `requests.py` uses `spl.token`'s program ids and ATA helper and the
+  reader's `USD_SCALE` and `collateral_mint`; a perp's quote must be USDC
+  (the requests fund from and pay to the USDC account; SOL-USDT was accepted
+  before); the tests read the arguments back through the IDL by name. A
+  review asked whether two buckets could share one Jupiter position: no, a
+  perp buy is refused while that market and side has an open position
+  (`has_position`), so a whole-position close never closes another bucket's.
+  890 tests.

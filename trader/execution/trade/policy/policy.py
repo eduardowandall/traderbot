@@ -24,6 +24,7 @@ from trader.execution.models.intent import IntentSide, PolicyDecision, TradeInte
 from trader.execution.models.mode import RunningMode
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
+from trader.shared.models.perp import DEFAULT_MAX_LEVERAGE, DEFAULT_PERP_MARKETS
 from trader.shared.paths import policy_file
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,11 @@ class Policy:
     # teto da priority fee por transação: o `maxLamports` da Jupiter no real,
     # cobrado inteiro em paper e no custo de rede do backtest
     max_priority_fee_lamports: int = DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
+    # perps (A8, D10): desligadas no real até o dono ligar; ligadas no paper
+    perps_enabled: bool = False
+    max_leverage: Decimal = DEFAULT_MAX_LEVERAGE
+    # mercados perp permitidos (vazio = todos do registro)
+    allowed_perp_markets: tuple[str, ...] = DEFAULT_PERP_MARKETS
     version: str = field(default="defaults", compare=False)
 
     @classmethod
@@ -67,6 +73,10 @@ class Policy:
             max_daily_loss_usd=unbounded,
             max_consecutive_failures=sys.maxsize,
             allow_unknown_notional=True,
+            # perps (A9): o replay roda a spec que recebe; a spec já limita
+            perps_enabled=True,
+            max_leverage=unbounded,
+            allowed_perp_markets=(),
             version="unlimited",
         )
 
@@ -128,6 +138,9 @@ _PARSERS = {
     "max_trades_per_hour_per_bucket": _count,
     "max_consecutive_failures": _count,
     "max_priority_fee_lamports": _positive,
+    "perps_enabled": _flag,
+    "max_leverage": _decimal,
+    "allowed_perp_markets": _symbols,
 }
 
 
@@ -149,6 +162,7 @@ PAPER_DEFAULTS = {
     "max_daily_notional_usd": Decimal("10000"),
     "max_trades_per_hour": 60,
     "max_trades_per_hour_per_bucket": 60,
+    "perps_enabled": True,
 }
 
 
@@ -300,6 +314,21 @@ def _daily_loss(c: _Check) -> Iterator[str]:
         )
 
 
+def _perp_entry(c: _Check) -> Iterator[str]:
+    """Uma entrada de perp: perps ligadas, alavancagem e mercado permitidos (D10)."""
+    perp, policy = c.intent.perp, c.policy
+    if perp is None:
+        return
+    if not policy.perps_enabled:
+        yield "perps desligadas na política (perps_enabled)"
+    if perp.leverage > policy.max_leverage:
+        yield f"alavancagem {perp.leverage}x acima do máximo {policy.max_leverage}x"
+    market = SOLANA_MINTS.symbol_of(perp.market_mint)
+    allowed = policy.allowed_perp_markets  # vazio = todos, como allowed_symbols
+    if allowed and market not in allowed:
+        yield f"mercado perp não permitido: {market}"
+
+
 # valem para todo envio da carteira, swap ou não (A15: fechar uma conta)
 _SEND_RULES = (_real_mode, _unresolved, _circuit_breaker)
 # valem para toda intenção, inclusive vendas
@@ -311,6 +340,7 @@ _SAFETY_RULES: tuple[Rule, ...] = (
 # orçamento: não se aplica a vendas, porque bloquear uma saída deixaria a
 # posição presa. As travas acima continuam valendo.
 _BUDGET_RULES: tuple[Rule, ...] = (
+    _perp_entry,
     _unknown_notional,
     _max_trade,
     _daily_notional,

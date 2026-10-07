@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # numa transação só: outro processo criando ao mesmo tempo espera e não
 # vê um banco pela metade
@@ -66,7 +66,10 @@ CREATE TABLE IF NOT EXISTS intents (
     gross_pnl_usd TEXT,
     pnl_complete INTEGER,
     -- recusas idênticas seguidas somadas numa só linha (além da primeira)
-    repeat_count INTEGER
+    repeat_count INTEGER,
+    -- spot ou perp (A8); numa perp, o mercado, o lado e a alavancagem
+    instrument TEXT NOT NULL DEFAULT 'spot',
+    perp_json TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_intents_key ON intents (idempotency_key);
 CREATE INDEX IF NOT EXISTS ix_intents_account ON intents (account, updated_at);

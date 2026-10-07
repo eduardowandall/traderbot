@@ -39,6 +39,7 @@ from trader.execution.trade.policy import (
 )
 from trader.shared.models.costs import FailedTxFee, PnLResult
 from trader.shared.models.order import Order, OrderSide, order_from_json
+from trader.shared.models.perp import PerpFill
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,9 @@ def _entry_from_record(record: IntentRecord) -> Order:
         quote.raw_to_ui(record.in_amount) if record.in_amount else intent.spend_amount
     )
     fill_price = spent / quantity if quantity else Decimal("0")
+    perp = _perp_of(intent, quantity)
+    if perp is not None:
+        fill_price = perp.price
     logger.warning(
         f"Entrada {intent.intent_id} sem ordem gravada: reconstruída da intenção"
     )
@@ -121,6 +125,24 @@ def _entry_from_record(record: IntentRecord) -> Order:
         requested_price=intent.price,
         fill_price=fill_price,
         quote_amount=spent,
+        perp=perp,
+    )
+
+
+def _perp_of(intent: TradeIntent, quantity: Decimal) -> PerpFill | None:
+    """Uma perp sem ordem gravada: o lado e o tamanho da intenção (taxas 0)."""
+    terms = intent.perp
+    if terms is None or intent.price is None:
+        return None
+    size = quantity * intent.price
+    return PerpFill(
+        direction=terms.direction,
+        leverage=terms.leverage,
+        price=intent.price,
+        size_usd=size,
+        collateral_usd=size / terms.leverage,
+        fees_usd=Decimal(0),
+        borrow_bps_hour=Decimal(0),
     )
 
 
@@ -204,14 +226,23 @@ class TradeGateway:
         )
 
     def open_positions(self, prefix: str = "") -> dict[str, Decimal]:
-        """Tokens em posições abertas, somados por mint, nas contas do prefixo."""
+        """Tokens em posições abertas, somados por mint, nas contas do prefixo.
+
+        Só spot: uma perp fica no venue, não na carteira (A8).
+        """
         held: dict[str, Decimal] = {}
         for account in self.ledger.accounts(prefix):
             entry = _open_entry(self.ledger.legs_since_last_buy(account))
-            if entry is not None:
+            if entry is not None and entry.perp is None:
                 mint = entry.output_mint
                 held[mint] = held.get(mint, Decimal("0")) + entry.quantity
         return held
+
+    def record_external(
+        self, intent: TradeIntent, result: ExecutionResult, reason: str
+    ) -> bool:
+        """Uma perna que o venue fez sem nós (liquidação, A8); fora da política."""
+        return self.ledger.record_external(intent, result, reason)
 
     def open_account(self, account_id: str) -> None:
         """Marca a abertura da conta (a primeira vez que um bucket abre)."""

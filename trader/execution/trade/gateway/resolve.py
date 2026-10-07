@@ -67,6 +67,10 @@ class IntentResolver:
         return accounts
 
     async def _resolve(self, record: IntentRecord) -> bool:
+        if record.intent.perp is not None:
+            # uma perp não grava envios ainda (A11): o dono confere o venue
+            self._warn(record, "é uma perp: confira a posição no venue")
+            return False
         sends = self.gateway.ledger.sends_of(record.intent.intent_id)
         if not sends:
             return self._unsent(record)

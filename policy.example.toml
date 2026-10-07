@@ -8,8 +8,9 @@
 #
 # Camadas, da mais fraca para a mais forte: os padrões do código; em paper,
 # limites folgados (max_trade_usd 1000, max_daily_notional_usd 10000,
-# max_trades_per_hour 60 e 60 por bucket), porque não há dinheiro de verdade; [trading] e
-# [limits] (todos os modos); [paper.*] e [real.*] (só naquele modo).
+# max_trades_per_hour 60 e 60 por bucket, perps_enabled), porque não há
+# dinheiro de verdade; [trading] e [limits] (todos os modos); [paper.*] e
+# [real.*] (só naquele modo).
 
 [trading]
 # Modo real bloqueado até você habilitar explicitamente (padrão: false).
@@ -23,6 +24,14 @@
 # SOL). No real vai para a Jupiter como `maxLamports` (nível veryHigh); em
 # paper é cobrado inteiro em cada perna; o backtest o usa no custo de rede.
 # max_priority_fee_lamports = 100000
+# Perps (specs com `market`, A8). Desligadas por padrão; ligadas em paper.
+# No real (A11b) a Jupiter Perps de verdade: ligue só em [real.trading], com um
+# orçamento pequeno, e confira a posição e o stop dela no app da Jupiter.
+# perps_enabled = false
+# Alavancagem máxima de uma spec de perp.
+# max_leverage = 3
+# Mercados perp permitidos (o token base do par).
+# allowed_perp_markets = ["SOL"]
 
 [limits]
 # Os valores comentados são os padrões. Definir um aqui vale também para o

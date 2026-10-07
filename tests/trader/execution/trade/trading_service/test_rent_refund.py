@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import events_of, memory_gateway, spot_provider
+from factories import events_of, inspection_passes, memory_gateway, spot_provider
 from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.message import MessageV0
@@ -259,6 +259,7 @@ class TestOnChainClose:
         rpc.get_confirmed_transaction = AsyncMock(
             return_value=SimpleNamespace(meta=SimpleNamespace(fee=5000))
         )
+        inspection_passes(rpc)  # a simulação com a carteira (A11b: um caminho só)
         executor = OnChainExecutor(keypair, rpc, AsyncMock(), 100_000)
         return executor, rpc, address
 

@@ -160,6 +160,9 @@ def _open_line(position: Position, price: Decimal | None) -> str:
     entry = position.entry_order
     token = SOLANA_MINTS.symbol_of(entry.output_mint)
     line = f"  aberto: {entry.quantity:.6f} {token} @ USD {entry.price:.6f}"
+    perp = position.perp_line(datetime.now(UTC))
+    if perp:
+        line += f" ({perp})"
     if price is None:
         return line + "; marcação: sem preço"
     return line + f"; marcação ~${position.unrealized_usd(price):+.4f} a {price:.6f}"

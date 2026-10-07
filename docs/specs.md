@@ -62,6 +62,7 @@ Specs live next to the examples in [`examples/`](examples/). Start from
 | `ttl_days` | one of | Days of validity, counted from the first tick the spec runs (1–365). Preferred: it never goes stale. |
 | `expires_at` | one of | A fixed expiry with a timezone (e.g. `"2026-10-15T00:00:00Z"`). Exactly one of `ttl_days` / `expires_at`. |
 | `supersedes` | no | The 12-character id of the spec this one replaces (for your own bookkeeping). |
+| `market` | no | Leave it out for spot. A perpetual future: `{"kind": "perp", "venue": "jupiter", "direction": "long" \| "short", "leverage": L}` (1.1–250, capped by the policy). See "Perps" below. Real mode needs `perps_enabled` in the owner's `[real]` policy. |
 
 Numbers may be JSON numbers or strings (`"0.15"` keeps exact decimals).
 Percentages are in percent: `"pct": 2` means 2%.
@@ -76,6 +77,41 @@ its gains are gains in SOL. The money side stays in **USD**: `budget_usd`,
 `max_loss_usd`, `fixed_usd` and the policy limits, converted with the quote
 token's USD price (Price API). If that price is unknown the bucket offers
 nothing to spend until it comes back.
+
+### Perps (`market`)
+
+With `market`, the spec holds a leveraged position on Jupiter Perps instead
+of buying the token. `symbol` is `BASE-QUOTE` with a USDC quote:
+`SOL-USDC` trades the SOL market with USDC as collateral. Every buy
+**opens** the position and every sell **closes** all of it; a `short` gains
+when the price falls.
+
+- `sizing` and `budget_usd` count **collateral**; the position's size (its
+  exposure) is collateral x `leverage`, and that is what the policy's
+  `max_trade_usd` and daily notional see.
+- The position blocks follow the direction: for a short, `take_profit` is
+  the price falling `pct`% below the entry, `stop_loss` the price rising,
+  and the trailing ones use the lowest price since entry.
+- Required: a `max_hold` exit with `exit.mode: any` (borrow fees grow every
+  hour), and a stop (`stop_loss` or `trailing_stop`) of at most half the
+  distance to liquidation after fees: `pct <= 50 / leverage - 0.12` (16.55
+  at 3x).
+- Costs: 0.06% of the size to open and again to close, a small price-impact
+  fee, an hourly borrow fee on the size (in paper, Jupiter's live rate when
+  the position opens, ~0.17 bps of the size an hour for SOL in Oct 2026), and
+  the network fee of each leg. If
+  the collateral left falls to 0.2% of the size, the position is
+  **liquidated**: the whole collateral is lost and counts toward
+  `max_loss_usd`.
+- The trade-runner refuses it unless the mode's policy has
+  `perps_enabled` (on in paper, off in real), `leverage <= max_leverage`
+  (3) and the base in `allowed_perp_markets` (`SOL`).
+- `backtest` runs a perp through the same engine as paper: the candles stand
+  in for the venue's price, liquidation is checked on every tick of the candle
+  path (a gap past it liquidates before the stop), and the summary shows the
+  perp fees, the borrow paid and the liquidations. `--borrow-bps-hour N`
+  sets the borrow rate (default 1); `--fee-bps`/`--slippage-bps` don't apply
+  to a perp. Examples: `spec-sol-perp-long.json`, `spec-sol-perp-short.json`.
 
 ## How a spec trades
 
@@ -192,7 +228,11 @@ The trade-runner (`serve`) refuses a spec that breaks any of these when its
 - the largest buy (`sizing.usd`, or `pct` of `budget_usd`) ≤ the mode's
   `max_trade_usd` (paper: 1000 by default, real: 25) and ≤ `budget_usd`;
 - `max_loss_usd` ≤ `budget_usd`;
-- the expiry is in the future and at most 30 days away.
+- the expiry is in the future and at most 30 days away;
+- a perp (`market`): perps enabled, the leverage within `max_leverage`, the
+  base in `allowed_perp_markets`, a USDC quote, the largest buy x
+  leverage within `max_trade_usd`, a `max_hold` exit and a stop within
+  half the liquidation distance.
 
 ## The loop: write, backtest, paper, iterate
 

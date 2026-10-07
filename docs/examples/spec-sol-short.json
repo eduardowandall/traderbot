@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "sol-short",
+  "agent_id": "claude",
+  "rationale": "A8 paper exercise of the perp path, not a strategy: a 3x SOL short on Jupiter Perps (paper), opened at random (2% per tick, ~50 s live), closed on a 1% take-profit (the price falling), a 2% stop (the price rising) or after 30 minutes; 10 USD of collateral (30 USD of exposure) a time inside a 30 USD budget. The stop is well inside the 16.55% limit at 3x; borrow is ~0.03 USD an hour at 30 USD.",
+  "symbol": "SOL-USDC",
+  "timeframe": "1_MINUTE",
+  "market": {"kind": "perp", "venue": "jupiter", "direction": "short", "leverage": 3},
+  "entry": {
+    "mode": "all",
+    "conditions": [{"type": "random_chance", "pct": 2}]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 2},
+    "mode": "any",
+    "conditions": [
+      {"type": "take_profit", "pct": 1},
+      {"type": "max_hold", "minutes": 30}
+    ]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 10},
+  "budget_usd": 30,
+  "max_loss_usd": 15,
+  "cooldown_minutes": 5,
+  "ttl_days": 7
+}

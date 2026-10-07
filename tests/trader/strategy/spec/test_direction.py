@@ -13,6 +13,7 @@ from factories import make_spec
 
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position
 from trader.shared.models.direction import Direction
+from trader.shared.models.perp import PerpFill
 from trader.shared.trading_service.wire import position_from_dict, position_to_dict
 from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
@@ -25,8 +26,22 @@ WIDE_STOP = {"type": "stop_loss", "pct": 50}
 
 
 def _position(direction: Direction, price="100") -> Position:
-    order = Order("buy-1", USDC, SOL, Decimal("0.2"), Decimal(price), OrderSide.BUY, T0)
-    return Position(order, None, direction)
+    # o lado vem da ordem de entrada: spot sem `perp`, perp com ele (A8)
+    perp = None
+    if direction == SHORT:
+        perp = PerpFill(
+            direction=SHORT,
+            leverage=Decimal(2),
+            price=Decimal(price),
+            size_usd=Decimal(40),
+            collateral_usd=Decimal(20),
+            fees_usd=Decimal(0),
+            borrow_bps_hour=Decimal(1),
+        )
+    order = Order(
+        "buy-1", USDC, SOL, Decimal("0.2"), Decimal(price), OrderSide.BUY, T0, perp=perp
+    )
+    return Position(order, None)
 
 
 def _exits(exit_: dict, direction: Direction, prices: list[str]) -> list[bool]:
@@ -94,12 +109,12 @@ def test_direction_helpers():
     assert SHORT.better(Decimal(1), Decimal(2)) == 1
 
 
-def test_the_wire_sends_the_direction_only_when_it_is_not_long():
-    # um `connect` de antes do A7 segue lendo uma posição comprada
+def test_the_direction_travels_in_the_entry_order():
+    # um spot não leva `perp`: um `connect` de antes do A8 segue lendo
     long, short = _position(LONG), _position(SHORT)
     sent_long, sent_short = position_to_dict(long), position_to_dict(short)
     assert sent_long is not None and sent_short is not None
-    assert "direction" not in sent_long
-    assert sent_short["direction"] == "short"
-    assert position_from_dict(sent_long) == long
-    assert position_from_dict(sent_short) == short
+    assert sent_long["entry"]["perp"] is None
+    back = position_from_dict(sent_short)
+    assert back == short and back is not None and back.direction == SHORT
+    assert position_from_dict(sent_long).direction == LONG  # type: ignore[union-attr]

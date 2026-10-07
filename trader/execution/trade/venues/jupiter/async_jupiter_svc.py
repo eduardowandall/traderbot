@@ -360,16 +360,18 @@ class AsyncJupiterProvider[E: Executor]:
         """
         total = 0
         for signature in signatures:
-            fee = await self._failed_fee(signature)
+            fee = await self.fetch_fee(signature)
             total += BASE_FEE_LAMPORTS if fee is None else fee
         return total
 
-    async def _failed_fee(self, signature: str) -> int | None:
+    async def fetch_fee(self, signature: str) -> int | None:
+        """A taxa de rede de uma transação; None se não deu para ler. **Nunca**
+        levanta."""
         try:
             async with asyncio.timeout(COSTS_TIMEOUT_SECONDS):
                 return await self.executor.fetch_fee(signature)
         except Exception as ex:
-            self.logger.warning(f"Taxa da transação falha {signature}: {ex}")
+            self.logger.warning(f"Taxa da transação {signature}: {ex}")
             return None
 
     async def send_outcome(self, sent: SentTx) -> TxOutcome:

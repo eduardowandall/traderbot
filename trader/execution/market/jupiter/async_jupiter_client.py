@@ -65,7 +65,7 @@ def _wait(state: RetryCallState) -> float:
 
 
 # só chamadas anteriores ao envio: re-tentar nunca duplica um swap
-_HTTP_RETRY = retry(
+HTTP_RETRY = retry(
     wait=_wait,
     stop=stop_after_attempt(4),
     retry=retry_if_exception(is_retryable),
@@ -146,7 +146,7 @@ class AsyncJupiterClient:
             self.client.headers.update(headers)
 
     @logger_wrapper
-    @_HTTP_RETRY
+    @HTTP_RETRY
     async def get_quote(
         self,
         input_mint: str,
@@ -174,7 +174,7 @@ class AsyncJupiterClient:
             raise ex
 
     @logger_wrapper
-    @_HTTP_RETRY
+    @HTTP_RETRY
     async def get_candles(
         self, mint: str, interval: Interval = Interval.SECOND_15, candle_qty: int = 100
     ) -> list[dict[str, Any]]:
@@ -206,7 +206,7 @@ class AsyncJupiterClient:
                 ex.add_note(f"Response: {response.text}")
             raise ex
 
-    @_HTTP_RETRY
+    @HTTP_RETRY
     async def get_usd_prices(self, mints: list[str]) -> dict[str, Decimal]:
         """Preços USD da Price API V3 (documentada); mints sem preço ficam de fora.
 
@@ -283,7 +283,7 @@ class AsyncJupiterClient:
         await self.client.aclose()
 
     @logger_wrapper
-    @_HTTP_RETRY
+    @HTTP_RETRY
     async def get_swap_transaction(
         self,
         quote: JupiterQuoteResponse,
