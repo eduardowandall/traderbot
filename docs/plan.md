@@ -32,7 +32,7 @@ it before the code. Track progress in §5, record decisions in §9.
 
 ## 2. Where we are
 
-**Overall: about 90%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
+**Overall: about 94%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
 and goal 6 is scored on its own so a new goal doesn't hide progress). 780
 tests. The first real run (A6, 2026-10-06/07) is done: 5 JUP-SOL round
 trips on a ~5 USD wallet, nothing UNCONFIRMED or failed, costs at or below
@@ -43,10 +43,10 @@ the backtest's, and the token account's rent refunded at retirement.
 | 1. Specs as files | `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `backtest`, `/smoke`, `serve` + `connect` for any number of specs; the trade-runner checks each spec's terms against its own policy | Only a tiny-budget spec has traded real money (A6) | **95%** |
 | 2. Manual trades | Removed in stage U | Comes back with a wallet treasury | deferred |
 | 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up (across candle gaps), re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | No crossovers | **90%** |
-| 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | One wallet only | **85%** |
+| 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | Nothing planned: one wallet is the decision (2026-10-07) | **95%** |
 | 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included | Replays ignore rent | **96%** |
 | 6. Perps | Research, venue choice and design (§8) | Everything else (A7–A12) | **5%** |
-| (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking and resolution, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | Owner approval for large trades; a service entrypoint | **90%** |
+| (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking and resolution, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | A service entrypoint | **95%** |
 
 ## 3. Principles and decisions that stand
 
@@ -69,7 +69,8 @@ the backtest's, and the token account's rent refunded at retirement.
 | Processes | One `serve` per mode (the only process with the key, wallet and ledger) and one `connect` per spec. Strategies are mode-agnostic. |
 | Buckets | `strategy:<spec_id>`; with no open position a bucket may spend `max(0, budget_usd + min(0, realized_usd))`; long-only, one position at a time; exits on retire, expiry or max loss are sold by `serve` itself. |
 | Spec storage | Files in the repo (`docs/examples/`); the id is the hash of the behaviour, so each version gets its own bucket. |
-| Wallet | One wallet for all strategies for now. Real mode uses a dedicated low-balance hot wallet. |
+| Wallet | One wallet for all strategies (owner, 2026-10-07). Real mode uses a dedicated low-balance hot wallet. |
+| Approval | A trade inside the owner's policy and the spec's terms (budget, max loss, largest buy) is approved by the owner; no per-trade approval step (owner, 2026-10-07). |
 | Ledger schema | One `_SCHEMA` with a `user_version`, no migrations; a schema change waits for the end of a paper soak and takes every pending change with it. |
 
 ## 4. Roadmap
@@ -116,7 +117,6 @@ ledger schema, so it waits for the end of a paper soak.
 
 ### Backlog (numbered when scheduled)
 - One round trip per `connect` tick (old B10 C7).
-- Owner approval for large trades (for example Telegram inline buttons).
 - A service entrypoint (systemd, Docker or a Windows service).
 - Crossovers in specs (an `expr` only compares levels on the current bar).
 - Rent of new token accounts in replays.
@@ -211,12 +211,10 @@ Top risks:
 7. **Perps venue risk.** In 2026 one Solana perps venue was hacked and two
    shut down: the venue sits behind a seam (D4).
 
-Open questions for the owner (A6 answered pairs, limits and one hot wallet
-for the first run; see `history.md`):
-- Has the Helius key been rotated?
+Open questions for the owner (A6 answered pairs and limits for the first
+run; the Helius key and the wallet were settled on 2026-10-07, §9):
 - The next real budget: the proposal at the end of A6 in `history.md` (a
   10-15 USD wallet, 5 USD a buy, `max_daily_loss_usd = 3`).
-- One hot wallet for every strategy, or one per strategy later?
 
 ## 8. Perps design
 
@@ -398,3 +396,8 @@ Decisions up to 2026-10-04 are in [`history.md`](history.md).
   or below the backtest's) all hold; A6 moved to `history.md`. The next real
   budget is the owner's call (§7). Perps (A7) come next; A7 must keep the
   ids of `docs/examples/`, `ad3606394fc0` included.
+- **2026-10-07 (owner):** the Helius key rotation is not a concern and is
+  dropped from the open questions; one wallet for every strategy stays;
+  no owner approval for large trades: a trade that passes the policy and
+  the spec's terms is already approved by the owner, so the backlog item is
+  removed.
