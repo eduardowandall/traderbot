@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 from solders.pubkey import Pubkey
 
-from trader.execution.market.jupiter.async_jupiter_client import HTTP_RETRY
+from trader.execution.market.jupiter.client import HTTP_RETRY
 from trader.execution.market.perps.idl import decode_account, discriminator
 from trader.execution.models.perp import PerpTerms
 from trader.shared.logging_config import error_text

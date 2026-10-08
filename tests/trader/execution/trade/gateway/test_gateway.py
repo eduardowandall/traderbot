@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import make_intent, mock_provider, open_ledger, spot_provider
 
-from trader.execution.models.account_data import MintBalance
+from trader.execution.models.errors import TransactionSubmittedError
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     IntentRecord,
@@ -15,16 +15,14 @@ from trader.execution.models.intent import (
     PolicyDecision,
     TradeIntent,
 )
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.gateway import (
     DuplicateIntentError,
     PolicyDeniedError,
     TradeGateway,
 )
-from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.policy import Policy
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
-    TransactionSubmittedError,
-)
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 

@@ -1,6 +1,6 @@
 """`BucketAccount`: o que o `TradeService` usa da conta de um bucket (A7, D4).
 
-Hoje só o `SpotAccount` (`trader/execution/trade/gateway/account.py`): um
+Hoje só o `SpotAccount` (`trader/execution/trade/accounts/spot.py`): um
 par, uma posição por vez, tokens na carteira. A conta de perps (A8) guarda
 colateral e uma posição no venue. BUY e SELL seguem querendo dizer entrar e
 sair (D2).

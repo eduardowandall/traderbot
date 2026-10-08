@@ -4,7 +4,7 @@ Cada mensagem é um objeto JSON numa linha (ver `docs/plan.md` §3.3). Aqui
 ficam só as conversões de `BucketSnapshot`, `OrderRequest`, `OrderReply` e
 candles (`TickerData`, op `candles`) para dicts JSON e de volta; decimais
 viajam como string, datas em ISO, e ordens pelo codec do `Order`
-(`order_to_json`).
+(`order_to_dict`).
 """
 
 import json
@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 from trader.shared.models import Order, OrderSide, Position
-from trader.shared.models.order import order_from_json, order_to_json
+from trader.shared.models.order import order_from_dict, order_to_dict
 from trader.shared.models.public_data import TickerData
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
@@ -41,11 +41,11 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def _order(order: Order | None) -> dict | None:
-    return None if order is None else json.loads(order_to_json(order))
+    return None if order is None else order_to_dict(order)
 
 
 def _order_back(data: dict | None) -> Order | None:
-    return None if data is None else order_from_json(json.dumps(data))
+    return None if data is None else order_from_dict(data)
 
 
 def position_to_dict(position: Position | None) -> dict | None:

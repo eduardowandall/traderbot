@@ -18,7 +18,7 @@ from decimal import Decimal
 from trader.execution.market.prices import PriceOf
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.ledger import AccountPnL
-from trader.execution.trade.ledger.reports import DAILY_REPORT
+from trader.execution.trade.ledger.events import DAILY_REPORT
 from trader.shared.models import SOLANA_MINTS, Position
 from trader.shared.models.costs import RoundTripCosts, sol_text
 from trader.shared.notification.notification_service import Notifier
@@ -26,8 +26,6 @@ from trader.shared.notification.notification_service import Notifier
 logger = logging.getLogger(__name__)
 
 CHECK_SECONDS = 60.0
-
-# preço USD de um mint; None: sem preço
 
 
 def _utcnow() -> datetime:

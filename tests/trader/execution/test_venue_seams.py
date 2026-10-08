@@ -13,7 +13,7 @@ from trader.execution.models.bucket import BucketAccount
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.models.venue import Venue
-from trader.execution.trade.gateway.account import SpotAccount
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS
 

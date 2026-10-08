@@ -1,6 +1,6 @@
 """O strategy-runner (`main.py connect spec.json`): uma spec, sem chave.
 
-Camada strategy-side: monta o bot de sempre (`AsyncWebsocketTradingBot`) com
+Camada strategy-side: monta o bot de sempre (`TradingBot`) com
 um `RemoteTradeClient` para o trade-runner (`main.py serve <modo>`). Não
 importa execução, venue nem risco (`tests/test_architecture.py`), então não
 alcança a chave, a carteira nem o ledger; nem sabe o modo. Nem fala com a
@@ -14,8 +14,8 @@ from trader.shared.market import HubMarketData
 from trader.shared.market.pair import market_for
 from trader.shared.notification.notification_service import Notifier
 from trader.shared.paths import connection_files
-from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.strategy.bot.config import BotConfig, OnTick
+from trader.strategy.bot.loop import TradingBot
 from trader.strategy.spec.strategy import SpecStrategy
 from trader.strategy.trading_service.remote import RemoteCandles, RemoteTradeClient
 
@@ -39,7 +39,7 @@ def strategy_bot(
     connection_file: Path | None,
     notifier: Notifier,
     on_tick: OnTick | None = None,
-) -> AsyncWebsocketTradingBot:
+) -> TradingBot:
     """O bot da spec, com ordens, preços e candles pelo trade-runner.
 
     Os preços vêm do hub do trade-runner (op `price`), um feed para todos os
@@ -67,4 +67,4 @@ def strategy_bot(
         notifier=notifier,
         on_tick=on_tick,
     )
-    return AsyncWebsocketTradingBot(config)
+    return TradingBot(config)

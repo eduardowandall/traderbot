@@ -7,9 +7,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from trader.execution.market import JupiterMarketData
-from trader.execution.market import data as market_data
-from trader.execution.market.jupiter.async_jupiter_client import (
+from trader.execution.market.jupiter.client import (
     AsyncJupiterClient,
     is_retryable,
 )
@@ -70,23 +68,3 @@ class TestHttpRetry:
         )
         assert is_retryable(limited)
         assert not is_retryable(ValueError("x"))
-
-
-class TestWebsocketCooldown:
-    async def test_a_dead_websocket_is_skipped_and_rest_is_paced(self, monkeypatch):
-        now = [100.0]
-        client = AsyncMock(spec=AsyncJupiterClient)
-        client.get_price = AsyncMock(side_effect=OSError("recusado"))
-        client.get_usd_prices = AsyncMock(return_value={SOL: Decimal("150")})
-        data = JupiterMarketData(client, monotonic=lambda: now[0])
-
-        with mock.patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
-            await data.get_price(SOL)  # falha -> Price API
-            await data.get_price(SOL)  # dentro do cooldown: nem tenta o ws
-            now[0] += market_data.WS_COOLDOWN_SECONDS + 1
-            await data.get_price(SOL)  # cooldown acabou: tenta o ws de novo
-
-        assert client.get_price.await_count == 2
-        # a segunda consulta à API veio logo após a primeira: esperou
-        assert sleep.await_args is not None
-        assert sleep.await_args.args[0] == pytest.approx(market_data.REST_POLL_SECONDS)

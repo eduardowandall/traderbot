@@ -25,10 +25,22 @@ class TestMovingAverages:
         assert ind.ema(D(1, 2, 3, 4, 5), 3) == Decimal(4)
         assert ind.ema(D(1, 2), 3) is None
 
-    def test_moving_average_dispatch(self):
-        values = D(1, 2, 3, 4)
-        for kind in ("sma", "ema", "wma"):
-            assert ind.moving_average(kind, values, 3) == getattr(ind, kind)(values, 3)
+
+class TestRegistry:
+    def test_bars_to_have_a_value_and_to_converge(self):
+        # o que as condições tipadas e o `expr` pedem de aquecimento (A17)
+        assert [ind.lookback(n, 14) for n in ("sma", "rsi", "volatility")] == [
+            14,
+            15,
+            15,
+        ]
+        assert [ind.history(n, 14) for n in ("sma", "ema", "rsi")] == [14, 70, 141]
+
+    def test_every_indicator_has_a_value_after_its_lookback(self):
+        values = D(*range(1, 40))
+        for name, fn in ind.INDICATORS.items():
+            assert fn(values[: ind.lookback(name, 10)], 10) is not None, name
+            assert fn(values[: ind.lookback(name, 10) - 1], 10) is None, name
 
 
 class TestRsi:
@@ -48,11 +60,6 @@ class TestRsi:
 
 
 class TestChangeAndVolatility:
-    def test_pct_change(self):
-        assert ind.pct_change(D(100, 105, 110), 2) == Decimal(10)
-        assert ind.pct_change(D(100), 1) is None
-        assert ind.pct_change(D(0, 1), 1) is None
-
     def test_volatility_is_stdev_of_returns(self):
         # retornos +10% e -10%: média 0, desvio 10
         assert ind.volatility(D(100, 110, 99), 2) == Decimal(10)

@@ -24,6 +24,7 @@ from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import TradeIntent
 from trader.execution.models.venue import PostTrade
 from trader.execution.trade.gateway.gateway import TradeGateway
+from trader.execution.trade.ledger.events import POSITION_LEFTOVER
 from trader.shared.models.costs import (
     LAMPORTS_PER_SOL,
     FailedTxFee,
@@ -120,7 +121,7 @@ def record_leftover(
     logger.warning(f"Posição fechada com {rest.quantity} {symbol} na carteira")
     try:
         gateway.add_event(
-            "position_leftover",
+            POSITION_LEFTOVER,
             {
                 "account": account_id,
                 "mint": entry.output_mint,

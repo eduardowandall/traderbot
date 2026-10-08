@@ -25,7 +25,14 @@ from trader.execution.models.intent import (
     TradeIntent,
 )
 from trader.execution.models.perp import PERP, SPOT, terms_from_json, terms_to_json
-from trader.execution.trade.ledger.reports import FAILED_TX_FEE
+from trader.execution.trade.ledger.events import (
+    BUCKET_OPENED,
+    FAILED_TX_FEE,
+    INTENT_EXTERNAL,
+    INTENT_SENT,
+    ORDER_RECORDED,
+    intent_event,
+)
 from trader.execution.trade.ledger.store import (
     LedgerStore,
     _dec,
@@ -39,11 +46,6 @@ from trader.shared.models.costs import PnLResult
 from trader.shared.models.order import Order, order_from_json, order_to_json
 
 logger = logging.getLogger(__name__)
-
-INTENT_SENT = "intent_sent"
-INTENT_RESOLVED = "intent_resolved"
-# uma perna que o venue executou sem nós (uma liquidação, A8)
-INTENT_EXTERNAL = "intent_external"
 
 
 class IntentStore(LedgerStore):
@@ -65,7 +67,7 @@ class IntentStore(LedgerStore):
         if decision.allowed:
             # todo envio desta intenção terá um `intent_sent` antes (A3)
             payload["send_log"] = True
-        self._add_event("intent_" + str(status), intent.intent_id, payload)
+        self._add_event(intent_event(status), intent.intent_id, payload)
 
     def _count_repeat(self, intent: TradeIntent, decision: PolicyDecision) -> bool:
         """Soma a recusa na última linha da conta, se for a mesma recusa."""
@@ -162,7 +164,7 @@ class IntentStore(LedgerStore):
     def mark_executed(self, intent_id: str, result: ExecutionResult) -> bool:
         return self._transition(
             intent_id,
-            "intent_executed",
+            intent_event(IntentStatus.EXECUTED),
             asdict(result),
             status=str(IntentStatus.EXECUTED),
             signature=result.signature,
@@ -233,7 +235,7 @@ class IntentStore(LedgerStore):
         extra = {"signature": signature} if signature else {}
         self._transition(
             intent_id,
-            f"intent_{status}",
+            intent_event(status),
             {"error": error, **extra},
             status=str(status),
             error=error,
@@ -257,7 +259,7 @@ class IntentStore(LedgerStore):
             raise ValueError(f"intenção {intent_id} está {status}, não executed")
         self._update(
             intent_id,
-            "order_recorded",
+            ORDER_RECORDED,
             {
                 "order": asdict(order),
                 "realized_pnl_usd": realized_pnl_usd,
@@ -310,7 +312,7 @@ class IntentStore(LedgerStore):
         return any(
             payload.get("send_log")
             for payload in self._payloads(
-                "intent_" + str(IntentStatus.EXECUTING), intent_id
+                intent_event(IntentStatus.EXECUTING), intent_id
             )
         )
 
@@ -391,11 +393,12 @@ class IntentStore(LedgerStore):
         """
         row = self.conn.execute(
             "SELECT MIN(created_at) AS first_intent, "
-            "(SELECT MIN(ts) FROM events WHERE type = 'bucket_opened' "
+            "(SELECT MIN(ts) FROM events WHERE type = ? "
             "AND json_extract(payload, '$.account') = ?) AS opened, "
             "(SELECT MAX(updated_at) FROM intents WHERE account = ? AND status = ? "
             "AND side = ?) AS exited FROM intents WHERE account = ?",
             (
+                BUCKET_OPENED,
                 account,
                 account,
                 str(IntentStatus.EXECUTED),
@@ -410,12 +413,12 @@ class IntentStore(LedgerStore):
         """Grava a abertura da conta (`bucket_opened`), só na primeira vez."""
         with self._write():
             seen = self.conn.execute(
-                "SELECT 1 FROM events WHERE type = 'bucket_opened' "
+                "SELECT 1 FROM events WHERE type = ? "
                 "AND json_extract(payload, '$.account') = ? LIMIT 1",
-                (account,),
+                (BUCKET_OPENED, account),
             ).fetchone()
             if not seen:
-                self._add_event("bucket_opened", None, {"account": account})
+                self._add_event(BUCKET_OPENED, None, {"account": account})
 
     def last_exit_price(self, account: str) -> Decimal | None:
         """Preço da última venda, no token de cotação; None sem ordem."""

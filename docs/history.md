@@ -3233,3 +3233,138 @@ empty position. No schema change: can run any time after A7.
   perp buy is refused while that market and side has an open position
   (`has_position`), so a whole-position close never closes another bucket's.
   890 tests.
+
+#### A16. Execution cleanup — M (done 2026-10-08)
+
+- **Design (2026-10-08).** What the review of `trader/execution/`
+  (about 10k lines) found, and the step that fixes each:
+  1. *The gateway rebuilt positions.* `gateway.py` held ~90 lines that turn
+     an account's legs into its open entry (`_open_entry` and helpers): that
+     is reading the ledger. They move to `trade/ledger/positions.py`, behind
+     `Ledger.open_entry(account)` and `Ledger.open_positions(prefix)`; the
+     gateway keeps the submit path and delegates. Every ledger event name
+     goes into one module, `trade/ledger/events.py` (they were constants in
+     three modules plus a dozen inline strings).
+  2. *The `gateway/` package held the accounts.* `SpotAccount`,
+     `PerpAccount` and `WalletBalances` move to `trade/accounts/` (`spot.py`,
+     `perp.py`, `wallet.py`); `trade/gateway/` keeps the one path to a swap
+     and its settlement (`gateway`, `fills`, `orders`, `resolve`). Its own
+     layer in `tests/test_architecture.py`.
+  3. *`TradeService` was the largest module (670 lines).* The rent-refund
+     lifecycle (A15: close, record, resolve) moves to
+     `trading_service/rent.py` (`RentRefunds`), which the service calls.
+  4. *Jupiter file names.* `market/jupiter/async_jupiter_client.py` ->
+     `client.py`, `jupiter_data.py` -> `quote.py`;
+     `venues/jupiter/async_jupiter_svc.py` -> `provider.py`,
+     `async_rpc_client.py` -> `rpc.py` (test files follow). `trade/venues`
+     stops re-exporting the quote classes from `market`.
+  5. *Small seams.* `MintBalance` joins the venue contract
+     (`models/venue.py`; `account_data.py` goes); the SOL fee reserve is a
+     venue fact there too, so paper no longer imports the on-chain executor;
+     `Venue` stops redeclaring the `PostTrade` methods; stale docstrings
+     fixed.
+  6. `AGENTS.md` and `architecture.md` follow the new paths.
+
+  Kept on purpose: `SpotVenue` (the A7 seam; the provider keeps its
+  swap-shaped API for paper, replay and tests), the name `trading_service`
+  (the same on the shared, strategy and execution sides), and
+  `jupiter_perps/reconcile.py` (unused, but A12 wires it).
+- **Result.** As designed; no behaviour, schema, wire or spec-id change.
+  `TradeService` went from 670 to 600 lines (`rent.py` 110), `gateway.py`
+  from 365 to 270 (`ledger/positions.py` 100). Old import paths are gone,
+  not aliased: the tests, `.claude/scripts`, the live suite and the docs use
+  the new ones. 907 tests, the same as before.
+
+#### A16b. Execution cleanup, second pass — M (done 2026-10-08)
+
+- **Design (2026-10-08).** A second read of the
+  modules A16 only skimmed (market, venues, ledger internals, policy):
+  1. *A dead price path.* Since the hub (B7) the bots get prices through
+     `HubMarketData`; `JupiterMarketData.get_price` (a websocket per mint,
+     the Price API as fallback) and the websocket methods of
+     `AsyncJupiterClient` (`get_price`, `_read_price`, `_get_price`,
+     `_connect_price_ws`) are only called by tests. They go;
+     `JupiterMarketData` becomes `JupiterCandles`, the `CandleSource` that
+     `serve` and `backtest` use. Its tests go or move to a fake feed.
+  2. *Event names A16 missed:* `intent_executed`, the `intent_<status>`
+     f-string and `order_recorded` in `ledger/intents.py`.
+  3. *Two copies of the guarded send.* `OnChainExecutor.execute` (swaps) and
+     `send_instructions` (rent close, perps) each simulate, check balances,
+     log the send and send; one helper does it for both.
+  4. *RPC client.* `sign_transaction` signs twice (`VersionedTransaction`
+     with the keypair already signs, then it signs the message again by
+     hand); `is_connected` runs before every call and its answer is never
+     read. One signature, no probe.
+  5. *`SimulatedWallet`* repeats lock -> read -> compute -> write -> assign
+     five fields in three methods; one `_commit` does the last two.
+  6. *Small:* paper's own `DEFAULT_FEE_LAMPORTS` is `BASE_FEE_LAMPORTS`; the
+     client re-exports `Interval` "for compatibility" (no one uses it) and
+     inlines its error notes twice next to `_add_response_notes`;
+     `logger_wrapper` has two identical `except` branches; orphan comments.
+
+  Seen and left: `check_signature_is_confirmed` (RPC) and `_status_outcome`
+  (executor) both read a signature status, but it is the real-money
+  confirmation path with 20 tests on its current shape; and the ledger's
+  mode-prefix filter (`substr(account, 1, ?)`) is repeated in three
+  queries, which reads fine.
+- **Result.** As designed; no behaviour, schema, wire or spec-id change.
+  `trader/execution/` lost about 330 lines net. The live suite now reads
+  prices the way production does: a running `PriceHub` behind a
+  `HubMarketData` (`live_helpers.running_hub`/`hub_feed`), and the websocket
+  check reads `websocket_prices` directly. `live_vs_backtest.py` needed only
+  the pair's candles, so `trader/shared/market/pair.py` gained `PairCandles`
+  and `candles_for` (`PairMarketData` delegates its candles to them); the
+  backtest CLI's test seam is `CANDLES` (was `MARKET_DATA`). The double
+  signature was checked to give the same bytes before it went. 900 tests
+  (9 covered only the removed websocket path; 2 new for `candles_for`).
+
+#### A17. Strategy cleanup — M (done 2026-10-08)
+
+- **Design (2026-10-08).** The review of `trader/strategy/` (about
+  2k lines) and the indicators it uses (`trader/shared/indicators.py`):
+  1. *Each indicator is described in three places.* The functions are in
+     `conditions._INDICATORS`, their names again in `expr.FUNCTIONS`, and
+     the bars each needs twice: `expr._lookback`/`_history` and the
+     `lookback()`/`history()` of every typed condition in `models.py`. One
+     registry in `shared/indicators.py` (`INDICATORS`, `lookback(name,
+     window)`, `history(name, window)`) that all three read; a new
+     indicator is one entry there. `moving_average` and `pct_change` (only
+     tests call them) go, with the stale "`market summary`" docstring.
+  2. *The bot's name.* `AsyncWebsocketTradingBot` in `async_websocket_bot.py`
+     reads a `MarketData` feed (the hub, through `connect`); it has opened
+     no websocket since B7. It becomes `TradingBot` in `bot/loop.py` (the
+     `bot` logger name stays).
+  3. *Small:* a Rich markup tag left open in `log_placed_order`
+     (`[gray]...[gray]`); an unused `self.logger` alias in `SpecStrategy`;
+     the `models.py` docstring still calls `expr` a future condition.
+
+  Seen and left: `decision.py`, `config.py`, `runner.py` and the remote
+  client read well; `SpecStrategy` keeps its default `datetime.now` clock
+  (`to_utc` normalizes it, and `connect` never injects one).
+- **Result.** As designed; no behaviour, schema, wire or spec-id change
+  (the pinned example ids hold: every `lookback()`/`history()` gives the
+  numbers it gave before). A new test checks each registry entry against its
+  own function: no value one bar before its `lookback`, a value at it. The
+  tests that patch the bot use `trader.strategy.runner.TradingBot`. 900
+  tests (2 for the removed helpers, 2 new for the registry).
+
+#### A17b. Strategy cleanup, second pass — S (done 2026-10-08)
+
+- **Design (2026-10-08).** A second read of
+  `trader/strategy/` and the `shared/` modules it uses (feed, pair, spec
+  terms and validation, the wire, `Order`/`Position`):
+  1. *Orders cross the wire as JSON inside JSON.* `wire.py` turns an `Order`
+     into a JSON string and parses it back into a dict (and the reverse on
+     the way in). `order_to_dict`/`order_from_dict` in `models/order.py`;
+     the JSON codec (ledger) wraps them, the wire uses them directly.
+  2. *A dead branch in the bot's position line.* `log_position` handles a
+     closed position, but it only ever gets the snapshot's open one; the
+     branch goes, and with it `Position.realized_pnl_percent` (only its
+     tests used it).
+
+  Seen and left: the bot loop, `decision.py`, the remote client, the spec
+  terms and their validation read well after A17.
+- **Result.** As designed. `order_to_json` now dumps `order_to_dict`, and
+  the JSON it writes is byte for byte the old one (checked on a plain, a
+  costed and a perp order), so ledger rows and the wire don't change. 902
+  tests (2 new in `tests/trader/shared/models/test_order_codec.py`).

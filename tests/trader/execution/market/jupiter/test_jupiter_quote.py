@@ -1,4 +1,4 @@
-from trader.execution.market.jupiter.jupiter_data import (
+from trader.execution.market.jupiter.quote import (
     JupiterQuoteResponse,
     JupiterRoutePlan,
     JupiterSwapInfo,

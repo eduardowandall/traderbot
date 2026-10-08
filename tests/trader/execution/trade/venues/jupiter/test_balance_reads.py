@@ -10,9 +10,9 @@ import pytest
 from factories import memory_gateway, mock_provider
 from solana.exceptions import SolanaRpcException
 
-from trader.execution.models.account_data import MintBalance
-from trader.execution.trade.gateway.account import SpotAccount
-from trader.execution.trade.venues.jupiter.async_rpc_client import (
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.accounts.spot import SpotAccount
+from trader.execution.trade.venues.jupiter.rpc import (
     AsyncRPCClient,
     is_transient,
 )
@@ -40,7 +40,6 @@ def _wrapped(cause):
 
 def _rpc(*token_account_responses):
     client = AsyncMock()
-    client.is_connected = AsyncMock(return_value=True)
     client.get_token_accounts_by_owner = AsyncMock(
         side_effect=list(token_account_responses)
     )
@@ -128,7 +127,6 @@ class TestAssociatedTokenAccounts:
         data = _token_account(USDC, 4_365_485).account.data
         account = SimpleNamespace(owner=TOKEN_PROGRAM_ID, lamports=2_039_280, data=data)
         client = AsyncMock()
-        client.is_connected = AsyncMock(return_value=True)
         client.get_multiple_accounts = AsyncMock(
             return_value=SimpleNamespace(value=[account, None])
         )

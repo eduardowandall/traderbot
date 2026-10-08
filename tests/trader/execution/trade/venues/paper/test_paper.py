@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import memory_gateway
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
+from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.intent import SentTx, TxOutcome
-from trader.execution.trade.gateway.account import SpotAccount
-from trader.execution.trade.venues import JupiterQuoteResponse
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import SwapRejectedError
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.venues.paper import (
     InsufficientFundsError,
     SimulatedExecutor,

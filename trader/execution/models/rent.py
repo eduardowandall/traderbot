@@ -15,9 +15,6 @@ from decimal import Decimal
 
 from trader.shared.models.costs import LAMPORTS_PER_SOL
 
-RENT_REFUND_SENT = "rent_refund_sent"
-RENT_REFUND = "rent_refund"
-
 
 @dataclass(frozen=True)
 class RentRefund:

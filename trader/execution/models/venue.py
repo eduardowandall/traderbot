@@ -23,13 +23,21 @@ from typing import Protocol
 
 from solders.pubkey import Pubkey
 
-from trader.execution.models.account_data import MintBalance
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.models.perp import PerpTerms
 from trader.execution.models.rent import RentRefund
 from trader.shared.models.costs import TradeCosts
 from trader.shared.models.perp import PerpFill
+
+# o SOL que fica na carteira para as taxas, on-chain e em paper
+DEFAULT_SOL_FEE_RESERVE = Decimal("0.02")
+
+
+@dataclass
+class MintBalance:
+    available: Decimal
+    mint: Pubkey
 
 
 class PostTrade(Protocol):
@@ -59,10 +67,6 @@ class Venue(PostTrade, Protocol):
     async def close(
         self, input_mint: Pubkey, output_mint: Pubkey, quantity: Decimal
     ) -> ExecutionResult: ...
-
-    async def fetch_costs(self, result: ExecutionResult) -> TradeCosts: ...
-
-    async def fetch_failed_fees(self, signatures: Sequence[str]) -> int: ...
 
     async def send_outcome(self, sent: SentTx) -> TxOutcome: ...
 

@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import make_intent, memory_gateway, mock_provider
 
-from trader.execution.models.account_data import MintBalance
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.gateway import PolicyDeniedError
-from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.gateway.fills import Fill
 from trader.execution.trade.gateway.orders import order_from_fill
 from trader.execution.trade.venues.spot import SpotVenue

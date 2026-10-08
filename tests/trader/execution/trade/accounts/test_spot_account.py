@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import memory_gateway, mock_provider, spot_provider
 
-from trader.execution.models.account_data import MintBalance
 from trader.execution.models.execution import ExecutionResult
-from trader.execution.trade.gateway.account import SpotAccount, WalletShortfallError
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.accounts.spot import SpotAccount, WalletShortfallError
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import (
     SOLANA_MINTS,
@@ -284,7 +284,7 @@ JUP = SOLANA_MINTS.get_by_symbol("JUP")
 
 
 def _wallet(listed, direct):
-    from trader.execution.trade.gateway.balances import WalletBalances
+    from trader.execution.trade.accounts.wallet import WalletBalances
 
     provider = mock_provider()
     provider.get_account_balance = AsyncMock(

@@ -24,15 +24,15 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
-from trader.shared.indicators import RSI_SEED_FACTOR, SEED_FACTOR
+from trader.shared import indicators as ind
 
 MAX_LENGTH = 200
 MIN_WINDOW, MAX_WINDOW = 2, 500
 
 # atributos do contexto do tick
 VARIABLES = frozenset({"price", "entry_price", "peak", "last_exit_price"})
-# indicadores do `IndicatorBank`
-FUNCTIONS = frozenset({"sma", "ema", "wma", "rsi", "high", "low", "volatility"})
+# os indicadores do registro (`trader.shared.indicators.INDICATORS`)
+FUNCTIONS = frozenset(ind.INDICATORS)
 
 
 def _div(a: Decimal, b: Decimal) -> Decimal | None:
@@ -172,26 +172,14 @@ def _calls(tree: ast.expr) -> list[tuple[str, int]]:
     ]
 
 
-def _lookback(name: str, window: int) -> int:
-    """Barras para ter valor (como as condições tipadas equivalentes)."""
-    return window + (1 if name in ("rsi", "volatility") else 0)
-
-
-def _history(name: str, window: int) -> int:
-    """Barras para convergir (EMA 5x, RSI 10x + 1)."""
-    if name == "ema":
-        return window * SEED_FACTOR
-    if name == "rsi":
-        return window * RSI_SEED_FACTOR + 1
-    return _lookback(name, window)
-
-
 def lookback(tree: ast.expr) -> int:
-    return max((_lookback(*c) for c in _calls(tree)), default=1)
+    """Barras para todos os indicadores da expressão terem valor."""
+    return max((ind.lookback(*c) for c in _calls(tree)), default=1)
 
 
 def history(tree: ast.expr) -> int:
-    return max((_history(*c) for c in _calls(tree)), default=1)
+    """Barras para todos convergirem."""
+    return max((ind.history(*c) for c in _calls(tree)), default=1)
 
 
 # --- a avaliação (só árvores que passaram por `parse`) ---------------------------

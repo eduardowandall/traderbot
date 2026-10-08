@@ -134,14 +134,6 @@ class Position:
             pnl_value / (self.entry_order.quote_price * self.entry_order.quantity)
         ) * Decimal("100.0")
 
-    @property
-    def realized_pnl_percent(self) -> Decimal:
-        if not self.exit_order:
-            return Decimal("0.0")
-        return (
-            (self.exit_order.price - self.entry_order.price) / self.entry_order.price
-        ) * Decimal("100.0")
-
     def __eq__(self, value):
         return (
             value

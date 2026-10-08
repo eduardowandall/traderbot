@@ -5,12 +5,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import TxOutcome
 from trader.execution.models.mode import RunningMode
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
 from trader.execution.wiring import build_provider
 from trader.shared.models import SOLANA_MINTS
 

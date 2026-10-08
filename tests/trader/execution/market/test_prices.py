@@ -3,11 +3,10 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import httpx
-import pytest
 
-from trader.execution.market import JupiterMarketData, JupiterPriceOracle, usd_snapshot
+from trader.execution.market import JupiterPriceOracle, usd_snapshot
 from trader.execution.market import prices as prices_module
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.shared.models import SOLANA_MINTS
 
 SOL = SOLANA_MINTS.get_by_symbol("SOL").mint
@@ -96,29 +95,3 @@ class TestSnapshot:
                 return {SOL: Decimal("1")}
 
         assert await usd_snapshot(Slow(), [SOL]) == {}
-
-
-class TestWebsocketFallback:
-    async def test_websocket_error_falls_back_to_the_price_api(self):
-        client = _client({SOL: Decimal("150")})
-        client.get_price = AsyncMock(side_effect=OSError("ws down"))
-
-        assert await JupiterMarketData(client).get_price(SOL) == Decimal("150")
-
-    async def test_a_quiet_websocket_falls_back_after_the_timeout(self):
-        client = _client({SOL: Decimal("150")})
-
-        async def quiet(mint):
-            await asyncio.sleep(1)
-
-        client.get_price = quiet
-        data = JupiterMarketData(client, price_timeout=0.01)
-
-        assert await data.get_price(SOL) == Decimal("150")
-
-    async def test_no_price_anywhere_raises(self):
-        client = _client({})
-        client.get_price = AsyncMock(side_effect=OSError("ws down"))
-
-        with pytest.raises(LookupError):
-            await JupiterMarketData(client).get_price(SOL)

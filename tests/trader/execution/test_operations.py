@@ -67,9 +67,9 @@ def test_logs_follow_the_paths_rule(tmp_path, monkeypatch):
 async def test_no_new_swap_attempt_after_the_deadline(monkeypatch):
     from solders.keypair import Keypair
 
-    from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
-    from trader.execution.trade.venues.jupiter import async_jupiter_svc as svc
-    from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+    from trader.execution.market.jupiter.client import AsyncJupiterClient
+    from trader.execution.trade.venues.jupiter import provider as svc
+    from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 
     provider = svc.AsyncJupiterProvider.on_chain(
         Keypair(),

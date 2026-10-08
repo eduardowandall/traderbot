@@ -19,7 +19,7 @@ from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.execution.models.intent import IntentRecord
 from trader.execution.trade.ledger import Ledger
 from trader.shared.indicators import bar_index, to_utc
-from trader.shared.market import MarketData
+from trader.shared.market import CandleSource
 from trader.shared.models import SOLANA_MINTS, OrderSide, TickerData
 from trader.shared.models.costs import BPS
 from trader.shared.models.order import order_from_json
@@ -27,7 +27,7 @@ from trader.strategy.spec.models import StrategySpec
 
 
 async def fetch_warmup(
-    data: MarketData, spec: StrategySpec, before: datetime, now: datetime
+    data: CandleSource, spec: StrategySpec, before: datetime, now: datetime
 ) -> list[TickerData]:
     """Os `spec.history()` candles que fecharam antes de `before`."""
     seconds = spec.timeframe.seconds

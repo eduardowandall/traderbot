@@ -6,7 +6,7 @@ de impacto de preço, re-tentativas); só o executor muda.
 
 from decimal import Decimal
 
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
+from trader.execution.trade.venues.jupiter.provider import (
     DEFAULT_MAX_PRICE_IMPACT_PCT,
     DEFAULT_MAX_SLIPPAGE_BPS,
     AsyncJupiterProvider,

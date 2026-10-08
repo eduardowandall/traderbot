@@ -1,18 +1,6 @@
+"""Os locais de execução (camada venue): o que move fundos.
+
+`spot.py` (`SpotVenue`, o `Venue` dos swaps) sobre o provider da Jupiter
+(`jupiter/`, real), a carteira simulada (`paper/`) e a Jupiter Perps
+(`jupiter_perps/`, real). Quem monta é `trader/execution/wiring.py`.
 """
-Módulo de interfaces da API Jupiter.
-"""
-
-from trader.execution.market.jupiter.jupiter_data import (
-    JupiterQuoteResponse,
-    JupiterRoutePlan,
-    JupiterSwapInfo,
-)
-
-from .jupiter.async_jupiter_svc import AsyncJupiterProvider
-
-__all__ = [
-    "AsyncJupiterProvider",
-    "JupiterQuoteResponse",
-    "JupiterRoutePlan",
-    "JupiterSwapInfo",
-]

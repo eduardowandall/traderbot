@@ -6,11 +6,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from factories import example_spec, served
-from live_helpers import LOOSE_PAPER_POLICY
+from live_helpers import LOOSE_PAPER_POLICY, hub_feed, running_hub
 
 from trader.backtest import Backtester, TickRecorder, load_ticks
 from trader.backtest.spec import result_to_dict
-from trader.execution.market import JupiterMarketData
+from trader.execution.market.hub import PriceHub
 from trader.execution.models.intent import IntentStatus
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.ledger import Ledger, ledger_path
@@ -20,8 +20,8 @@ from trader.shared.models.order import order_from_json
 from trader.shared.notification import NotificationService
 from trader.shared.paths import policy_file
 from trader.shared.trading_service.protocol import OrderRequest, ReplyStatus
-from trader.strategy.bot.async_websocket_bot import AsyncWebsocketTradingBot
 from trader.strategy.bot.config import BotConfig
+from trader.strategy.bot.loop import TradingBot
 from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
 
@@ -69,11 +69,11 @@ async def _round_trip():
     with service.gateway:
         try:
             await service.open_bucket("live", QUOTE.mint, TOKEN.mint)
-            data = JupiterMarketData()
+            hub = PriceHub(stream=None)
             try:
-                price = await data.get_price(TOKEN.mint)
+                price, _ = await hub.price(TOKEN.mint)
             finally:
-                await data.aclose()
+                await hub.client.aclose()
             buy = await service.submit_order(
                 "live", OrderRequest(OrderSide.BUY, Decimal(5) / price, price)
             )
@@ -116,13 +116,16 @@ async def _run_bot(ticks_file):
     service = build_trade_service(RunningMode.PAPER)
     with service.gateway, TickRecorder(ticks_file) as recorder:
         try:
-            async with served(service, strategy.spec.terms()) as trader:
-                bot = AsyncWebsocketTradingBot(
+            async with (
+                running_hub() as hub,
+                served(service, strategy.spec.terms()) as trader,
+            ):
+                bot = TradingBot(
                     BotConfig(
                         name="live-test",
                         symbol="SOL-USDC",
                         strategy=strategy,
-                        market=JupiterMarketData(),
+                        market=hub_feed(hub),
                         trader=trader,
                         notifier=NotificationService(),
                         on_tick=recorder.record,

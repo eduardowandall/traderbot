@@ -19,8 +19,7 @@ from functools import partial
 
 from solders.pubkey import Pubkey
 
-from trader.execution.models.account_data import MintBalance
-from trader.execution.models.venue import Venue
+from trader.execution.models.venue import MintBalance, Venue
 from trader.shared.logging_config import error_text
 from trader.shared.models.mints import SOL_MINT
 

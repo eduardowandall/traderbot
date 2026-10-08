@@ -124,8 +124,9 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   blocks such as `below_last_exit`), a predicate in `conditions.PREDICATES`,
   and a row in `docs/specs.md`. Tests fail if any of them disagree. Most ideas
   fit an `expr` instead (`trader/strategy/spec/expr.py`: `ast.parse` plus a
-  whitelist walk and its own evaluator, never `eval`; an indicator there is one
-  entry in `FUNCTIONS`).
+  whitelist walk and its own evaluator, never `eval`). An indicator is one
+  entry in `INDICATORS` (`trader/shared/indicators.py`, with its bars in
+  `lookback`/`history`, A17): the typed conditions and `expr` both read it.
 - Sizing is `fixed_usd` or `pct_of_bucket` (of what the bucket may spend now).
 - Stops and exits never wait for the warm-up; only entries do. Warm-up is
   `spec.history()` (5x the period for EMA, 10x for RSI, capped at 900 bars).
@@ -150,7 +151,7 @@ command to run in a terminal. The rules are tested in
 - **Folders follow the processes** (B11, B12): `trader/execution/` is the
   trade-runner, split into `market/` (everything that reads Jupiter: client,
   candles, `PriceHub`, USD oracle; never moves funds) and `trade/` (gateway,
-  venues, ledger, policy, trading service); `trader/strategy/` the
+  accounts, venues, ledger, policy, trading service); `trader/strategy/` the
   strategy-runner (bot, spec engine, remote client); `trader/shared/` what both
   import (models, the network-free feed `MarketData`/`HubMarketData`/pairs,
   the spec's terms and their policy checks, wire protocol, paths; the full
@@ -165,10 +166,11 @@ command to run in a terminal. The rules are tested in
 - **One strategy type**: the bot and the backtester take the `Strategy` protocol
   (`trader/strategy/bot/config.py`), which `SpecStrategy` implements, and share one
   per-tick decision (`trader/strategy/bot/decision.py`).
-- **One seam to the venue** (A7): `trade/gateway` and `trade/trading_service`
-  take a `Venue` (`trader/execution/models/venue.py`; today `SpotVenue` around
-  the Jupiter provider, built in `wiring`/the backtest) and accounts are
-  `BucketAccount`s (`SpotAccount`); they never import `trade/venues` (tested).
+- **One seam to the venue** (A7): `trade/gateway`, `trade/accounts` and
+  `trade/trading_service` take a `Venue` (`trader/execution/models/venue.py`;
+  today `SpotVenue` around the Jupiter provider, built in `wiring`/the
+  backtest) and accounts are `BucketAccount`s (`trade/accounts/`: `SpotAccount`,
+  `PerpAccount`); they never import `trade/venues` (tested).
   Tests reach the mock provider with `spot_provider(...)` (`tests/factories.py`).
   The ids of `docs/examples/` are pinned (`test_example_ids.py`): a new spec
   field with a default must stay out of `canonical_json`.
@@ -199,7 +201,7 @@ command to run in a terminal. The rules are tested in
   Paper fills 10 bps below the quote (`SimulatedExecutor.slippage_bps`).
 - **Priority fee (B9)** is one owner setting, `max_priority_fee_lamports` in
   `policy.toml` (default 100,000): real sends it to Jupiter as the
-  `maxLamports` cap (`priority_fee()` in `async_jupiter_client.py`), paper
+  `maxLamports` cap (`priority_fee()` in `client.py`), paper
   charges it in full on every leg, the backtest prices it into
   `network_fee_usd`. `wiring.build_trade_service` loads the policy once for
   the provider and the gateway.
@@ -218,7 +220,7 @@ command to run in a terminal. The rules are tested in
   `live_vs_backtest.py` and `ledger_dump.py`.
 - **Perps (A8, paper only).** A spec with `market` (`PerpMarket`,
   `trader/shared/spec/terms.py`) gets a `PerpAccount`
-  (`trade/gateway/perp_account.py`) on the mode's `PerpVenue`
+  (`trade/accounts/perp.py`) on the mode's `PerpVenue`
   (`SimulatedPerpsVenue`, `trade/venues/paper/perps.py`; real has none until
   A11). A perp leg rides the spot path: `TradeIntent.perp` (`PerpTerms`, ledger
   `instrument`/`perp_json`), `ExecutionResult.perp`/`Order.perp` (`PerpFill`,
@@ -235,6 +237,8 @@ command to run in a terminal. The rules are tested in
 - **Ledger schema** is one `_SCHEMA` with a `user_version` in
   `trader/execution/trade/ledger/store.py`. There are no migrations: an older file is refused
   (`LedgerFormatError`); bump `SCHEMA_VERSION` when the schema changes.
+  Event types are names in `trade/ledger/events.py` (A16): add one there,
+  never as an inline string, and never rename one (old ledgers keep it).
 - **UNCONFIRMED/EXECUTING** (process killed mid-swap) blocks all trading in
   that mode until resolved (A3, `trader/execution/trade/gateway/resolve.py`):
   every send is an `intent_sent` event written before the broadcast (the
@@ -267,8 +271,8 @@ command to run in a terminal. The rules are tested in
   helpers are in `tests/factories.py` (`make_intent`, `make_spec`,
   `open_ledger`, `memory_gateway`, `mock_provider`, `StubStrategy` for bot and
   backtest fakes).
-- Tests patch module paths such as `trader.strategy.runner.AsyncWebsocketTradingBot`
-  and swap `trader.api.cli.backtest.MARKET_DATA` for a fake.
+- Tests patch module paths such as `trader.strategy.runner.TradingBot`
+  and swap `trader.api.cli.backtest.CANDLES` for a fake.
 - Ruff: line length 88, mccabe `max-complexity = 5` (split functions rather
   than suppress). Pyright basic on `trader`, `tests`, `main.py`.
 

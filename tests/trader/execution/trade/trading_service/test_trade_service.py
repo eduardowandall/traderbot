@@ -9,8 +9,8 @@ from factories import Inbox, memory_gateway, mock_provider, open_ledger
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.models.intent import IntentSide
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import (
     TradeService,

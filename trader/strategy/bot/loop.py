@@ -34,7 +34,9 @@ bot_logger = logging.getLogger("bot")
 STARTUP_ALERT_AFTER = 5
 
 
-class AsyncWebsocketTradingBot:
+class TradingBot:
+    """Um bot por spec: o loop de ticks, a inicialização e o tratamento de erros."""
+
     def __init__(self, config: BotConfig):
         self.name = config.name
         self.symbol = config.symbol
@@ -248,9 +250,9 @@ def log_ticker(symbol: str, price: Decimal, pnl_summary: str | None = None):
 
 
 def log_placed_order(order: Order):
-    msg = f"[gray]{order.side.upper()}[/gray] {order.quantity:.8f} @ ${order.price:.8f} [gray]({order.order_id})[gray]"
     bot_logger.info(
-        msg,
+        f"[gray]{order.side.upper()}[/gray] {order.quantity:.8f} @ "
+        f"${order.price:.8f} [gray]({order.order_id})[/gray]",
         extra={"markup": True},
     )
     bot_logger.debug(describe_costs(order.costs, order.sol_usd))
@@ -271,11 +273,8 @@ def bucket_line(snapshot: BucketSnapshot, price: Decimal) -> str:
 
 
 def log_position(position: Position, current_price: Decimal, quote_usd: Decimal | None):
-    pnl = (
-        position.unrealized_pnl_percent(current_price)
-        if position.exit_order is None
-        else position.realized_pnl_percent
-    )
+    # a posição aberta do bucket (o snapshot nunca traz uma fechada)
+    pnl = position.unrealized_pnl_percent(current_price)
     pnl_style = "green" if pnl > 0 else "red"
     pnl_str = f"[{pnl_style}]{pnl:.2f}%[/{pnl_style}]"
     usd = position.unrealized_usd(current_price * quote_usd) if quote_usd else None

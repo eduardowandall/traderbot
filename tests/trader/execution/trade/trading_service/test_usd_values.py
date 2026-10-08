@@ -10,7 +10,7 @@ from factories import open_ledger
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.market import JupiterPriceOracle
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService

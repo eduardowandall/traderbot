@@ -30,7 +30,7 @@ from decimal import Decimal
 
 import websockets
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.shared.logging_config import error_text
 
 logger = logging.getLogger(__name__)

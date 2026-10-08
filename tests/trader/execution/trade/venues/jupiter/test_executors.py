@@ -7,11 +7,11 @@ from factories import bonk_quote
 from solders.keypair import Keypair
 from solders.solders import TransactionConfirmationStatus
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.execution.models.intent import SentTx, TxOutcome, send_hook
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.execution.trade.venues.paper import (
     SimulatedExecutor,
     SimulatedWallet,

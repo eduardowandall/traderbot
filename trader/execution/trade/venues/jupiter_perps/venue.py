@@ -43,10 +43,10 @@ from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, announce_send
 from trader.execution.models.perp import PerpTerms
 from trader.execution.models.venue import Liquidation
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
+from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
+from trader.execution.trade.venues.jupiter.provider import (
     AsyncJupiterProvider,
 )
-from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
 from trader.execution.trade.venues.jupiter_perps.requests import (
     MICRO_PER_LAMPORT,
     PerpRequest,

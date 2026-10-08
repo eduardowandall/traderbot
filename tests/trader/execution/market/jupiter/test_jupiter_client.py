@@ -9,11 +9,11 @@ from solders.pubkey import Pubkey
 from solders.solders import VersionedTransaction
 from solders.system_program import transfer
 
-from trader.execution.market.jupiter.async_jupiter_client import (
+from trader.execution.market.jupiter.client import (
     DEFAULT_JUPITER_API_URL,
     AsyncJupiterClient,
 )
-from trader.execution.market.jupiter.jupiter_data import (
+from trader.execution.market.jupiter.quote import (
     JupiterQuoteResponse,
     JupiterRoutePlan,
     JupiterSwapInfo,

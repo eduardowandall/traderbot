@@ -6,7 +6,8 @@ sobrevive a reinícios. `Ledger` junta as partes, que dividem uma conexão:
 - `store.py`: conexão, esquema e o log de eventos;
 - `intents.py`: registro e ciclo de vida das intenções, ordens, consultas;
 - `reports.py`: PnL e custos por conta;
-- `policy_state.py`: os agregados que a política usa.
+- `policy_state.py`: os agregados que a política usa;
+- `positions.py`: a posição aberta de cada conta, das pernas dela.
 
 Use um arquivo por modo (`ledger_path(mode)`) para que o histórico de paper
 nunca se misture com o real.
@@ -14,13 +15,16 @@ nunca se misture com o real.
 
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 from trader.execution.models.intent import IntentRecord, PolicyDecision, TradeIntent
 from trader.execution.trade.ledger.intents import IntentStore
 from trader.execution.trade.ledger.policy_state import PolicyStateQueries
+from trader.execution.trade.ledger.positions import open_entry
 from trader.execution.trade.ledger.reports import AccountPnL, Reports
 from trader.execution.trade.policy import PolicyState
+from trader.shared.models.order import Order
 from trader.shared.paths import data_dir
 
 __all__ = ["AccountPnL", "Ledger", "ledger_path"]
@@ -55,6 +59,25 @@ class Ledger(IntentStore, Reports, PolicyStateQueries):
             decision = decide(state)
             self._record_locked(intent, decision)
             return None, decision
+
+    def open_entry(self, account: str) -> tuple[Order, str] | None:
+        """A entrada da posição aberta da conta e a intenção que a abriu."""
+        legs = self.legs_since_last_buy(account)
+        entry = open_entry(legs)
+        return None if entry is None else (entry, legs[0].intent.intent_id)
+
+    def open_positions(self, prefix: str = "") -> dict[str, Decimal]:
+        """Tokens em posições abertas, somados por mint, nas contas do prefixo.
+
+        Só spot: uma perp fica no venue, não na carteira (A8).
+        """
+        held: dict[str, Decimal] = {}
+        for account in self.accounts(prefix):
+            entry = open_entry(self.legs_since_last_buy(account))
+            if entry is not None and entry.perp is None:
+                mint = entry.output_mint
+                held[mint] = held.get(mint, Decimal("0")) + entry.quantity
+        return held
 
     def __enter__(self) -> Ledger:
         return self

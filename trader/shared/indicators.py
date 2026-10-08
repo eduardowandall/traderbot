@@ -1,9 +1,11 @@
 """Indicadores técnicos em `Decimal` (funções puras) e barras por timeframe.
 
-Camada core: sem I/O e sem dependências do resto do bot. As mesmas funções
-servem às estratégias declarativas (`trader.strategy.spec`) e ao
-`market summary` que o agente consulta, então o que o agente vê é exatamente
-o que a estratégia calcula.
+Camada core: sem I/O e sem dependências do resto do bot. `INDICATORS` é o
+que uma spec pode pedir (as condições tipadas e o `expr` de
+`trader.strategy.spec` leem daqui), com as barras de cada um: `lookback`
+para ter valor, `history` para convergir. Um indicador novo é uma entrada
+em `INDICATORS` (e, se precisar de mais barras, uma regra em `lookback` ou
+`history`).
 
 Convenções:
 - `values` é a série de fechamentos, do mais antigo para o mais recente;
@@ -13,7 +15,7 @@ Convenções:
 """
 
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -59,13 +61,6 @@ def ema(values: Sequence[Decimal], window: int) -> Decimal | None:
     return result
 
 
-def moving_average(kind: str, values: Sequence[Decimal], window: int):
-    return _MOVING_AVERAGES[kind](values, window)
-
-
-_MOVING_AVERAGES = {"sma": sma, "ema": ema, "wma": wma}
-
-
 def _changes(values: Sequence[Decimal]) -> list[Decimal]:
     return [b - a for a, b in zip(values[:-1], values[1:], strict=True)]
 
@@ -90,13 +85,6 @@ def rsi(values: Sequence[Decimal], period: int) -> Decimal | None:
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
     return _rsi_from(avg_gain, avg_loss)
-
-
-def pct_change(values: Sequence[Decimal], bars: int) -> Decimal | None:
-    """Variação % do fechamento de `bars` barras atrás até o último."""
-    if bars < 1 or len(values) < bars + 1 or values[-1 - bars] == 0:
-        return None
-    return (values[-1] / values[-1 - bars] - 1) * HUNDRED
 
 
 def _returns_pct(values: Sequence[Decimal]) -> list[Decimal] | None:
@@ -124,6 +112,36 @@ def rolling_high(values: Sequence[Decimal], window: int) -> Decimal | None:
 def rolling_low(values: Sequence[Decimal], window: int) -> Decimal | None:
     tail = _tail(values, window)
     return None if tail is None else min(tail)
+
+
+# --- o registro: o que uma spec pode pedir --------------------------------------
+
+# nome -> `(fechamentos, janela) -> valor`; o nome é o do `expr` (`rsi(14)`)
+INDICATORS: dict[str, Callable[[Sequence[Decimal], int], Decimal | None]] = {
+    "sma": sma,
+    "ema": ema,
+    "wma": wma,
+    "rsi": rsi,
+    "volatility": volatility,
+    "high": rolling_high,
+    "low": rolling_low,
+}
+# calculados sobre as variações: uma barra a mais que a janela
+_FROM_CHANGES = frozenset({"rsi", "volatility"})
+
+
+def lookback(name: str, window: int) -> int:
+    """Barras para o indicador `name` de `window` ter valor."""
+    return window + (1 if name in _FROM_CHANGES else 0)
+
+
+def history(name: str, window: int) -> int:
+    """Barras para o valor convergir: EMA 5x, RSI 10x + 1 (Wilder suaviza 1/n)."""
+    if name == "ema":
+        return window * SEED_FACTOR
+    if name == "rsi":
+        return window * RSI_SEED_FACTOR + 1
+    return lookback(name, window)
 
 
 def to_utc(ts: datetime) -> datetime:

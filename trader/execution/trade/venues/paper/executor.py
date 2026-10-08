@@ -14,19 +14,18 @@ from decimal import Decimal
 
 from solders.pubkey import Pubkey
 
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.execution.models.account_data import MintBalance
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome, announce_send
 from trader.execution.models.rent import RentRefund
-from trader.execution.trade.venues.jupiter.executor import DEFAULT_SOL_FEE_RESERVE
+from trader.execution.models.venue import DEFAULT_SOL_FEE_RESERVE, MintBalance
 from trader.execution.trade.venues.paper.wallet import SimulatedWallet
 from trader.shared.models import SOLANA_MINTS
-from trader.shared.models.costs import SIMULATED, TradeCosts
+from trader.shared.models.costs import BASE_FEE_LAMPORTS, SIMULATED, TradeCosts
 from trader.shared.models.mints import SOL_MINT
 
-# taxa base de uma transação Solana (5000 lamports por assinatura)
-DEFAULT_FEE_LAMPORTS = 5000
+# a taxa base de uma transação Solana (uma assinatura)
+DEFAULT_FEE_LAMPORTS = BASE_FEE_LAMPORTS
 # rent de uma conta de token SPL (165 bytes); contas Token-2022 custam um
 # pouco mais (>= 2_074_080), então em paper é uma aproximação
 DEFAULT_ACCOUNT_RENT_LAMPORTS = 2_039_280
@@ -36,8 +35,6 @@ BPS = 10_000
 
 
 class SimulatedExecutor:
-    # a carteira simulada muda a cada ordem: dá para reconciliar
-
     def __init__(
         self,
         wallet: SimulatedWallet,

@@ -11,16 +11,16 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.solders import SendTransactionResp
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.ledger import Ledger
 from trader.execution.trade.policy import Policy
-from trader.execution.trade.venues import JupiterQuoteResponse
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.swap_costs import (
     SwapLegs,
     parse_swap_costs,

@@ -12,7 +12,7 @@ from solana.rpc.commitment import Confirmed, Finalized
 from solana.rpc.models import TokenAccountOpts
 from solders.instruction import Instruction
 from solders.keypair import Keypair
-from solders.message import MessageV0, to_bytes_versioned
+from solders.message import MessageV0
 from solders.pubkey import Pubkey
 from solders.rpc.responses import SendTransactionResp
 from solders.signature import Signature
@@ -99,7 +99,6 @@ class AsyncRPCClient:
             # Confirmed, como a confirmação dos swaps: em Finalized (o padrão
             # do solana-py) o saldo logo após um swap ainda é o de antes
             self.client = AsyncClient(rpc_url, commitment=Confirmed)
-        self._client_connected = False
 
     async def aclose(self) -> None:
         await self.client.close()
@@ -125,13 +124,6 @@ class AsyncRPCClient:
             if resp.value is not None:
                 return resp.value.transaction
         return None
-
-    @logger_wrapper
-    async def is_connected(self):
-        if self._client_connected:
-            return True
-        self._client_connected = await self.client.is_connected()
-        return self._client_connected
 
     @logger_wrapper
     async def check_signature_is_confirmed(self, signature) -> bool:
@@ -175,7 +167,6 @@ class AsyncRPCClient:
         self, instructions: list[Instruction], keypair: Keypair
     ) -> SignedTx:
         """Uma transação nossa (não da Jupiter), paga e assinada pela carteira."""
-        await self.is_connected()
         latest = await self.client.get_latest_blockhash()
         message = MessageV0.try_compile(
             keypair.pubkey(), instructions, [], latest.value.blockhash
@@ -187,35 +178,23 @@ class AsyncRPCClient:
     async def sign_transaction(
         self, tx: VersionedTransaction, keypair: Keypair
     ) -> SignedTx:
-        await self.is_connected()
+        """A transação da Jupiter com um blockhash novo, assinada pela carteira."""
         latest = await self.client.get_latest_blockhash()
-
-        blockhash = latest.value.blockhash
-        message = tx.message
         message = MessageV0(
             header=tx.message.header,
             account_keys=tx.message.account_keys,
-            recent_blockhash=blockhash,
+            recent_blockhash=latest.value.blockhash,
             instructions=tx.message.instructions,
             address_table_lookups=tx.message.address_table_lookups,  # type: ignore
         )
-
-        new_tx = VersionedTransaction(
-            message=message,
-            keypairs=[keypair],
-        )
-
-        signature = keypair.sign_message(to_bytes_versioned(message))
-
-        new_tx.signatures = [signature]
-        return SignedTx(new_tx, latest.value.last_valid_block_height)
+        signed = VersionedTransaction(message, [keypair])
+        return SignedTx(signed, latest.value.last_valid_block_height)
 
     @logger_wrapper
     async def simulate_transaction(
         self, new_tx: VersionedTransaction, addresses: list[Pubkey] | None = None
     ):
         """Simula; com `addresses`, a resposta traz essas contas como ficariam."""
-        await self.is_connected()
         simulation = await self.client.simulate_transaction(
             new_tx, accounts_addresses=addresses
         )
@@ -227,7 +206,6 @@ class AsyncRPCClient:
     @_READ_RETRY
     async def wallet_state(self, owner: Pubkey) -> WalletState:
         """Lamports e todas as contas de token da carteira (Token e Token-2022)."""
-        await self.is_connected()
         info, accounts = await asyncio.gather(
             self.client.get_account_info(owner), self._token_accounts(owner)
         )
@@ -257,14 +235,11 @@ class AsyncRPCClient:
     async def send_transaction(
         self, new_tx: VersionedTransaction
     ) -> SendTransactionResp:
-        await self.is_connected()
-        resp = await self.client.send_raw_transaction(bytes(new_tx))
-        return resp
+        return await self.client.send_raw_transaction(bytes(new_tx))
 
     @logger_wrapper
     @_READ_RETRY
     async def get_lamports(self, pubkey: Pubkey) -> Decimal:
-        await self.is_connected()
         resp = await self.client.get_account_info(pubkey)
 
         if resp.value:
@@ -279,7 +254,6 @@ class AsyncRPCClient:
     @_READ_RETRY
     async def get_account_balance(self, owner: Pubkey) -> dict[Pubkey, Decimal]:
         """Saldos raw por mint; uma leitura que falha levanta (nunca vira zero)."""
-        await self.is_connected()
         balances: dict[Pubkey, Decimal] = {}
         for keyed in await self._token_accounts(owner):
             data = bytes(keyed.account.data)
@@ -299,7 +273,6 @@ class AsyncRPCClient:
         de `getTokenAccountsByOwner`, que já voltou sem uma conta que existia
         (A6 F1). Uma conta que não existe não entra na lista.
         """
-        await self.is_connected()
         programs = (TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID)
         addresses = [get_associated_token_address(owner, mint, p) for p in programs]
         resp = await self.client.get_multiple_accounts(addresses)

@@ -16,7 +16,7 @@ import main as main_module
 from trader.api.cli import backtest as cli_backtest
 from trader.api.cli.output import dumps
 from trader.execution.market.hub import PriceHub
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.venues.paper import SimulatedExecutor
@@ -103,7 +103,7 @@ def fake_quotes(monkeypatch):
 @pytest.fixture
 def fake_market(monkeypatch):
     market = FakeMarket()
-    monkeypatch.setattr(cli_backtest, "MARKET_DATA", lambda: market)
+    monkeypatch.setattr(cli_backtest, "CANDLES", lambda: market)
     return market
 
 
@@ -390,7 +390,7 @@ def test_backtest_reports_parse_errors_as_json(tmp_path):
 
 
 def test_an_unexpected_error_is_still_json(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli_backtest, "MARKET_DATA", BrokenMarket)
+    monkeypatch.setattr(cli_backtest, "CANDLES", BrokenMarket)
     result = _invoke("backtest", _spec_file(tmp_path), "--json")
     body = json.loads(result.stdout)
     assert result.exit_code == 1

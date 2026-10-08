@@ -19,16 +19,16 @@ from spl.token.instructions import get_associated_token_address
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
 from trader.execution.models.errors import TransactionFailedOnChainError
-from trader.execution.models.rent import RENT_REFUND, RENT_REFUND_SENT
+from trader.execution.trade.ledger.events import RENT_REFUND, RENT_REFUND_SENT
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.execution.trade.venues.jupiter.async_rpc_client import (
+from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
+from trader.execution.trade.venues.jupiter.rpc import (
     AsyncRPCClient,
     SignedTx,
     TokenAccount,
 )
-from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.execution.trade.venues.paper.executor import (
     DEFAULT_ACCOUNT_RENT_LAMPORTS,

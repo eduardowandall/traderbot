@@ -10,11 +10,11 @@ from decimal import Decimal
 
 from solders.pubkey import Pubkey
 
-from trader.execution.models.account_data import MintBalance
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.models.rent import RentRefund
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
 from trader.shared.models.costs import TradeCosts
 
 

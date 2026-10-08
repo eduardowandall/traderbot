@@ -11,8 +11,8 @@ from solders.message import MessageV0
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.tx_inspection import (
     ALLOWED_PROGRAMS,
     COMPUTE_BUDGET,

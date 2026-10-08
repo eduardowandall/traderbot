@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import memory_gateway, mock_provider, spot_provider
 
-from trader.execution.models.account_data import MintBalance
 from trader.execution.models.book import remainder_entry
 from trader.execution.models.execution import ExecutionResult
-from trader.execution.trade.gateway.account import SpotAccount, WalletShortfallError
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.accounts.spot import SpotAccount, WalletShortfallError
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.costs import QUOTE, TradeCosts

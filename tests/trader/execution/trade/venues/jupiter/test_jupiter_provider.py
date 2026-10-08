@@ -25,15 +25,15 @@ from solders.solders import (
 )
 from solders.transaction import VersionedTransaction
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.execution.models.account_data import MintBalance
-from trader.execution.trade.venues import (
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.market.jupiter.quote import (
     JupiterQuoteResponse,
     JupiterRoutePlan,
     JupiterSwapInfo,
 )
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
 
@@ -42,7 +42,6 @@ from trader.shared.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
 def fake_solana_client():
     client = AsyncMock(spec=SolanaClient)
     lite_svm = LiteSVM()
-    client.is_connected = AsyncMock(return_value=True)
     client.get_account_info = AsyncMock(
         return_value=GetAccountInfoResp(
             value=Account(

@@ -21,16 +21,16 @@ from trader.backtest.spec import (
     backtest_spec,
     fetch_ticks,
 )
-from trader.execution.market import JupiterMarketData
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market import JupiterCandles
 from trader.execution.market.jupiter.candles import MAX_CANDLES
-from trader.shared.market import MarketData
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.shared.market import CandleSource
 from trader.strategy.spec.parse import parse_spec
 
 SPEC_HELP = "Arquivo JSON da spec (o par vem dela), ex: docs/examples/spec-random.json"
 
-# fonte de preços e candles (dados públicos, sem chave); os testes trocam
-MARKET_DATA: Callable[[], MarketData] = JupiterMarketData
+# fonte dos candles (dados públicos, sem chave); os testes trocam
+CANDLES: Callable[[], CandleSource] = JupiterCandles
 # quotes e preços para medir os custos do backtest (B9); os testes trocam
 COST_QUOTES: Callable[[], Any] = AsyncJupiterClient
 
@@ -145,7 +145,7 @@ async def _costs(
 
 async def _candles(spec, n: int):
     # só leitura de dados públicos: sem chave, sem RPC
-    data = MARKET_DATA()
+    data = CANDLES()
     try:
         return await fetch_ticks(data, spec, n)
     finally:

@@ -1,7 +1,5 @@
-import asyncio
 import base64
 import json
-import logging
 import os
 from dataclasses import asdict
 from datetime import datetime
@@ -9,7 +7,6 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
-import websockets
 from solders.pubkey import Pubkey
 from solders.solders import VersionedTransaction
 from tenacity import (
@@ -19,14 +16,11 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-from websockets.asyncio.client import ClientConnection
 
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
 from trader.execution.market.jupiter.logging_utils import logger_wrapper
-
-# `Interval` mora em models (camada core); reexportado por compatibilidade
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.shared.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
-from trader.shared.models.public_data import Interval as Interval
+from trader.shared.models.public_data import Interval
 
 # lite-api.jup.ag está obsoleta (sem data final confirmada, mas o desligamento
 # vem). A API paga/gratuita atual é api.jup.ag; sem `x-api-key` as requisições
@@ -112,7 +106,7 @@ def priority_fee(max_lamports: int) -> dict[str, Any]:
 
 def _add_response_notes(ex: Exception, url: str, response) -> None:
     ex.add_note(f"URL: {url}")
-    if response:
+    if response is not None:
         ex.add_note(f"Status Code: {response.status_code}")
         ex.add_note(f"Response: {response.text}")
 
@@ -121,13 +115,9 @@ class AsyncJupiterClient:
     def __init__(
         self,
         client=None,
-        websocket=None,
         base_url: str | None = None,
         api_key: str | None = None,
     ):
-        self.logger = logging.getLogger(self.__module__)
-
-        self.websocket = websocket
         # base da API de swap/quote; configurável porque a lite-api.jup.ag
         # está sendo descontinuada em favor de api.jup.ag (docs/plan.md §7.2)
         self.base_url = (
@@ -171,7 +161,7 @@ class AsyncJupiterClient:
             return JupiterQuoteResponse.from_dict(response.json())
         except Exception as ex:
             _add_response_notes(ex, url, response)
-            raise ex
+            raise
 
     @logger_wrapper
     @HTTP_RETRY
@@ -200,11 +190,8 @@ class AsyncJupiterClient:
 
             return response_json["candles"]
         except Exception as ex:
-            ex.add_note(f"URL: {url}")
-            if response is not None:
-                ex.add_note(f"Status Code: {response.status_code}")
-                ex.add_note(f"Response: {response.text}")
-            raise ex
+            _add_response_notes(ex, url, response)
+            raise
 
     @HTTP_RETRY
     async def get_usd_prices(self, mints: list[str]) -> dict[str, Decimal]:
@@ -232,54 +219,7 @@ class AsyncJupiterClient:
             if isinstance(item, dict) and item.get("usdPrice") is not None
         }
 
-    @logger_wrapper
-    async def get_price(self, mint: str, max_reconnects: int = 5) -> Decimal:
-        for attempt in range(max_reconnects + 1):
-            try:
-                return await self._read_price(mint)
-            except websockets.exceptions.ConnectionClosed as ex:
-                # ConnectionClosedOK (fechamento normal) também exige reconexão
-                self.logger.info(f"INFO: WebSocket Closed: {str(ex)}")
-                self.websocket = None
-                if attempt == max_reconnects:
-                    raise
-                await asyncio.sleep(2)  # Espera antes de tentar reconectar
-            except Exception as ex:
-                self.logger.error(f"Erro ao conectar WebSocket: {str(ex)}", exc_info=ex)
-                raise ex
-        raise AssertionError("unreachable")
-
-    async def _read_price(self, mint: str) -> Decimal:
-        if not self.websocket:
-            self.websocket = await self._connect_price_ws(mint)
-        return await self._get_price(self.websocket, mint)
-
-    async def _get_price(self, ws: ClientConnection, mint: str) -> Decimal:
-        # '{"type":"prices","data":[{"assetId":"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263","price":0.000010537070513205161,"blockId":380968492}]}'
-        # ignora mensagens que não são de preço do mint (acks, heartbeats, outros ativos)
-        while True:
-            msg = await ws.recv()
-            json_msg = json.loads(msg, parse_float=Decimal)
-            for item in json_msg.get("data") or []:
-                if item.get("assetId", mint) == mint and "price" in item:
-                    return Decimal(item["price"])
-
-    @logger_wrapper
-    async def _connect_price_ws(self, mint: str):
-        ws = await websockets.connect(
-            "wss://trench-stream.jup.ag/ws",
-            additional_headers={"Origin": "https://jup.ag"},
-            compression="deflate",
-        )
-
-        await ws.send(json.dumps({"type": "subscribe:prices", "assets": [mint]}))
-        self.websocket = ws
-        return ws
-
     async def aclose(self) -> None:
-        if self.websocket is not None:
-            await self.websocket.close()
-            self.websocket = None
         await self.client.aclose()
 
     @logger_wrapper
@@ -290,10 +230,11 @@ class AsyncJupiterClient:
         pubkey: Pubkey,
         max_priority_fee_lamports: int = DEFAULT_MAX_PRIORITY_FEE_LAMPORTS,
     ) -> VersionedTransaction:
+        url = f"{self.base_url}/swap/v1/swap"
         response = None
         try:
             response = await self.client.post(
-                f"{self.base_url}/swap/v1/swap",
+                url,
                 json={
                     "quoteResponse": asdict(quote),
                     "userPublicKey": str(pubkey),
@@ -305,13 +246,7 @@ class AsyncJupiterClient:
             response.raise_for_status()
             swap_tx = response.json()
             raw_tx = base64.b64decode(swap_tx["swapTransaction"])
-
-            # ---------- desserializar ----------
-            tx = VersionedTransaction.from_bytes(raw_tx)
-            return tx
-
+            return VersionedTransaction.from_bytes(raw_tx)
         except Exception as ex:
-            if response is not None:
-                ex.add_note(f"Status Code: {response.status_code}")
-                ex.add_note(f"Response: {response.text}")
-            raise ex
+            _add_response_notes(ex, url, response)
+            raise

@@ -13,8 +13,8 @@ from factories import (
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, VersionedTransaction
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.shared.models import SOLANA_MINTS
 
 

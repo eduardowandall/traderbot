@@ -15,7 +15,7 @@ from trader.execution.market.jupiter.candles import MAX_CANDLES
 from trader.execution.models.perp import perp_terms_for
 from trader.execution.trade.venues.paper.perps import DEFAULT_BORROW_BPS_HOUR
 from trader.shared.indicators import bar_index
-from trader.shared.market import MarketData
+from trader.shared.market import CandleSource
 from trader.shared.market.pair import ratio_candles
 from trader.shared.models import SOLANA_MINTS, TickerData
 from trader.shared.models.public_data import Interval
@@ -31,7 +31,7 @@ MIN_EVAL_BARS = 20
 DEFAULT_NETWORK_FEE_USD = Decimal("0.002")
 
 
-async def fetch_ticks(data: MarketData, spec: StrategySpec, n: int) -> list[Tick]:
+async def fetch_ticks(data: CandleSource, spec: StrategySpec, n: int) -> list[Tick]:
     """Ticks dos candles fechados do timeframe da spec (abertura->mín->máx->fech).
 
     Num par sem stablecoin, duas séries: o token em cotação (a razão dos

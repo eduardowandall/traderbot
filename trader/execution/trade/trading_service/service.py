@@ -28,7 +28,7 @@ O modo (real/paper) é só do serviço: quem pede ordens nunca o conhece.
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
@@ -37,25 +37,22 @@ from solders.pubkey import Pubkey
 
 from trader.execution.market.prices import PriceOracle, usd_snapshot
 from trader.execution.models.bucket import BucketAccount
-from trader.execution.models.errors import (
-    SwapRejectedError,
-    TransactionFailedOnChainError,
-)
-from trader.execution.models.intent import SentTx, TxOutcome
+from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.perp import PerpTerms
-from trader.execution.models.rent import RENT_REFUND, RENT_REFUND_SENT, RentRefund
+from trader.execution.models.rent import RentRefund
 from trader.execution.models.venue import Liquidation, PerpVenue, Venue
+from trader.execution.trade.accounts.perp import PerpAccount
+from trader.execution.trade.accounts.spot import SpotAccount, WalletShortfallError
+from trader.execution.trade.accounts.wallet import WalletBalances
 from trader.execution.trade.gateway import (
     DuplicateIntentError,
     PolicyDeniedError,
     TradeGateway,
 )
-from trader.execution.trade.gateway.account import SpotAccount, WalletShortfallError
-from trader.execution.trade.gateway.balances import WalletBalances
-from trader.execution.trade.gateway.perp_account import PerpAccount
 from trader.execution.trade.gateway.resolve import IntentResolver
-from trader.shared.models import SOLANA_MINTS, Order, OrderSide
-from trader.shared.models.mints import SOL_MINT
+from trader.execution.trade.ledger import events
+from trader.execution.trade.trading_service.rent import RentRefunds
+from trader.shared.models import Order, OrderSide
 from trader.shared.notification.notification_service import (
     NotificationService,
     Notifier,
@@ -203,7 +200,7 @@ class TradeService:
             "que o ledger não conhece; compras recusadas até o dono conferir"
         )
         self.gateway.add_event(
-            "perp_mismatch",
+            events.PERP_MISMATCH,
             {
                 "account": account.account_id,
                 "market": account.terms.market_mint,
@@ -264,7 +261,7 @@ class TradeService:
         )
         logger.error(f"Bucket {name}: {what} (a {price})")
         self.gateway.add_event(
-            "perp_liquidated" if liquidated else "perp_venue_exit",
+            events.PERP_LIQUIDATED if liquidated else events.PERP_VENUE_EXIT,
             {
                 "account": account.account_id,
                 "market": account.terms.market_mint,
@@ -312,7 +309,7 @@ class TradeService:
                 "compras bloqueadas"
             )
             self._block_buys(
-                "reconcile_mismatch",
+                events.RECONCILE_MISMATCH,
                 {"mint": mint, "expected": expected, "wallet_balance": balance},
             )
 
@@ -357,7 +354,7 @@ class TradeService:
         bucket.status = BucketStatus.RETIRING
         logger.warning(f"Bucket {name}: prejuízo {realized} atingiu o limite {limit}")
         self.gateway.add_event(
-            "bucket_max_loss",
+            events.BUCKET_MAX_LOSS,
             {
                 "account": bucket.account.account_id,
                 "realized_usd": realized,
@@ -373,7 +370,8 @@ class TradeService:
         bucket.status = BucketStatus.RETIRING
         logger.warning(f"Bucket {name} encerrado: {reason}")
         self.gateway.add_event(
-            "bucket_retired", {"account": bucket.account.account_id, "reason": reason}
+            events.BUCKET_RETIRED,
+            {"account": bucket.account.account_id, "reason": reason},
         )
 
     def _bucket(self, name: str) -> _Bucket:
@@ -511,7 +509,7 @@ class TradeService:
         self._shortfalls.add(key)
         logger.error(f"{account.account_id}: {ex}; compras do token bloqueadas")
         self._block_buys(
-            "sell_shortfall",
+            events.SELL_SHORTFALL,
             {
                 "account": account.account_id,
                 "mint": ex.mint,
@@ -538,12 +536,17 @@ class TradeService:
 
     # --- rent de volta (A15) ----------------------------------------------------
 
+    @property
+    def _rent(self) -> RentRefunds:
+        return RentRefunds(self.gateway, self.venue, self.prices, self._prefix)
+
     async def close_token_account(self, name: str) -> RentRefund | None:
         """Bucket encerrado e sem posição: fecha a conta do token dele.
 
         Uma tentativa por bucket neste processo (um erro antes do envio deixa
-        tentar de novo), só se nada mais precisa da conta (`_rent_payer`). O
-        rent volta para o bucket que o pagou, que pode não ser este.
+        tentar de novo), só se nada mais precisa da conta: nenhum outro bucket
+        ativo usa o token, e o ledger deixa (`RentRefunds.payer`). O rent volta
+        para o bucket que o pagou, que pode não ser este.
         """
         bucket = self._bucket(name)
         if bucket.rent_checked or not _retired_flat(bucket):
@@ -556,30 +559,15 @@ class TradeService:
             )
             return None
         mint = str(bucket.account.output_mint)
-        payer = self._rent_payer(name, mint)
+        payer = None if self._mint_in_use(name, mint) else self._rent.payer(mint)
         refund = None
         if payer is not None:
             async with self._lock:
-                refund = await self._close(payer, mint)
+                refund = await self._rent.close(payer, mint)
+            if refund is not None:
+                self._restore_accounts({payer})
         bucket.rent_checked = True
         return refund
-
-    def _rent_payer(self, name: str, mint: str) -> str | None:
-        """Quem pagou o rent da conta do token, se ela pode ser fechada.
-
-        Não pode: SOL; outro bucket ativo usa o token; há posição aberta dele
-        no ledger; um fechamento dele está pendente; nenhuma compra do bot
-        abriu a conta (`Ledger.rent_payer`).
-        """
-        if mint == SOL_MINT or self._mint_in_use(name, mint):
-            return None
-        if mint in self.gateway.open_positions(self._prefix):
-            return None
-        ledger = self.gateway.ledger
-        pending = ledger.pending_rent_refunds(self._prefix)
-        if any(sent["mint"] == mint for sent in pending):
-            return None
-        return ledger.rent_payer(self._prefix, mint)
 
     def _mint_in_use(self, name: str, mint: str) -> bool:
         return any(
@@ -590,70 +578,14 @@ class TradeService:
             for other, bucket in self._buckets.items()
         )
 
-    async def _close(self, payer: str, mint: str) -> RentRefund | None:
-        """Fecha e registra; uma transação que a rede recusou registra a taxa."""
-        try:
-            refund = await self.venue.close_token_account(
-                mint, partial(self._announce_close, payer)
-            )
-        except TransactionFailedOnChainError as ex:
-            # a conta continua aberta: só a taxa foi paga
-            signature = ex.signature or ""
-            fee = await self.venue.fetch_failed_fees([signature])
-            refund = RentRefund(signature, mint, 0, fee)
-        if refund is not None:
-            await self._record_refund(payer, refund)
-        return refund
-
-    def _announce_close(self, payer: str, sent: SentTx) -> None:
-        """Grava o envio antes dele (se falha, nada é enviado)."""
-        self.gateway.add_event(
-            RENT_REFUND_SENT,
-            {"account": payer, "mint": sent.input_mint, **asdict(sent)},
-        )
-
-    async def _record_refund(self, payer: str, refund: RentRefund) -> None:
-        sol_usd = await self.quote_usd(SOL_MINT)
-        self.gateway.add_event(
-            RENT_REFUND,
-            {
-                "account": payer,
-                "mint": refund.mint,
-                "signature": refund.signature,
-                "refund_lamports": refund.refund_lamports,
-                "fee_lamports": refund.fee_lamports,
-                "sol_usd": sol_usd,
-                "net_usd": None if sol_usd is None else refund.net_sol * sol_usd,
-            },
-        )
-        logger.warning(
-            f"Conta de {SOLANA_MINTS.symbol_of(refund.mint)} fechada "
-            f"({refund.signature}): {refund.refund_lamports} lamports de rent "
-            f"de volta para {payer}, taxa {refund.fee_lamports}"
-        )
-        self._restore_accounts({payer})
-
     async def resolve_rent_refunds(self) -> None:
-        """Fechamentos enviados sem desfecho (processo morto, RPC sem resposta).
-
-        Como as intenções (A3): a rede diz se entrou; pendente, fica para a
-        próxima varredura.
-        """
-        for sent in self.gateway.ledger.pending_rent_refunds(self._prefix):
+        """Fechamentos enviados sem desfecho (processo morto, RPC sem resposta)."""
+        rent = self._rent
+        for sent in rent.pending():
             async with self._lock:
-                await self._resolve_close(sent)
-
-    async def _resolve_close(self, sent: dict) -> None:
-        tx = SentTx(**{f.name: sent[f.name] for f in fields(SentTx)})
-        outcome = await self.venue.send_outcome(tx)
-        if outcome == TxOutcome.PENDING:
-            return
-        expired = outcome == TxOutcome.EXPIRED
-        fee = 0 if expired else await self.venue.fetch_failed_fees([tx.signature])
-        rent = tx.out_amount if outcome == TxOutcome.LANDED else 0
-        await self._record_refund(
-            sent["account"], RentRefund(tx.signature, tx.input_mint, rent, fee)
-        )
+                payer = await rent.resolve(sent)
+            if payer is not None:
+                self._restore_accounts({payer})
 
     async def aclose(self) -> None:
         await self.venue.aclose()

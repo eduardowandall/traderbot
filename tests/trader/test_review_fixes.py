@@ -19,16 +19,16 @@ from solana.rpc.commitment import Confirmed
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution.models.account_data import MintBalance
 from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.accounts.spot import SpotAccount
+from trader.execution.trade.accounts.wallet import WalletBalances
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.gateway.account import SpotAccount
-from trader.execution.trade.gateway.balances import WalletBalances
 from trader.execution.trade.policy import Policy
 from trader.execution.trade.trading_service.service import TradeService
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide, Position

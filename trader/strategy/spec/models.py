@@ -6,8 +6,9 @@ limitados, nunca código. Campo ou condição nova aqui precisa de uma linha lá
 (`tests/test_spec_docs.py` confere).
 
 Cada condição tem um `type` (discriminador), `lookback()` (quantas barras
-precisa para ter valor) e `label()` (texto curto usado no `rationale`). Uma
-condição `expr` futura entra como mais um membro das uniões abaixo.
+precisa para ter valor; as dos indicadores vêm de `trader.shared.indicators`)
+e `label()` (texto curto usado no `rationale`). O que não cabe num bloco
+tipado vira um `Expr` (`expr.py`).
 """
 
 import ast
@@ -28,7 +29,8 @@ from pydantic import (
     model_validator,
 )
 
-from trader.shared.indicators import RSI_SEED_FACTOR, SEED_FACTOR, to_utc
+from trader.shared import indicators as ind
+from trader.shared.indicators import to_utc
 from trader.shared.models.public_data import Interval
 from trader.shared.spec.terms import (
     NAME_PATTERN,
@@ -113,10 +115,10 @@ class _Rsi(_Block):
     value: RsiLevel
 
     def lookback(self) -> int:
-        return self.period + 1
+        return ind.lookback("rsi", self.period)
 
     def history(self) -> int:
-        return self.period * RSI_SEED_FACTOR + 1  # Wilder: suavização 1/n
+        return ind.history("rsi", self.period)
 
 
 class RsiBelow(_Rsi):
@@ -139,10 +141,10 @@ class _PriceVsMa(_Block):
     pct: Margin = Decimal(0)
 
     def lookback(self) -> int:
-        return self.window
+        return ind.lookback(self.ma, self.window)
 
     def history(self) -> int:
-        return self.window * (SEED_FACTOR if self.ma == "ema" else 1)
+        return ind.history(self.ma, self.window)
 
 
 class PriceBelowMa(_PriceVsMa):
@@ -171,10 +173,10 @@ class _MaVsMa(_Block):
         return self
 
     def lookback(self) -> int:
-        return self.slow
+        return ind.lookback(self.ma, self.slow)
 
     def history(self) -> int:
-        return self.slow * (SEED_FACTOR if self.ma == "ema" else 1)
+        return ind.history(self.ma, self.slow)
 
 
 class FastMaAboveSlow(_MaVsMa):
@@ -197,7 +199,7 @@ class DipFromHigh(_Block):
     pct: Pct
 
     def lookback(self) -> int:
-        return self.window
+        return ind.lookback("high", self.window)
 
     def label(self) -> str:
         return f"dip{self.pct}%_from_high{self.window}"
@@ -211,7 +213,7 @@ class ReboundFromLow(_Block):
     pct: Pct
 
     def lookback(self) -> int:
-        return self.window
+        return ind.lookback("low", self.window)
 
     def label(self) -> str:
         return f"rebound{self.pct}%_from_low{self.window}"
@@ -249,7 +251,7 @@ class VolatilityBelow(_Block):
     pct: Pct
 
     def lookback(self) -> int:
-        return self.window + 1
+        return ind.lookback("volatility", self.window)
 
     def label(self) -> str:
         return f"vol{self.window}<{self.pct}%"

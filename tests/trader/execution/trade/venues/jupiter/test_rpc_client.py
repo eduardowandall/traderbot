@@ -13,14 +13,11 @@ from solders.solders import FailedTransactionMetadata
 from solders.system_program import transfer
 from solders.transaction import Transaction, VersionedTransaction
 
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 
 
 class FakeSolanaClient:
     client = LiteSVM()
-
-    async def is_connected(self):
-        return True
 
     async def send_raw_transaction(self, tx: bytes):
         result = FakeSolanaClient.client.send_transaction(Transaction.from_bytes(tx))

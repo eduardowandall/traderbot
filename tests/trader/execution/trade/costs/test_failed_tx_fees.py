@@ -12,17 +12,17 @@ import pytest
 from factories import SOL, USDC, memory_gateway
 from solders.pubkey import Pubkey
 
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.execution.models.account_data import MintBalance
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.errors import (
     SwapFailedError,
     TransactionFailedOnChainError,
 )
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus, TxOutcome
-from trader.execution.trade.gateway.account import SpotAccount
-from trader.execution.trade.ledger.reports import FAILED_TX_FEE
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import AsyncJupiterProvider
+from trader.execution.models.venue import MintBalance
+from trader.execution.trade.accounts.spot import SpotAccount
+from trader.execution.trade.ledger.events import FAILED_TX_FEE
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models.costs import BASE_FEE_LAMPORTS, TradeCosts
 

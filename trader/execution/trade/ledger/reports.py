@@ -16,13 +16,15 @@ from typing import Any
 
 from trader.execution.models.intent import IntentSide, IntentStatus
 from trader.execution.models.perp import terms_from_json
-from trader.execution.models.rent import RENT_REFUND, RENT_REFUND_SENT
+from trader.execution.trade.ledger.events import (
+    DAILY_REPORT,
+    FAILED_TX_FEE,
+    RENT_REFUND,
+    RENT_REFUND_SENT,
+)
 from trader.execution.trade.ledger.store import LedgerStore, _int, _window
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import RoundTripCosts
-
-FAILED_TX_FEE = "failed_tx_fee"
-DAILY_REPORT = "daily_report"
 
 
 @dataclass

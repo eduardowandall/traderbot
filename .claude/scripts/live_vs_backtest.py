@@ -30,10 +30,10 @@ from trader.backtest import load_ticks
 from trader.backtest.compare import compare_live, fetch_warmup
 from trader.backtest.costs import resolve_costs
 from trader.backtest.spec import ReplayCosts
-from trader.execution.market import JupiterMarketData
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market import JupiterCandles
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.execution.trade.ledger import Ledger, ledger_path
-from trader.shared.market.pair import market_for
+from trader.shared.market.pair import candles_for
 from trader.strategy.spec.parse import parse_spec
 
 
@@ -57,7 +57,7 @@ async def _compare(args: argparse.Namespace) -> dict:
     path = ledger_path(args.mode)
     if not path.exists():
         raise ValueError(f"{path}: ledger não existe")
-    data = market_for(spec.symbol, JupiterMarketData)  # razão num par sem stable
+    data = candles_for(spec.symbol, JupiterCandles)  # razão num par sem stable
     try:
         warmup = await fetch_warmup(data, spec, ticks[0].timestamp, datetime.now(UTC))
     finally:

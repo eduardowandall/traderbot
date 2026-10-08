@@ -15,13 +15,11 @@ from solders.keypair import Keypair
 from solders.signature import Signature
 from solders.solders import SendTransactionResp, TransactionConfirmationStatus
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.models.errors import TransactionSubmittedError
 from trader.execution.models.intent import IntentStatus
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
-    AsyncJupiterProvider,
-    TransactionSubmittedError,
-)
-from trader.execution.trade.venues.jupiter.async_rpc_client import (
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
+from trader.execution.trade.venues.jupiter.rpc import (
     AsyncRPCClient,
     SignedTx,
     TransactionFailedError,

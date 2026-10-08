@@ -22,7 +22,7 @@ from trader.execution.models.book import PositionBook, remainder_entry
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentSide, TradeIntent, with_idempotency_key
 from trader.execution.models.venue import PostTrade, Venue
-from trader.execution.trade.gateway.balances import WalletBalances
+from trader.execution.trade.accounts.wallet import WalletBalances
 from trader.execution.trade.gateway.fills import (
     Fill,
     execute_trade,
@@ -172,7 +172,7 @@ class SpotAccount:
         price: Decimal,
         usd: dict[str, Decimal],
     ) -> Order:
-        # nunca levanta: o swap já está EXECUTED (ver `execution/orders.py`)
+        # nunca levanta: o swap já está EXECUTED (ver `gateway/orders.py`)
         return order_from_fill(
             fill,
             self._quote,

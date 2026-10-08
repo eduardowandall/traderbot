@@ -236,7 +236,7 @@ def bonk_quote():
 
     `priceImpactPct` é fração (0.005 == 0.5%), não percentual.
     """
-    from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
+    from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 
     return JupiterQuoteResponse.single_route(
         USDC, 50_000_000, BONK, 5_000_000, price_impact_pct="0.005"
@@ -261,7 +261,7 @@ def mock_provider(**attrs):
     """
     from unittest.mock import AsyncMock
 
-    from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
+    from trader.execution.trade.venues.jupiter.provider import (
         AsyncJupiterProvider,
     )
     from trader.shared.models.costs import QUOTE, TradeCosts
@@ -344,7 +344,7 @@ def signs(rpc, last_valid_block_height: int = 1_000):
     """Um RPC falso que "assina" devolvendo a própria transação (A3: `SignedTx`)."""
     from unittest.mock import AsyncMock
 
-    from trader.execution.trade.venues.jupiter.async_rpc_client import SignedTx
+    from trader.execution.trade.venues.jupiter.rpc import SignedTx
 
     rpc.sign_transaction = AsyncMock(
         side_effect=lambda tx, keypair: SignedTx(tx, last_valid_block_height)
@@ -360,7 +360,7 @@ def signs_instructions(rpc, last_valid_block_height: int = 1_000):
     from solders.message import MessageV0
     from solders.transaction import VersionedTransaction
 
-    from trader.execution.trade.venues.jupiter.async_rpc_client import SignedTx
+    from trader.execution.trade.venues.jupiter.rpc import SignedTx
 
     def sign(instructions, keypair):
         message = MessageV0.try_compile(

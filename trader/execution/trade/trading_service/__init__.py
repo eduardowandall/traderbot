@@ -1,7 +1,8 @@
-"""Serviço de trading: onde estratégias pedem ordens e buckets limitam o gasto.
+"""O serviço de trading do trade-runner: os buckets e as ordens deles.
 
-O lado da estratégia só conhece `protocol.py` (dados) e `client.py` (a
-interface `TradeClient`); quem executa é o `TradeService` (`service.py`),
-que o trade-runner serve por socket (`trader/execution/runner.py`) e o
-backtest chama direto. Ver docs/plan.md §3.
+`TradeService` (`service.py`) abre os buckets, limita o que cada um gasta e
+executa as ordens; `rent.py` fecha a conta de token de um bucket encerrado.
+O lado da estratégia conhece só o protocolo (`trader/shared/trading_service`);
+o `serve` o atende por socket (`trader/execution/runner.py`) e o backtest
+chama o serviço direto.
 """

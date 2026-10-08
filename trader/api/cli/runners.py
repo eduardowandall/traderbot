@@ -15,7 +15,7 @@ import typer
 from trader.api.cli.backtest import SPEC_HELP
 from trader.api.cli.lock import ModeBusyError, ModeLock
 from trader.backtest import TickRecorder
-from trader.execution.market import JupiterMarketData
+from trader.execution.market import JupiterCandles
 from trader.execution.market.hub import PriceHub
 from trader.execution.market.prices import price_fn
 from trader.execution.models.mode import RunningMode
@@ -56,7 +56,7 @@ def serve(mode: RunningMode = typer.Argument(..., help="real ou paper")):
             limits_from_policy(service.gateway.policy),
             hub=hub,
             # candles do aquecimento dos `connect` (só este processo lê a Jupiter)
-            candles=JupiterMarketData(),
+            candles=JupiterCandles(),
             background=(reporter.run_forever,),
         )
         with service.gateway:

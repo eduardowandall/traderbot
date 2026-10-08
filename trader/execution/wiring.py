@@ -19,11 +19,11 @@ from trader.execution.models.venue import PerpVenue
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.policy import load_policy
 from trader.execution.trade.trading_service.service import TradeService
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
+from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
+from trader.execution.trade.venues.jupiter.provider import (
     DEFAULT_MAX_QUOTE_DEVIATION_PCT,
     AsyncJupiterProvider,
 )
-from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
 from trader.execution.trade.venues.jupiter_perps.venue import JupiterPerpsVenue
 from trader.execution.trade.venues.paper import (
     DEFAULT_PAPER_BALANCES,

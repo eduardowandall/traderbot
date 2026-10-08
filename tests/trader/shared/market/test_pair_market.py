@@ -3,7 +3,13 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from trader.shared.market.pair import PairMarketData, market_for, ratio_candles
+from trader.shared.market.pair import (
+    PairCandles,
+    PairMarketData,
+    candles_for,
+    market_for,
+    ratio_candles,
+)
 from trader.shared.models import SOLANA_MINTS, TickerData
 from trader.shared.models.public_data import Interval
 
@@ -77,3 +83,21 @@ def test_stable_pairs_keep_the_plain_feed():
     pair = market_for("JUP-SOL", factory)
     assert isinstance(pair, PairMarketData) and pair.quote == SOL
     assert len(made) == 3  # um feed por mint: o websocket assina um ativo
+
+
+async def test_candles_for_a_pair_need_no_price_feed():
+    # o aquecimento de um replay (A16b): só candles, de uma fonte sem preço
+    jup = [candle(1, "1.1", "1.1", "1", "1")]
+    sol = [candle(1, "200", "210", "190", "200")]
+    feeds = iter([Feed(candles={JUP: jup}), Feed(candles={SOL: sol})])
+
+    pair = candles_for("JUP-SOL", lambda: next(feeds))
+
+    assert isinstance(pair, PairCandles)
+    (bar,) = await pair.get_candles(JUP, Interval.MINUTE_1, 10)
+    assert bar.last == Decimal("0.005")
+
+
+def test_candles_for_a_stable_pair_are_the_feed_itself():
+    feed = Feed()
+    assert candles_for("SOL-USDC", lambda: feed) is feed

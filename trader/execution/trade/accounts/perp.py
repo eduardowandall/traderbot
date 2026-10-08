@@ -17,9 +17,10 @@ from decimal import Decimal
 from trader.execution.models.intent import IntentSide, SentTx, TradeIntent
 from trader.execution.models.perp import PerpTerms
 from trader.execution.models.venue import Liquidation, PerpVenue, Venue
-from trader.execution.trade.gateway.account import SpotAccount
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.gateway.fills import Fill, record_fill_safely
 from trader.execution.trade.gateway.orders import perp_order_from_fill
+from trader.execution.trade.ledger import events
 from trader.shared.models import Order, OrderSide
 
 LIQUIDATION = "liquidation"
@@ -120,15 +121,15 @@ class PerpAccount(SpotAccount):
             await self._stop_failed(order, key, ex)
             return
         if request is not None:
-            self._event("perp_stop_placed", {"request": request})
+            self._event(events.PERP_STOP_PLACED, {"request": request})
 
     def _announce_stop(self, sent: SentTx) -> None:
         # gravado antes do envio (como os swaps, A3): um crash deixa o rastro
-        self._event("perp_stop_sent", asdict(sent))
+        self._event(events.PERP_STOP_SENT, asdict(sent))
 
     async def _stop_failed(self, order: Order, key: str, ex: Exception) -> None:
         self.logger.error(f"{self.account_id}: o stop do venue falhou ({ex}); fechando")
-        self._event("perp_stop_failed", {"error": f"{type(ex).__name__}: {ex}"})
+        self._event(events.PERP_STOP_FAILED, {"error": f"{type(ex).__name__}: {ex}"})
         try:
             await self.sell(
                 order.price,
@@ -195,7 +196,7 @@ class PerpAccount(SpotAccount):
                 f"{self.account_id}: a ordem de stop {left} ficou na Jupiter: "
                 "cancele-a lá"
             )
-            self._event("perp_stop_left", {"request": left})
+            self._event(events.PERP_STOP_LEFT, {"request": left})
 
     def _open_entry(self) -> Order:
         position = self.book.position

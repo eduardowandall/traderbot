@@ -21,6 +21,7 @@ import logging
 import time
 from collections.abc import Callable
 from decimal import Decimal
+from functools import partial
 from typing import Protocol
 
 from solders.instruction import Instruction
@@ -31,9 +32,8 @@ from solders.transaction import VersionedTransaction
 from spl.token.instructions import close_account
 from spl.token.models import CloseAccountParams
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.execution.models.account_data import MintBalance
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.errors import (
     TransactionFailedOnChainError,
     TransactionSubmittedError,
@@ -41,7 +41,8 @@ from trader.execution.models.errors import (
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome, announce_send
 from trader.execution.models.rent import RentRefund
-from trader.execution.trade.venues.jupiter.async_rpc_client import (
+from trader.execution.models.venue import DEFAULT_SOL_FEE_RESERVE, MintBalance
+from trader.execution.trade.venues.jupiter.rpc import (
     AsyncRPCClient,
     SignedTx,
     TransactionFailedError,
@@ -56,8 +57,6 @@ from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import TradeCosts
 from trader.shared.models.mints import SOL_MINT
 
-# SOL mínimo mantido na carteira para taxas de transação e rent
-DEFAULT_SOL_FEE_RESERVE = Decimal("0.02")
 CONFIRMATION_TIMEOUT_SECONDS = 30
 
 logger = logging.getLogger(__name__)
@@ -147,21 +146,23 @@ class OnChainExecutor:
         tx = await self._get_swap_transaction(quote)
         check_programs(tx)  # antes de assinar: só programas conhecidos
         signed = await self._get_signed_transaction(tx)
-        await self._inspect_balances(signed.tx, quote)  # simula, antes de enviar
-        # no ledger antes de enviar: um processo morto daqui em diante deixa a
-        # assinatura para resolver a intenção (A3); se falha, não envia
-        announce_send(
-            SentTx(
-                signed.signature,
-                input_mint,
-                output_mint,
-                int(quote.inAmount),
-                int(quote.outAmount),
-                signed.last_valid_block_height,
-            ),
-            required=True,
+        sent = SentTx(
+            signed.signature,
+            input_mint,
+            output_mint,
+            int(quote.inAmount),
+            int(quote.outAmount),
+            signed.last_valid_block_height,
         )
-        resp = await self._send_transaction_and_wait_for_confirmation(signed.tx)
+        # no ledger antes de enviar: um processo morto daqui em diante deixa a
+        # assinatura para resolver a intenção (A3); sem quem grave, não envia
+        resp = await self._guarded_send(
+            signed,
+            sent,
+            partial(announce_send, required=True),
+            quote.inputMint,
+            int(quote.inAmount),
+        )
         # valores da quote; os efetivos (e os custos) vêm de `fetch_costs`,
         # chamado só depois que o ledger marcou a intenção como executada
         return ExecutionResult(
@@ -183,20 +184,31 @@ class OnChainExecutor:
     async def _get_signed_transaction(self, tx: VersionedTransaction) -> SignedTx:
         return await self.rpc_client.sign_transaction(tx, self.keypair)
 
-    async def _inspect_balances(
-        self, new_tx: VersionedTransaction, quote: JupiterQuoteResponse
-    ) -> None:
-        """Simula devolvendo a carteira: só a entrada sai, até o `inAmount`.
+    async def _guarded_send(
+        self,
+        signed: SignedTx,
+        sent: SentTx,
+        announce: Callable[[SentTx], None],
+        spend_mint: str,
+        spend_max: int,
+    ) -> SendTransactionResp:
+        """Simula, grava o envio e envia: o caminho de toda transação nossa.
 
-        Uma simulação que falha (nada saiu) pode ser re-tentada; uma
-        transação que gastaria o que não devia é `TransactionInspectionError`.
+        A simulação devolve a carteira: só `spend_mint` sai, até `spend_max`
+        (e SOL para taxas), senão `TransactionInspectionError`; uma simulação
+        que falha (nada saiu) pode ser re-tentada. `announce` grava o envio
+        antes dele (se falha, nada é enviado). Depois do envio, uma falha é
+        `TransactionFailedOnChainError` (nada trocado) ou
+        `TransactionSubmittedError` (resolver depois).
         """
         before = await self.rpc_client.wallet_state(self.pubkey)
         simulation = await self.rpc_client.simulate_transaction(
-            new_tx, before.addresses(self.pubkey)
+            signed.tx, before.addresses(self.pubkey)
         )
         after = state_after(before, simulation.value.accounts)
-        check_balances(before, after, quote.inputMint, int(quote.inAmount))
+        check_balances(before, after, spend_mint, spend_max)
+        announce(sent)
+        return await self._send_transaction_and_wait_for_confirmation(signed.tx)
 
     async def _send_signed_transaction(
         self, new_tx: VersionedTransaction
@@ -304,24 +316,14 @@ class OnChainExecutor:
         spend_max: int,
         extra_programs: frozenset[str] = frozenset(),
     ) -> SignedTx:
-        """Uma transação nossa: assina, confere, simula, grava o envio, envia.
+        """Uma transação nossa (não da Jupiter): assina, confere, envia.
 
-        Antes de enviar: só programas conhecidos (mais `extra_programs`) e uma
-        simulação com as contas da carteira em que só `spend_mint` sai, até
-        `spend_max` (e SOL para taxas). `announce` grava o envio antes dele
-        (se falha, nada é enviado). Depois do envio, as falhas são as dos
-        swaps: `TransactionFailedOnChainError` ou `TransactionSubmittedError`.
+        Só programas conhecidos (mais `extra_programs`), depois o
+        `_guarded_send` dos swaps.
         """
         signed = await self.rpc_client.sign_instructions(instructions, self.keypair)
         check_programs(signed.tx, extra_programs)
-        before = await self.rpc_client.wallet_state(self.pubkey)
-        simulation = await self.rpc_client.simulate_transaction(
-            signed.tx, before.addresses(self.pubkey)
-        )
-        after = state_after(before, simulation.value.accounts)
-        check_balances(before, after, spend_mint, spend_max)
-        announce(sent(signed))
-        await self._send_transaction_and_wait_for_confirmation(signed.tx)
+        await self._guarded_send(signed, sent(signed), announce, spend_mint, spend_max)
         return signed
 
     async def fetch_costs(self, result: ExecutionResult) -> TradeCosts | None:

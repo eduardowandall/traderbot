@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum, auto
+from typing import Any
 
 from trader.shared.models.costs import TradeCosts, costs_from_dict
 from trader.shared.models.perp import PerpFill, perp_from_dict
@@ -71,7 +72,7 @@ class Order:
         )
 
 
-# --- JSON (ledger, protocolo de fio) ----------------------------------------
+# --- dict e JSON (o fio usa o dict; o ledger guarda o JSON) ------------------
 
 _DECIMAL_FIELDS = (
     "quantity",
@@ -90,12 +91,33 @@ def _json_default(value):
     return value.isoformat() if isinstance(value, datetime) else str(value)
 
 
+def _jsonable(value: Any) -> Any:
+    """Tipos JSON: decimais (e o resto) em string, datas em ISO."""
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return str(value)  # um `StrEnum` vira o valor dele
+    return _json_default(value)
+
+
+def order_to_dict(order: Order) -> dict:
+    return _jsonable(asdict(order))
+
+
 def order_to_json(order: Order) -> str:
-    return json.dumps(asdict(order), default=_json_default, sort_keys=True)
+    return json.dumps(order_to_dict(order), sort_keys=True)
 
 
 def order_from_json(data: str) -> Order:
-    raw = json.loads(data)
+    return order_from_dict(json.loads(data))
+
+
+def order_from_dict(data: dict) -> Order:
+    raw = dict(data)
     for key in _DECIMAL_FIELDS:
         if raw.get(key) is not None:
             raw[key] = Decimal(raw[key])

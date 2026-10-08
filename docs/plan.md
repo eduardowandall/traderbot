@@ -221,7 +221,23 @@ perp backtest) and A10 (reading Jupiter Perps) are done (2026-10-07, in
     simulation per send; the rent close would get it too);
   - one mode branch in `wiring` that builds the spot provider and the perp
     venue together;
-  - paper venue stops that fire in the sweep, so paper runs the D7 path.
+  - paper venue stops that fire in the sweep, so paper runs the D7 path;
+  - one reading of a signature's status (owner, 2026-10-08, from A16b):
+    `AsyncRPCClient.check_signature_is_confirmed` (the wait after a send)
+    and `OnChainExecutor._status_outcome` (the resolver) each turn a status
+    into confirmed/failed/pending; one `TxOutcome` mapping for both, with
+    the confirmation tests (`test_swap_confirmation.py`) moved onto it.
+
+### A16–A17. Code cleanup (owner, 2026-10-08)
+A pause in features to tidy the code: simpler usage and one clear job per
+module, with no change in behaviour (the suite stays green after each step,
+nothing in the ledger, the wire or the spec ids changes). The execution side
+first (A16), then the strategy side (A17).
+
+- **A16. Execution cleanup — M.** Done 2026-10-08 (in `history.md`).
+- **A16b. Execution cleanup, second pass — M.** Done 2026-10-08 (in `history.md`).
+- **A17. Strategy cleanup — M.** Done 2026-10-08 (in `history.md`).
+- **A17b. Strategy cleanup, second pass — S.** Done 2026-10-08 (in `history.md`).
 
 ### Backlog (numbered when scheduled)
 - One round trip per `connect` tick (old B10 C7).
@@ -250,6 +266,10 @@ perp backtest) and A10 (reading Jupiter Perps) are done (2026-10-07, in
 | A11a Perps: requests built and simulated | done | 2026-10-07; in `history.md` |
 | A11b Perps: requests sent, first real run | waiting for the owner | Built 2026-10-07; the owner's first real perp run (checklist in §4) |
 | A12 Perps: hardening | open | |
+| A16 Execution cleanup | done | 2026-10-08; in `history.md` |
+| A16b Execution cleanup, second pass | done | 2026-10-08; in `history.md` |
+| A17 Strategy cleanup | done | 2026-10-08; in `history.md` |
+| A17b Strategy cleanup, second pass | done | 2026-10-08; in `history.md` |
 
 ## 6. Known issues and limitations
 
@@ -521,3 +541,10 @@ Decisions up to 2026-10-04 are in [`history.md`](history.md).
   no owner approval for large trades: a trade that passes the policy and
   the spec's terms is already approved by the owner, so the backlog item is
   removed.
+- **2026-10-08 (owner):** a pause for a code cleanup, execution first
+  (A16), then strategy (A17): behaviour, the ledger schema, the wire and the
+  spec ids stay as they are. `SpotVenue` and the `trading_service` names
+  stay (A16 notes why).
+- **2026-10-08 (owner):** the duplicated signature-status reading that A16b
+  left alone goes into A12 (its last bullet). A16, A16b and A17 stay
+  uncommitted for now.

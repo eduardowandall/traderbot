@@ -2,9 +2,9 @@ from datetime import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
-from trader.execution.market import JupiterMarketData
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market import JupiterCandles
 from trader.execution.market.jupiter.candles import candles_to_tickers
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.shared.models import Interval
 
 RAW = [
@@ -31,13 +31,11 @@ def test_float_prices_keep_their_short_decimal_form():
     assert ticker.timestamp == datetime.fromtimestamp(1_790_000_000)
 
 
-async def test_jupiter_market_data_needs_only_the_public_client():
+async def test_jupiter_candles_need_only_the_public_client():
     client = AsyncMock(spec=AsyncJupiterClient)
     client.get_candles = AsyncMock(return_value=RAW)
-    client.get_price = AsyncMock(return_value=Decimal("150"))
-    data = JupiterMarketData(client)
+    data = JupiterCandles(client)
 
-    assert await data.get_price("mint") == Decimal("150")
     tickers = await data.get_candles("mint", Interval.HOUR_1, 5)
     await data.aclose()
 

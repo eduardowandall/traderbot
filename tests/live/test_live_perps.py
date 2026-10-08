@@ -15,7 +15,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
 from trader.execution.market import JupiterPriceOracle
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.execution.market.perps.idl import decode_account
 from trader.execution.market.perps.reader import (
     CUSTODIES,

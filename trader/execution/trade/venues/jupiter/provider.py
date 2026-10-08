@@ -21,25 +21,21 @@ from decimal import Decimal
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
-from trader.execution.models.account_data import MintBalance
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.errors import (
     SwapAttemptsError,
     SwapFailedError,
+    SwapRejectedError,
     TransactionFailedOnChainError,
-)
-
-# reexportados: os erros moram em models (camada core)
-from trader.execution.models.errors import SwapRejectedError as SwapRejectedError
-from trader.execution.models.errors import (
-    TransactionSubmittedError as TransactionSubmittedError,
+    TransactionSubmittedError,
 )
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.models.rent import RentRefund
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.models.venue import MintBalance
 from trader.execution.trade.venues.jupiter.executor import Executor, OnChainExecutor
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.swap_costs import quote_info
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import (

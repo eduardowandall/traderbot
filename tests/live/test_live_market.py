@@ -2,18 +2,19 @@
 
 import asyncio
 import json
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from live_helpers import invoke_json
+from live_helpers import hub_feed, invoke_json, running_hub
 from solders.keypair import Keypair
 
 from trader.backtest.compare import fetch_warmup
 from trader.backtest.ticks import PATH_STEPS
-from trader.execution.market import JupiterMarketData, JupiterPriceOracle
-from trader.execution.market.hub import PriceHub
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market import JupiterCandles, JupiterPriceOracle
+from trader.execution.market.hub import PriceHub, websocket_prices
+from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.execution.market.prices import usd_snapshot
 from trader.execution.trade.venues.jupiter.tx_inspection import (
     JUPITER_V6,
@@ -34,11 +35,12 @@ RANDOM_SPEC = str(PROJECT_ROOT / "docs" / "examples" / "spec-random.json")
 
 def test_price_and_candles():
     async def read():
-        data = JupiterMarketData()
+        hub, data = PriceHub(stream=None), JupiterCandles()
         try:
-            price = await data.get_price(SOL)
+            price, _ = await hub.price(SOL)
             candles = await data.get_candles(SOL, Interval.MINUTE_1, 20)
         finally:
+            await hub.client.aclose()
             await data.aclose()
         return price, candles
 
@@ -56,7 +58,7 @@ def test_warmup_candles_are_the_bars_just_before_the_first_tick():
     first_tick = now - timedelta(minutes=10)
 
     async def read():
-        data = JupiterMarketData()
+        data = JupiterCandles()
         try:
             return await fetch_warmup(data, spec, first_tick, now)
         finally:
@@ -90,7 +92,7 @@ def test_a_thin_token_warms_up_from_its_sparse_candles():
     count = 100
 
     async def read():
-        data = JupiterMarketData()
+        data = JupiterCandles()
         try:
             return await data.get_candles(nobody, Interval.SECOND_15, count)
         finally:
@@ -120,21 +122,19 @@ def test_price_api_prices_every_registry_mint_close_to_the_websocket():
             oracle = JupiterPriceOracle(client)
             mints = [m.mint for m in SOLANA_MINTS.values()]
             prices = await usd_snapshot(oracle, mints)  # stablecoins a 1
-            ws_sol = await JupiterMarketData(client).get_price(SOL)
-            # websocket mudo: o preço vem da Price API
-            fallback = await JupiterMarketData(client, price_timeout=0.001).get_price(
-                SOL
-            )
+            # o websocket do hub: o primeiro preço do SOL que ele manda
+            stream = websocket_prices([SOL])
+            async with asyncio.timeout(60), aclosing(stream):
+                _, ws_sol = await anext(stream)
         finally:
             await client.aclose()
-        return prices, ws_sol, fallback
+        return prices, ws_sol
 
-    prices, ws_sol, fallback = asyncio.run(check())
+    prices, ws_sol = asyncio.run(check())
 
     assert set(prices) == {m.mint for m in SOLANA_MINTS.values()}
     assert prices[SOLANA_MINTS.get_by_symbol("USDC").mint] == Decimal("1")
     assert abs(prices[SOL] / ws_sol - 1) < Decimal("0.02")
-    assert abs(fallback / ws_sol - 1) < Decimal("0.02")
 
 
 PAIR_SPEC = str(PROJECT_ROOT / "docs" / "examples" / "spec-jup-sol-expr.json")
@@ -160,15 +160,16 @@ def test_a_non_stable_pair_backtests_on_two_real_series(tmp_path):
 
 def test_the_pair_feed_is_token_usd_over_quote_usd():
     async def read():
-        pair = market_for("JUP-SOL", JupiterMarketData)
         client = AsyncJupiterClient()
-        try:
-            ratio = await pair.get_price(JUP)
-            usd = await client.get_usd_prices([JUP, SOL])
-            candles = await pair.get_candles(JUP, Interval.MINUTE_1, 20)
-        finally:
-            await pair.aclose()
-            await client.aclose()
+        async with running_hub() as hub:
+            pair = market_for("JUP-SOL", lambda: hub_feed(hub))
+            try:
+                ratio = await pair.get_price(JUP)
+                usd = await client.get_usd_prices([JUP, SOL])
+                candles = await pair.get_candles(JUP, Interval.MINUTE_1, 20)
+            finally:
+                await pair.aclose()
+                await client.aclose()
         return ratio, usd, candles
 
     ratio, usd, candles = asyncio.run(read())

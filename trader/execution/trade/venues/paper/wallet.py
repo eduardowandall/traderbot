@@ -89,7 +89,7 @@ class SimulatedWallet:
         self._open = set(self._funded())
         self._perps = {}
         with _file_lock(self.path):  # um bot rodando não pode sobrescrever o reset
-            self._save()
+            self._commit()
 
     def _funded(self) -> list[str]:
         return [mint for mint, raw in self._raw.items() if raw]
@@ -150,14 +150,10 @@ class SimulatedWallet:
             perps = {k: v for k, v in self._perps.items() if k != key}
             if record is not None:
                 perps[key] = record
-            applied, trimmed_at = self._applied, self.trimmed_at
+            logged = None
             if signature is not None:
-                applied, trimmed_at = self._logged(
-                    signature, 0, 0, -moves.get(SOL_MINT, 0), 0
-                )
-            self._write(raw, self._open, applied, trimmed_at, perps)
-            self._raw, self._perps = raw, perps
-            self._applied, self.trimmed_at = applied, trimmed_at
+                logged = self._logged(signature, 0, 0, -moves.get(SOL_MINT, 0), 0)
+            self._commit(raw=raw, perps=perps, logged=logged)
 
     def _moved(self, moves: dict[str, int]) -> dict[str, int]:
         raw = dict(self._raw)
@@ -198,14 +194,12 @@ class SimulatedWallet:
                 out_amount,
                 fee_lamports + rent_lamports,
             )
-            applied, trimmed_at = self._applied, self.trimmed_at
+            logged = None
             if signature is not None:
-                applied, trimmed_at = self._logged(
+                logged = self._logged(
                     signature, in_amount, out_amount, fee_lamports, rent_lamports
                 )
-            self._write(raw, opened, applied, trimmed_at, self._perps)
-            self._raw, self._open = raw, opened
-            self._applied, self.trimmed_at = applied, trimmed_at
+            self._commit(raw=raw, opened=opened, logged=logged)
 
     def close_account(
         self, mint: str, rent_lamports: int, fee_lamports: int, signature: str
@@ -223,13 +217,10 @@ class SimulatedWallet:
             raw = dict(self._raw)
             raw[SOL_MINT] = raw.get(SOL_MINT, 0) + rent_lamports - fee_lamports
             raw.pop(mint, None)
-            opened = self._open - {mint}
-            applied, trimmed_at = self._logged(
+            logged = self._logged(
                 signature, 0, rent_lamports, fee_lamports, -rent_lamports
             )
-            self._write(raw, opened, applied, trimmed_at, self._perps)
-            self._raw, self._open = raw, opened
-            self._applied, self.trimmed_at = applied, trimmed_at
+            self._commit(raw=raw, opened=self._open - {mint}, logged=logged)
         return True
 
     def _logged(
@@ -265,8 +256,24 @@ class SimulatedWallet:
         raw[output_mint] = raw.get(output_mint, 0) + out_amount
         return raw, self._open | {output_mint}
 
-    def _save(self) -> None:
-        self._write(self._raw, self._open, self._applied, self.trimmed_at, self._perps)
+    def _commit(
+        self,
+        raw: dict[str, int] | None = None,
+        opened: set[str] | None = None,
+        perps: dict[str, dict] | None = None,
+        logged: tuple[list[dict], float | None] | None = None,
+    ) -> None:
+        """Grava o estado novo (o que não vem, fica) e só então muda a memória.
+
+        Quem chama tem o lock do arquivo: uma gravação que falha não muda nada.
+        """
+        raw = self._raw if raw is None else raw
+        opened = self._open if opened is None else opened
+        perps = self._perps if perps is None else perps
+        applied, trimmed_at = logged or (self._applied, self.trimmed_at)
+        self._write(raw, opened, applied, trimmed_at, perps)
+        self._raw, self._open, self._perps = raw, opened, perps
+        self._applied, self.trimmed_at = applied, trimmed_at
 
     def _write(
         self,

@@ -1,9 +1,4 @@
-"""Conversão dos candles crus do `datapi` da Jupiter (camada market).
-
-Fica ao lado do cliente, e não em `trader.shared.market`, para que o provider de
-execução possa reutilizá-la sem importar `trader.shared.market` (que importa o
-cliente, que carrega `trader.execution.trade.venues`: seria um ciclo).
-"""
+"""Conversão dos candles crus do `datapi` da Jupiter (camada market)."""
 
 from datetime import datetime
 from decimal import Decimal

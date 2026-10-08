@@ -10,12 +10,11 @@ from factories import Inbox, StubStrategy, make_order, memory_gateway, served
 
 from trader.backtest import Tick
 from trader.backtest.replay import ReplayQuoteClient
-from trader.execution.market import JupiterMarketData
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
 from trader.execution.models.intent import IntentSide, IntentStatus
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.execution.trade.venues.spot import SpotVenue
+from trader.shared.market import MarketData
 from trader.shared.models import (
     SOLANA_MINTS,
     Interval,
@@ -31,11 +30,11 @@ from trader.shared.trading_service.protocol import (
     PriceUnavailableError,
     TradeServiceError,
 )
-from trader.strategy.bot.async_websocket_bot import (
-    AsyncWebsocketTradingBot,
+from trader.strategy.bot.config import BotConfig
+from trader.strategy.bot.loop import (
+    TradingBot,
     format_price,
 )
-from trader.strategy.bot.config import BotConfig
 
 ONE = Decimal(1)
 
@@ -68,12 +67,12 @@ class FakeStrategy(StubStrategy):
             return OrderSignal(OrderSide.BUY, balance * Decimal("0.5") / price)
 
 
-def _market_client():
-    # o preço vem por um cliente próprio (websocket); swaps usam outro (HTTP)
-    client = AsyncMock(spec=AsyncJupiterClient)
-    client.get_candles = AsyncMock(return_value=[])
-    client.get_price = AsyncMock(return_value=Decimal("1.0"))
-    return client
+def _feed():
+    # o preço vem do feed (o hub, em `connect`); swaps vão pelo serviço
+    feed = AsyncMock(spec=MarketData)
+    feed.get_candles = AsyncMock(return_value=[])
+    feed.get_price = AsyncMock(return_value=Decimal("1.0"))
+    return feed
 
 
 async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
@@ -86,14 +85,14 @@ async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
     service = TradeService(
         SpotVenue(paper_provider(wallet, jupiter_client=quotes)), gateway
     )
-    market_client = _market_client()
+    feed = _feed()
     async with served(service, **BONK_SPEC) as trader:
-        bot = AsyncWebsocketTradingBot(
+        bot = TradingBot(
             BotConfig(
                 name="e2e",
                 symbol="BONK-USDC",
                 strategy=strategy,
-                market=JupiterMarketData(market_client),
+                market=feed,
                 trader=trader,
                 notifier=NotificationService(),
             )
@@ -108,7 +107,7 @@ async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):
     ]
     assert all(r.order_json for r in records)
     assert wallet.balance(BONK.mint) == 0  # vendeu tudo o que comprou
-    market_client.aclose.assert_awaited_once()
+    feed.aclose.assert_awaited_once()
 
 
 async def test_fills_report_the_bucket_and_no_task_outlives_the_bot(
@@ -122,12 +121,12 @@ async def test_fills_report_the_bucket_and_no_task_outlives_the_bot(
     )
     inbox = Inbox()
     async with served(service, **BONK_SPEC) as trader:
-        bot = AsyncWebsocketTradingBot(
+        bot = TradingBot(
             BotConfig(
                 name="e2e",
                 symbol="BONK-USDC",
                 strategy=FakeStrategy(),
-                market=JupiterMarketData(_market_client()),
+                market=_feed(),
                 trader=trader,
                 notifier=inbox,
             )
@@ -169,14 +168,14 @@ class FakeTrader:
 
 
 def _market(prices=(Decimal("1"),)):
-    market = AsyncMock(spec=JupiterMarketData)
+    market = AsyncMock(spec=MarketData)
     market.get_candles = AsyncMock(return_value=[])
     market.get_price = AsyncMock(side_effect=list(prices))
     return market
 
 
 def _bot(market, strategy, trader=None, **config):
-    return AsyncWebsocketTradingBot(
+    return TradingBot(
         BotConfig(
             name="name",
             symbol="BONK-USDC",
@@ -428,7 +427,7 @@ async def test_a_failed_first_bucket_read_still_resumes_later(mock_sleep):
 
 
 async def test_repeated_startup_failures_alert_the_owner_once():
-    from trader.strategy.bot import async_websocket_bot as bot_module
+    from trader.strategy.bot import loop as bot_module
 
     market = _market([KeyboardInterrupt()])
     failures = [OSError("datapi fora")] * (bot_module.STARTUP_ALERT_AFTER + 1)

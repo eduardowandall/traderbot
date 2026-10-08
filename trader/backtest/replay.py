@@ -30,12 +30,12 @@ from datetime import datetime
 from decimal import ROUND_CEILING, Decimal
 
 from trader.backtest.ticks import Tick
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.perp import PerpTerms
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.trading_service.service import TradeService
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
+from trader.execution.trade.venues.jupiter.provider import (
     AsyncJupiterProvider,
 )
 from trader.execution.trade.venues.paper.executor import SimulatedExecutor

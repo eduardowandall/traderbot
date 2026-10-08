@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
 
-from trader.execution.market.jupiter.jupiter_data import JupiterQuoteResponse
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.policy import load_policy
 from trader.shared.models import SOLANA_MINTS

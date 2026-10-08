@@ -2,12 +2,12 @@ import json
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
+from trader.execution.trade.accounts.spot import SpotAccount
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.gateway.account import SpotAccount
 from trader.execution.trade.ledger import Ledger
 from trader.execution.trade.policy import Policy
-from trader.execution.trade.venues import JupiterQuoteResponse
 from trader.execution.trade.venues.paper import SimulatedWallet, paper_provider
 from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.models import SOLANA_MINTS

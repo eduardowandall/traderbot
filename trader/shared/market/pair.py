@@ -2,8 +2,8 @@
 
 Os feeds da Jupiter dão preços e candles em USD. Num par USDC/USDT isso já é o
 preço em cotação; num par como JUP-SOL, a estratégia precisa de SOL por JUP:
-`PairMarketData` divide o preço do token pelo do token de cotação, de dois
-feeds (o websocket assina um ativo por conexão), e os candles barra a barra.
+`PairMarketData` divide o preço do token pelo do token de cotação (um feed
+para cada, cada um no seu ritmo), e `PairCandles` os candles barra a barra.
 Camada market: só lê dados públicos.
 """
 
@@ -12,7 +12,7 @@ from collections.abc import Callable
 from decimal import Decimal
 
 from trader.shared.indicators import to_utc
-from trader.shared.market.feed import MarketData
+from trader.shared.market.feed import CandleSource, MarketData
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.public_data import Interval, TickerData
 
@@ -25,21 +25,21 @@ def market_for(symbol: str, factory: Callable[[], MarketData]) -> MarketData:
     return PairMarketData(factory(), factory(), quote.mint)
 
 
-class PairMarketData:
-    """`MarketData` de um par sem stablecoin: preço do token / preço da cotação."""
+def candles_for(symbol: str, factory: Callable[[], CandleSource]) -> CandleSource:
+    """Só os candles do par, em cotação (o aquecimento de um replay)."""
+    _, quote = SOLANA_MINTS.get_pair(symbol)
+    if quote.is_usd_stable:
+        return factory()
+    return PairCandles(factory(), factory(), quote.mint)
 
-    def __init__(self, token_feed: MarketData, quote_feed: MarketData, quote: str):
+
+class PairCandles:
+    """`CandleSource` de um par sem stablecoin: as barras do token / cotação."""
+
+    def __init__(self, token_feed: CandleSource, quote_feed: CandleSource, quote: str):
         self.token_feed = token_feed
         self.quote_feed = quote_feed
         self.quote = quote
-
-    async def get_price(self, mint: str) -> Decimal:
-        token, quote = await asyncio.gather(
-            self.token_feed.get_price(mint), self.quote_feed.get_price(self.quote)
-        )
-        if quote <= 0:
-            raise ValueError(f"preço USD inválido para {self.quote}: {quote}")
-        return token / quote
 
     async def get_candles(
         self, mint: str, interval: Interval, candle_qty: int
@@ -52,6 +52,32 @@ class PairMarketData:
 
     async def aclose(self) -> None:
         await asyncio.gather(self.token_feed.aclose(), self.quote_feed.aclose())
+
+
+class PairMarketData:
+    """`MarketData` de um par sem stablecoin: preço do token / preço da cotação."""
+
+    def __init__(self, token_feed: MarketData, quote_feed: MarketData, quote: str):
+        self.token_feed = token_feed
+        self.quote_feed = quote_feed
+        self.quote = quote
+        self._candles = PairCandles(token_feed, quote_feed, quote)
+
+    async def get_price(self, mint: str) -> Decimal:
+        token, quote = await asyncio.gather(
+            self.token_feed.get_price(mint), self.quote_feed.get_price(self.quote)
+        )
+        if quote <= 0:
+            raise ValueError(f"preço USD inválido para {self.quote}: {quote}")
+        return token / quote
+
+    async def get_candles(
+        self, mint: str, interval: Interval, candle_qty: int
+    ) -> list[TickerData]:
+        return await self._candles.get_candles(mint, interval, candle_qty)
+
+    async def aclose(self) -> None:
+        await self._candles.aclose()
 
 
 def ratio_candles(token: list[TickerData], quote: list[TickerData]) -> list[TickerData]:

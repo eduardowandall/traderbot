@@ -40,7 +40,7 @@ from trader.execution.trade.gateway.fills import (
 )
 from trader.execution.trade.gateway.gateway import TradeGateway
 from trader.execution.trade.gateway.orders import order_from_fill, priced_mints
-from trader.execution.trade.ledger.intents import INTENT_RESOLVED
+from trader.execution.trade.ledger.events import INTENT_RESOLVED
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.mints import SOL_MINT
 

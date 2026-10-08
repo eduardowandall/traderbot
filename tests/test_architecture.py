@@ -51,6 +51,7 @@ PACKAGES: dict[str, str] = {
     "trader.execution.trade.venues": "venue",
     "trader.execution.trade.policy": "risk",
     "trader.execution.trade.ledger": "risk",
+    "trader.execution.trade.accounts": "execution",  # as contas dos buckets
     "trader.execution.trade.gateway": "execution",
     "trader.execution.trade.trading_service": "execution",
     "trader.execution.runner": "app",
@@ -203,17 +204,17 @@ def test_layer_checker_catches_a_forbidden_import():
         [
             "from ...execution.trade.ledger import Ledger",
             "def f():",
-            "    import trader.execution.trade.venues.jupiter.async_jupiter_svc",
+            "    import trader.execution.trade.venues.jupiter.provider",
             "from trader.shared.models import Order",
         ]
     )
     assert _forbidden("trader.strategy.spec.strategy", source) == {
         "trader.execution.trade.ledger",
-        "trader.execution.trade.venues.jupiter.async_jupiter_svc",
+        "trader.execution.trade.venues.jupiter.provider",
     }
     # a execução importa o ledger (risk), mas não um venue concreto (A7)
-    assert _forbidden("trader.execution.trade.gateway.account", source) == {
-        "trader.execution.trade.venues.jupiter.async_jupiter_svc",
+    assert _forbidden("trader.execution.trade.accounts.spot", source) == {
+        "trader.execution.trade.venues.jupiter.provider",
     }
     assert layer_of("trader.shared.trading_service.protocol") == "core"
     assert layer_of("trader.execution.trade.trading_service.service") == "execution"

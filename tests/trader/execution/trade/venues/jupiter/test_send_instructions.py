@@ -15,8 +15,8 @@ from solders.solders import SendTransactionResp
 
 from trader.execution.market.perps.reader import PERPS_PROGRAM as PERPS
 from trader.execution.models.intent import SentTx
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 from trader.execution.trade.venues.jupiter.tx_inspection import (
     TransactionInspectionError,
 )

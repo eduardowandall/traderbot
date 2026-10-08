@@ -5,14 +5,12 @@ import pytest
 from factories import inspection_passes
 from solders.keypair import Keypair
 
-from trader.execution.market.jupiter.async_jupiter_client import AsyncJupiterClient
+from trader.execution.market.jupiter.client import AsyncJupiterClient
+from trader.execution.market.jupiter.quote import JupiterQuoteResponse
+from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.execution import ExecutionResult
-from trader.execution.trade.venues import JupiterQuoteResponse
-from trader.execution.trade.venues.jupiter.async_jupiter_svc import (
-    AsyncJupiterProvider,
-    SwapRejectedError,
-)
-from trader.execution.trade.venues.jupiter.async_rpc_client import AsyncRPCClient
+from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
+from trader.execution.trade.venues.jupiter.rpc import AsyncRPCClient
 
 
 def _quote(price_impact_pct="0.001"):

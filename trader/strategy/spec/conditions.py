@@ -21,16 +21,6 @@ from trader.strategy.spec import expr as expr_lang
 
 HUNDRED = Decimal(100)
 
-_INDICATORS: dict[str, Callable[..., Decimal | None]] = {
-    "sma": ind.sma,
-    "ema": ind.ema,
-    "wma": ind.wma,
-    "rsi": ind.rsi,
-    "volatility": ind.volatility,
-    "high": ind.rolling_high,
-    "low": ind.rolling_low,
-}
-
 
 class IndicatorBank:
     """Barras do timeframe da spec + indicadores calculados uma vez por tick."""
@@ -57,7 +47,7 @@ class IndicatorBank:
     def get(self, name: str, *params: int) -> Decimal | None:
         key = (name, *params)
         if key not in self._cache:
-            self._cache[key] = _INDICATORS[name](self._closes, *params)
+            self._cache[key] = ind.INDICATORS[name](self._closes, *params)
         return self._cache[key]
 
     def __len__(self) -> int:

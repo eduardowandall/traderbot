@@ -35,7 +35,6 @@ ONE = Decimal(1)
 
 class SpecStrategy:
     def __init__(self, spec: StrategySpec):
-        self.logger = logger
         # relógio e sorteios injetáveis: no backtest, o tempo do tick e uma
         # semente fixa (o resultado é determinístico)
         self.clock: Callable[[], datetime] = datetime.now

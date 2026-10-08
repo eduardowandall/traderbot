@@ -385,7 +385,7 @@ def test_connect_needs_no_key_and_finds_the_trade_runner(monkeypatch, tmp_path):
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(SPEC), encoding="utf-8")
 
-    with mock.patch("trader.strategy.runner.AsyncWebsocketTradingBot") as bot:
+    with mock.patch("trader.strategy.runner.TradingBot") as bot:
         result = CliRunner().invoke(main_module.app, ["connect", str(spec)])
 
     assert result.exit_code == 0, result.output
@@ -460,7 +460,7 @@ def test_connect_takes_prices_from_the_trade_runner(monkeypatch, tmp_path):
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(SPEC), encoding="utf-8")
 
-    with mock.patch("trader.strategy.runner.AsyncWebsocketTradingBot") as bot:
+    with mock.patch("trader.strategy.runner.TradingBot") as bot:
         CliRunner().invoke(main_module.app, ["connect", str(spec)])
 
     config = bot.call_args.args[0]
