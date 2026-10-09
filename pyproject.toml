@@ -38,6 +38,9 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short -m 'not live' -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning"
 markers = ["live: hits the real Jupiter endpoints (paper/read-only, no key)"]
 asyncio_mode = "auto"
+# um loop para a sessão: criar um por teste custa ~9ms no Windows
+asyncio_default_test_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "session"
 
 [tool.ruff]
 target-version = "py314"

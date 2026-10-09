@@ -13,8 +13,10 @@ do pedido e a da posição:
 - nada em `KEEPER_TIMEOUT_SECONDS`: `TransactionSubmittedError` (UNCONFIRMED:
   o modo fica bloqueado até o dono conferir a posição).
 
-A ordem de stop no venue (D7) é colocada pela conta logo depois de a entrada
-estar no ledger (`place_stop`). Uma saída que o venue fez sozinho (o stop
+A primeira abertura num mercado e lado cria a conta da posição; o rent dela
+fica com a Jupiter (a conta não fecha, é reusada) e vai nos custos dessa
+perna (A11c F1). A ordem de stop no venue (D7) é colocada pela conta logo
+depois de a entrada estar no ledger (`place_stop`). Uma saída que o venue fez sozinho (o stop
 disparou, uma liquidação) aparece na varredura (`liquidations`): a posição
 sumiu, e o que voltou é o USDC que a última transação nela deu à carteira.
 """
@@ -58,7 +60,7 @@ from trader.execution.trade.venues.jupiter_perps.requests import (
     token_account,
 )
 from trader.shared.models import SOLANA_MINTS
-from trader.shared.models.costs import ONCHAIN, TradeCosts
+from trader.shared.models.costs import ONCHAIN, TradeCosts, priority_fee_lamports
 from trader.shared.models.direction import Direction
 from trader.shared.models.perp import PerpFill, liquidation_price
 
@@ -66,6 +68,9 @@ logger = logging.getLogger(__name__)
 
 KEEPER_TIMEOUT_SECONDS = 60  # D8
 KEEPER_POLL_SECONDS = 2
+# depois de fechar, o keeper apaga a ordem de stop em segundos (no run 1,
+# 1 s; A11c F3); a conferência roda sob o lock de ordens: curta
+STOP_CLEANUP_SECONDS = 2
 # o limite de unidades: o simulado com folga, nunca abaixo disto
 MIN_COMPUTE_UNITS = 100_000
 UNITS_MARGIN = Decimal("1.3")
@@ -110,7 +115,13 @@ class JupiterPerpsVenue:
     async def open_perp(
         self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
     ) -> ExecutionResult:
-        price = (await self.reader.oracle_price(terms.market_mint)).price
+        # antes do envio: o preço e se a conta da posição já existe (F1;
+        # uma falha aqui não envia nada)
+        oracle, [before] = await asyncio.gather(
+            self.reader.oracle_price(terms.market_mint),
+            self.reader.lamports([position_address(self.owner, terms)]),
+        )
+        price = oracle.price
         posted = USDC_MINT.ui_to_raw(collateral)
         size = collateral * terms.leverage
         minimum = await self._swap_minimum(terms, posted)
@@ -120,15 +131,42 @@ class JupiterPerpsVenue:
         signature = await self._send(request, posted, announce_send_required)
         position = await self._wait(request, signature, grows=True)
         assert position is not None  # `_wait` só volta com a posição aberta
-        fill = await self._entry_fill(terms, position, collateral)
+        borrow, rent = await asyncio.gather(
+            self._after_fill(
+                self.reader.borrow_bps_hour(terms.market_mint),
+                Decimal(0),
+                "taxa de empréstimo",
+            ),
+            self._position_rent(request.position, before),
+        )
+        fill = _entry_fill(terms, position, collateral, borrow)
         return ExecutionResult(
             signature,
             collateral_mint,
             terms.market_mint,
             posted,
             _size_raw(terms, fill.size_usd, fill.price),
+            costs=TradeCosts(ONCHAIN, rent_lamports=rent),
             perp=fill,
         )
+
+    async def _position_rent(self, position: Pubkey, before: int | None) -> int:
+        """O rent da conta que esta abertura criou (F1); 0 se ela já existia."""
+        if before is not None:
+            return 0
+        [lamports] = await self._after_fill(
+            self.reader.lamports([position]), [None], "rent da conta da posição"
+        )
+        return lamports or 0
+
+    async def _after_fill[T](self, read: Awaitable[T], fallback: T, what: str) -> T:
+        """Uma leitura depois do fill: nunca levanta (o envio já saiu e o
+        fill aconteceu); sem ela, `fallback`, avisado."""
+        try:
+            return await read
+        except Exception as ex:
+            logger.warning(f"{what} não lido depois do fill ({ex}): {fallback}")
+            return fallback
 
     async def close_perp(
         self, collateral_mint: str, terms: PerpTerms, key: str
@@ -144,7 +182,12 @@ class JupiterPerpsVenue:
         request = close_request(self.owner, terms, oracle.price, self.slippage, key)
         signature = await self._send(request, 0, announce_send_required)
         await self._wait(request, signature, grows=False)
-        returned = max(await self.reader.token_amount(wallet) - before, 0)
+        # sem a leitura: o que a posição valia ao preço do oráculo
+        worth = int(_worth(terms, position, oracle.price) * USD_SCALE)
+        after = await self._after_fill(
+            self.reader.token_amount(wallet), before + worth, "saldo de USDC"
+        )
+        returned = max(after - before, 0)
         fill = _exit_fill(terms, position, oracle.price, Decimal(returned) / USD_SCALE)
         return ExecutionResult(
             signature,
@@ -165,20 +208,6 @@ class JupiterPerpsVenue:
         )
         return int(quote.otherAmountThreshold)
 
-    async def _entry_fill(
-        self, terms: PerpTerms, position: VenuePosition, collateral: Decimal
-    ) -> PerpFill:
-        fill = PerpFill(
-            direction=terms.direction,
-            leverage=terms.leverage,
-            price=position.price,
-            size_usd=position.size_usd,
-            collateral_usd=position.collateral_usd,
-            fees_usd=collateral - position.collateral_usd,
-            borrow_bps_hour=await self.reader.borrow_bps_hour(terms.market_mint),
-        )
-        return replace(fill, liquidation_price=liquidation_price(fill))
-
     # --- a ordem de stop no venue (D7) --------------------------------------------
 
     async def place_stop(
@@ -197,8 +226,16 @@ class JupiterPerpsVenue:
         request = self._stops.pop((terms.market_mint, terms.direction), None)
         if request is None:
             return None
-        [data] = await self.reader.accounts([request])
-        return None if data is None else str(request)
+        # o keeper apaga a ordem logo depois do fechamento: só sobra se
+        # continuar lá depois de mais um pouco (F3)
+        if await self._gone(request):
+            return None
+        await self.sleep(STOP_CLEANUP_SECONDS)
+        return None if await self._gone(request) else str(request)
+
+    async def _gone(self, address: Pubkey) -> bool:
+        [data] = await self.reader.accounts([address])
+        return data is None
 
     async def has_position(self, terms: PerpTerms) -> bool:
         return await self.reader.position(self.owner, terms) is not None
@@ -305,11 +342,15 @@ class JupiterPerpsVenue:
     # --- depois da execução -------------------------------------------------------
 
     async def fetch_costs(self, result: ExecutionResult) -> TradeCosts:
-        """A taxa de rede do nosso pedido (a do keeper é dele). Nunca levanta."""
+        """A taxa de rede do nosso pedido (a do keeper é dele), com o rent que
+        a abertura já anotou. Nunca levanta."""
+        costs = result.costs or TradeCosts(ONCHAIN)
         fee = await self.provider.fetch_fee(result.signature)
         if fee is None:
-            return result.costs or TradeCosts(ONCHAIN)
-        return TradeCosts(ONCHAIN, fee_lamports=fee)
+            return costs
+        # uma assinatura (a nossa): o que passa da taxa base é prioridade (F4)
+        priority = priority_fee_lamports(fee)
+        return replace(costs, fee_lamports=fee, priority_fee_lamports=priority)
 
     async def fetch_failed_fees(self, signatures: Sequence[str]) -> int:
         return await self.provider.fetch_failed_fees(signatures)
@@ -353,11 +394,24 @@ def stop_level(terms: PerpTerms, fill: PerpFill) -> Decimal:
     return fill.price * (1 - fill.direction.sign * distance)
 
 
-def _exit_fill(
-    terms: PerpTerms, position: VenuePosition, price: Decimal, returned: Decimal
+def _entry_fill(
+    terms: PerpTerms, position: VenuePosition, collateral: Decimal, borrow: Decimal
 ) -> PerpFill:
-    """A saída: o que voltou; taxas e empréstimo juntos, pela diferença do
-    que a posição valia ao preço do oráculo."""
+    """A entrada: o que a conta da posição mostra depois do keeper."""
+    fill = PerpFill(
+        direction=terms.direction,
+        leverage=terms.leverage,
+        price=position.price,
+        size_usd=position.size_usd,
+        collateral_usd=position.collateral_usd,
+        fees_usd=collateral - position.collateral_usd,
+        borrow_bps_hour=borrow,
+    )
+    return replace(fill, liquidation_price=liquidation_price(fill))
+
+
+def _worth(terms: PerpTerms, position: VenuePosition, price: Decimal) -> Decimal:
+    """O que a posição vale a `price`: o colateral mais o PnL (USD)."""
     held = PerpFill(
         terms.direction,
         terms.leverage,
@@ -367,7 +421,15 @@ def _exit_fill(
         Decimal(0),
         Decimal(0),
     )
-    expected = held.collateral_usd + held.pnl_usd(price)
+    return held.collateral_usd + held.pnl_usd(price)
+
+
+def _exit_fill(
+    terms: PerpTerms, position: VenuePosition, price: Decimal, returned: Decimal
+) -> PerpFill:
+    """A saída: o que voltou; taxas e empréstimo juntos, pela diferença do
+    que a posição valia ao preço do oráculo."""
+    expected = _worth(terms, position, price)
     return PerpFill(
         direction=terms.direction,
         leverage=terms.leverage,

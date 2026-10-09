@@ -1,3 +1,4 @@
+import itertools
 from decimal import Decimal
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -93,6 +94,26 @@ def _close_open_ledgers():
 def ledger():
     """Ledger em memória (use `factories.open_ledger()` fora de fixtures)."""
     return open_ledger()
+
+
+_tmp_counter = itertools.count()
+
+
+@pytest.fixture(scope="session")
+def _tmp_root(tmp_path_factory):
+    return tmp_path_factory.mktemp("t", numbered=False)
+
+
+@pytest.fixture
+def tmp_path(_tmp_root):
+    """Troca o `tmp_path` do pytest: o dele custa ~18ms por teste no Windows.
+
+    O `mktemp` numerado lista o diretório base a cada teste; aqui um contador
+    dá o nome direto (o diretório base continua o do pytest).
+    """
+    path = _tmp_root / str(next(_tmp_counter))
+    path.mkdir()
+    return path
 
 
 @pytest.fixture(autouse=True)

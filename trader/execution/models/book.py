@@ -145,7 +145,11 @@ class PositionBook:
     def charge(self, fee: FailedTxFee) -> None:
         """Taxa de transações que falharam: sai do PnL (e do orçamento)."""
         self.failed_fee_sol += fee.sol
-        self.realized_usd -= fee.usd or ZERO
+        self.charge_cost(fee.usd)
+
+    def charge_cost(self, usd: Decimal | None) -> None:
+        """Um custo sem trade (o stop do venue, A11c): sai do PnL e do orçamento."""
+        self.realized_usd -= usd or ZERO
 
     def _open(self) -> Position:
         if self.position is None:

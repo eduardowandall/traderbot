@@ -58,6 +58,10 @@ class HelloError(ValueError):
     """`hello` recusado (token, spec inválida, spec já conectada)."""
 
 
+class SpecConnectedError(HelloError):
+    """A spec já tem uma sessão: passa quando a antiga cai (`HELLO_RETRY_KINDS`)."""
+
+
 @dataclass
 class _Session:
     """Estado de uma conexão: a spec dela, depois do `hello`."""
@@ -202,7 +206,7 @@ class TradeRunner:
         spec = self._valid_terms(message.get("terms"))
         name = f"strategy:{spec.spec_id}"
         if name in self.live:
-            raise HelloError(f"a spec {spec.spec_id} já está conectada")
+            raise SpecConnectedError(f"a spec {spec.spec_id} já está conectada")
         if name not in self.specs:
             await self._open(name, spec)
         self.live.add(name)

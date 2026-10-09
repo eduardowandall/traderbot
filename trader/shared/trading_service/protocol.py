@@ -90,6 +90,20 @@ class TradeServiceError(Exception):
     """Falha inesperada do serviço de trading, vista pelo lado da estratégia."""
 
 
+class HelloRefusedError(TradeServiceError):
+    """O trade-runner recusou a spec ou o token: reconectar não resolve.
+
+    O bot para com o motivo (A11c F5): os termos, a política ou a carteira
+    precisam mudar antes de um novo `connect`.
+    """
+
+
+# recusas de `hello` que passam sozinhas: a sessão antiga da spec que o
+# trade-runner ainda não largou (uma reconexão logo depois de cair). O cliente
+# as trata como conexão caída e tenta de novo; as outras são `HelloRefusedError`
+HELLO_RETRY_KINDS = frozenset({"SpecConnectedError"})
+
+
 class PriceUnavailableError(TradeServiceError):
     """O trade-runner não tem preço recente do mint: o bot não decide agora.
 

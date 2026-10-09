@@ -26,6 +26,7 @@ from trader.shared.notification import NotificationService
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
     BucketStatus,
+    HelloRefusedError,
     OrderReply,
     PriceUnavailableError,
     TradeServiceError,
@@ -466,3 +467,41 @@ async def test_the_ticker_is_logged_once_per_bar(caplog):
 
     lines = [r for r in caplog.records if "BONK-USDC" in r.getMessage()]
     assert len(lines) == 2  # barras 6 (100-114.9) e 7 (115)
+
+
+async def test_a_refused_hello_stops_the_bot_with_the_reason():
+    # A11c F5: a spec que o trade-runner recusa não fica tentando para sempre
+    trader = FakeTrader()
+    trader.open = AsyncMock(
+        side_effect=HelloRefusedError("sizing.usd: 20 USD acima do limite por trade 10")
+    )
+    inbox = Inbox()
+    bot = _bot(_market(), mock.Mock(wraps=StubStrategy()), trader)
+    bot.notification_service = inbox
+
+    with mock.patch("asyncio.sleep") as sleep:
+        await bot.arun()
+
+    trader.open.assert_awaited_once()
+    sleep.assert_not_awaited()
+    assert any("recusado" in m and "sizing.usd" in m for m in inbox.messages)
+
+
+async def test_a_session_still_alive_on_a_reconnect_backs_off():
+    # A11c: a recusa da sessão antiga ainda viva (`HELLO_RETRY_KINDS`) chega
+    # ao bot como conexão caída: backoff, e o loop segue
+    trader = FakeTrader()
+    snapshot = await trader.bucket()
+    trader.bucket = AsyncMock(
+        side_effect=[snapshot, ConnectionError("já está conectada"), snapshot]
+    )
+    market = _market([Decimal("1"), Decimal("1"), KeyboardInterrupt()])
+    strategy = mock.Mock(wraps=StubStrategy())
+    strategy.on_market_refresh.return_value = None
+    bot = _bot(market, strategy, trader)
+
+    with mock.patch("asyncio.sleep") as sleep:
+        await bot.arun()
+
+    assert sleep.await_count == 1  # um backoff, e o loop seguiu
+    assert market.get_price.await_count == 3

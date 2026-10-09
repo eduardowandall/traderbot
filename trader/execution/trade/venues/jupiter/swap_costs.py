@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from solders.pubkey import Pubkey
 
-from trader.shared.models.costs import BASE_FEE_LAMPORTS, ONCHAIN, TradeCosts
+from trader.shared.models.costs import ONCHAIN, TradeCosts, priority_fee_lamports
 from trader.shared.models.mints import SOL_MINT
 
 WSOL_MINT = SOL_MINT
@@ -108,7 +108,7 @@ def parse_swap_costs(
     return TradeCosts(
         source=source,
         fee_lamports=meta.fee,
-        priority_fee_lamports=max(meta.fee - BASE_FEE_LAMPORTS * signature_count, 0),
+        priority_fee_lamports=priority_fee_lamports(meta.fee, signature_count),
         rent_lamports=deltas.rent_lamports,
         other_lamports=other,
         actual_in_amount=actual_in,

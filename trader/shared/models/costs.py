@@ -79,6 +79,18 @@ class FailedTxFee:
         return Decimal(self.lamports) / LAMPORTS_PER_SOL
 
 
+def lamports_usd(lamports: int, sol_usd: Decimal | None) -> Decimal | None:
+    """Lamports em USD ao preço do SOL; None sem preço."""
+    if sol_usd is None:
+        return None
+    return Decimal(lamports) / LAMPORTS_PER_SOL * sol_usd
+
+
+def priority_fee_lamports(fee: int, signatures: int = 1) -> int:
+    """A prioridade de um `meta.fee`: o que passa da taxa base por assinatura."""
+    return max(fee - BASE_FEE_LAMPORTS * signatures, 0)
+
+
 def costs_from_dict(data: dict | None) -> TradeCosts | None:
     return TradeCosts(**data) if data else None
 
@@ -206,9 +218,10 @@ class RoundTripCosts:
         self.notional_usd += notional_usd
         self.count += closes
 
-    def refund(self, net_usd: Decimal) -> None:
-        """Rent devolvido (menos a taxa do fechamento): sai do custo (A15)."""
-        self.cost_usd -= net_usd
+    def charge(self, usd: Decimal) -> None:
+        """Um custo fora das pernas (o stop do venue, A11c); negativo, um
+        reembolso (o rent devolvido, A15)."""
+        self.cost_usd += usd
 
     @property
     def per_trip_usd(self) -> Decimal | None:

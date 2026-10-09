@@ -13,6 +13,7 @@ import pytest
 from factories import PerpOracle, events_of
 
 from trader.execution.models.execution import ExecutionResult
+from trader.execution.models.intent import SentTx
 from trader.execution.models.perp import PerpTerms
 from trader.execution.models.venue import Liquidation
 from trader.execution.trade.gateway import TradeGateway
@@ -283,3 +284,35 @@ async def test_a_venue_exit_is_booked_with_what_came_back(paper):
         Decimal(9) - 10 - Decimal("0.000005") * 100
     )
     assert events_of(paper.ledgers[-1], "intent_external")[0]["reason"] == "venue_exit"
+
+
+class StopSent(SimulatedPerpsVenue):
+    """Um venue que envia a ordem de stop (como o real) e cobra a taxa dela."""
+
+    async def place_stop(self, terms, fill, key, announce):
+        announce(SentTx("stop-sig", "request", "position", 0, 0))
+        return "request"
+
+    async def fetch_failed_fees(self, signatures):
+        return 10_000 * len(signatures)
+
+
+async def test_the_venue_stop_fee_is_a_cost_of_the_bucket(paper):
+    # A11c F2: o envio do stop pagou taxa; ela entra no PnL, no orçamento e
+    # nos relatórios, e um restore chega ao mesmo PnL
+    service = paper.service()
+    service.perps = StopSent(SimulatedWallet(paper.wallet_path), paper.oracle)
+    await _open(service)
+
+    reply = await service.submit_order("short", _order(OrderSide.BUY, "100"))
+
+    assert reply.filled
+    [fee] = events_of(paper.ledgers[-1], "perp_stop_fee")
+    assert (fee["signature"], fee["fee_lamports"]) == ("stop-sig", 10_000)
+    account = service._buckets["short"].account
+    live = account.book.realized_usd
+    assert live == -Decimal(fee["fee_usd"])  # nada fechado: só a taxa do stop
+    totals = paper.ledgers[-1].pnl_totals(account.account_id)
+    assert totals.net_usd == live and totals.fee_lamports >= 10_000
+    account.restore_from_ledger()
+    assert account.book.realized_usd == live

@@ -39,6 +39,7 @@ from trader.shared.models.perp import PerpFill
 SHORT = PerpTerms(SOL_MINT, Direction.SHORT, Decimal(3), stop_pct=Decimal(5))
 LONG = PerpTerms(SOL_MINT, Direction.LONG, Decimal(2), stop_pct=Decimal(3))
 REQUEST = b"request account"  # qualquer conteúdo: o venue só vê se existe
+RENT = 1_747_520  # o rent da conta de uma posição (o run 1 real, A11b)
 
 
 def position_bytes(
@@ -66,8 +67,17 @@ def position_bytes(
 class Reader:
     """O leitor de mentira: `polls` são as respostas (pedido, posição)."""
 
-    def __init__(self, polls=(), position=None, balances=(0, 0), payout=0):
+    def __init__(
+        self,
+        polls=(),
+        position=None,
+        balances=(0, 0),
+        payout=0,
+        lamports=(None, RENT),
+    ):
         self.polls = list(polls)
+        # a conta da posição: antes do envio (None: não existe) e depois
+        self.lamport_reads = list(lamports)
         self.position_value = position
         self.balances = list(balances)
         self.payout = payout
@@ -106,6 +116,9 @@ class Reader:
             return list(self.polls.pop(0))
         return [None for _ in addresses]  # as posições da varredura
 
+    async def lamports(self, addresses):
+        return [self.lamport_reads.pop(0) if self.lamport_reads else None]
+
     async def simulate(self, tx):
         return 90_000, []
 
@@ -138,7 +151,7 @@ def _venue(reader: Reader) -> tuple[JupiterPerpsVenue, Executor]:
     quotes = SimpleNamespace(
         get_quote=_quote(SimpleNamespace(otherAmountThreshold="95000000"))
     )
-    provider = SimpleNamespace(jupiter_client=quotes)
+    provider = SimpleNamespace(jupiter_client=quotes, fetch_fee=_quote(10_000))
 
     async def no_wait(seconds):
         return None
@@ -263,6 +276,43 @@ async def test_the_venue_stop_is_placed_and_checked_after_the_close():
     assert await venue.stop_left(SHORT) is None  # conferido uma vez
 
 
+async def test_a_stop_the_keeper_clears_after_the_close_is_not_left():
+    # A11c F3: no run 1 o keeper apagou a ordem 1 s depois de conferida
+    class Clearing(Reader):
+        async def accounts(self, addresses):
+            seen, self.stop_account = self.stop_account, None
+            return [seen]
+
+    reader = Clearing()
+    venue, _ = _venue(reader)
+    venue._stops[(SHORT.market_mint, SHORT.direction)] = Pubkey.new_unique()
+    reader.stop_account = b"still there for a moment"
+    assert await venue.stop_left(SHORT) is None
+
+
+async def test_the_first_open_books_the_position_account_rent(sends):
+    # A11c F1: a conta da posição nasce com a abertura e fica com a Jupiter
+    new = Reader(polls=[(None, position_bytes(30_000_000))])
+    reused = Reader(polls=[(None, position_bytes(30_000_000))], lamports=(RENT, RENT))
+
+    first = await _venue(new)[0].open_perp(USDC, SHORT, Decimal(10), "k")
+    again = await _venue(reused)[0].open_perp(USDC, SHORT, Decimal(10), "k2")
+
+    assert first.costs is not None and first.costs.rent_lamports == RENT
+    assert again.costs is not None and again.costs.rent_lamports == 0
+
+
+async def test_the_fee_splits_base_and_priority_and_keeps_the_rent(sends):
+    # A11c F4: 10 mil lamports = 5 mil de base + 5 mil de prioridade
+    venue, _ = _venue(Reader(polls=[(None, position_bytes(30_000_000))]))
+    result = await venue.open_perp(USDC, SHORT, Decimal(10), "k")
+
+    costs = await venue.fetch_costs(result)
+
+    assert (costs.fee_lamports, costs.priority_fee_lamports) == (10_000, 5_000)
+    assert costs.rent_lamports == RENT
+
+
 @pytest.mark.parametrize(("payout", "liquidated"), [(0, True), (9_000_000, False)])
 async def test_a_position_gone_from_the_venue_is_an_exit(payout, liquidated):
     venue, _ = _venue(Reader(payout=payout))
@@ -296,3 +346,39 @@ def test_the_venue_stop_is_the_closer_of_the_spec_and_half_to_liquidation(terms,
         liquidation_price=liquidation,
     )
     assert stop_level(terms, fill) == level
+
+
+async def test_reads_that_fail_after_the_keeper_filled_never_raise(sends):
+    # code review A11c: depois do fill, uma leitura que falha não pode deixar
+    # a intenção FAILED com a posição aberta na Jupiter
+    class Flaky(Reader):
+        async def borrow_bps_hour(self, mint):
+            raise OSError("429")
+
+    venue, _ = _venue(Flaky(polls=[(None, position_bytes(30_000_000))]))
+    opened = await venue.open_perp(USDC, SHORT, Decimal(10), "k")
+    assert opened.perp is not None and opened.perp.borrow_bps_hour == 0
+
+    position = VenuePosition(
+        Pubkey.new_unique(),
+        Direction.SHORT,
+        Decimal(100),
+        Decimal(30),
+        Decimal("9.982"),
+        datetime.now(UTC),
+    )
+
+    class NoBalance(Reader):
+        async def token_amount(self, account):
+            if self.balances:
+                return self.balances.pop(0)
+            raise OSError("RPC fora")
+
+    reader = NoBalance(
+        polls=[(REQUEST, position_bytes(30_000_000)), (None, None)],
+        position=position,
+        balances=[1_000_000],
+    )
+    closed = await _venue(reader)[0].close_perp(USDC, SHORT, "c")
+    # o valor ao preço do oráculo (100, o da entrada): o colateral inteiro
+    assert closed.out_amount == 9_982_000

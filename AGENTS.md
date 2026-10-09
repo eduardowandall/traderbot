@@ -265,6 +265,9 @@ command to run in a terminal. The rules are tested in
 
 ## Tests
 - `asyncio_mode = "auto"`; `-W error::ResourceWarning` (close the `Ledger`s you open).
+  One event loop for the whole session, and `tests/conftest.py` overrides
+  `tmp_path` with a counter-named dir: on Windows a loop per test (~9ms) and
+  pytest's numbered `tmp_path` (~18ms) cost more than most tests.
 - The autouse `isolated_workdir` fixture points the three `TRADER_*` paths at
   `tmp_path` and chdirs there. Write test policies with `policy_file().write_text(...)`.
 - Test file basenames are unique across `tests/` (no `__init__.py`). Shared
@@ -300,4 +303,8 @@ command to run in a terminal. The rules are tested in
   and is given to `serve real` only with `perps_enabled` in `[real]`. The
   account places the venue stop after each open and sells at once if it
   can't; venue exits (its stop fired, a liquidation) are booked from the
-  keeper's USDC payout in the sweep.
+  keeper's USDC payout in the sweep. Costs outside the collateral (A11c):
+  the first open in a market and side pays the position account's rent
+  (`rent_lamports` of that leg; Jupiter keeps the account, nothing comes
+  back), and the venue stop's own send fee is a `perp_stop_fee` event
+  (in `pnl_totals`, the round-trip cost and the bucket's budget).

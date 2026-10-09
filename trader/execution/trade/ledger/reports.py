@@ -19,6 +19,7 @@ from trader.execution.models.perp import terms_from_json
 from trader.execution.trade.ledger.events import (
     DAILY_REPORT,
     FAILED_TX_FEE,
+    PERP_STOP_FEE,
     RENT_REFUND,
     RENT_REFUND_SENT,
 )
@@ -93,6 +94,22 @@ class AccountPnL:
         self.failed_fee_usd += Decimal(usd)
         self.net_usd -= Decimal(usd)
 
+    def add_stop_fee(self, payload: dict) -> None:
+        """Um evento `perp_stop_fee`: a taxa do stop do venue (A11c F2)."""
+        self.fee_lamports += int(payload["fee_lamports"])
+        usd = self._known(payload.get("fee_usd"))
+        if usd is not None:
+            self.costs_usd += usd
+            self.net_usd -= usd
+
+    def _known(self, usd: Any) -> Decimal | None:
+        """O valor USD de um custo fora das pernas; sem preço do SOL, None e
+        conta como desconhecido."""
+        if usd is None:
+            self.unknown_costs += 1
+            return None
+        return Decimal(usd)
+
     def add_rent_refund(self, payload: dict) -> None:
         """Um evento `rent_refund`: o rent volta, a taxa do fechamento sai."""
         self.rent_refund_lamports += int(payload["refund_lamports"])
@@ -124,6 +141,7 @@ class Reports(LedgerStore):
         add = {
             FAILED_TX_FEE: totals.add_failed_fee,
             RENT_REFUND: totals.add_rent_refund,
+            PERP_STOP_FEE: totals.add_stop_fee,
         }
         for type_, payload in self._account_events(tuple(add), account, start, end):
             add[type_](payload)
@@ -207,20 +225,27 @@ class Reports(LedgerStore):
                 totals.add(*leg, closes=bool(row["closes_position"]))
             if row["closes_position"]:
                 entry = None
-        self._refund_rent(totals, account, start, end)
+        self._outside_legs(totals, account, start, end)
         return totals
 
-    def _refund_rent(
+    def _outside_legs(
         self,
         totals: RoundTripCosts,
         account: str,
         start: datetime | None,
         end: datetime | None,
     ) -> None:
-        """O rent está no custo da ida e volta que abriu a conta; volta aqui."""
-        for _, payload in self._account_events((RENT_REFUND,), account, start, end):
-            if payload.get("net_usd") is not None:
-                totals.refund(Decimal(payload["net_usd"]))
+        """O que a ida e volta custou fora das pernas.
+
+        O rent está no custo da ida e volta que abriu a conta e volta aqui
+        (A15); a taxa do stop do venue entra aqui (A11c).
+        """
+        # tipo -> (o campo USD do evento, o sinal no custo)
+        signed = {RENT_REFUND: ("net_usd", -1), PERP_STOP_FEE: ("fee_usd", 1)}
+        for type_, payload in self._account_events(tuple(signed), account, start, end):
+            field, sign = signed[type_]
+            if payload.get(field) is not None:
+                totals.charge(sign * Decimal(payload[field]))
 
     def daily_report_sent(self, day: str) -> bool:
         """Já há um `daily_report` do dia (`YYYY-MM-DD`, UTC)?"""

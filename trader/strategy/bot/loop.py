@@ -20,6 +20,7 @@ from trader.shared.models.perp import describe_fill
 from trader.shared.models.position import Position
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
+    HelloRefusedError,
     OrderReply,
     PriceUnavailableError,
     ReplyStatus,
@@ -218,8 +219,21 @@ class TradingBot:
             f"USD {order.price:.8f}{perp}\n{bucket_line(after, current_price)}"
         )
 
+    def _refused(self, ex: HelloRefusedError) -> None:
+        """O trade-runner recusou a spec: tentar de novo não muda nada (F5)."""
+        self.logger.error(f"Spec recusada pelo trade-runner: {ex}; parando o bot")
+        self.notification_service.send_message(
+            f"[!] Bot {self.symbol} recusado pelo trade-runner: {ex}"
+        )
+        self.is_running = False
+
     async def _on_error(self, ex: Exception, backoff: float) -> float:
         """Trata um erro do loop e retorna o próximo backoff."""
+        if isinstance(ex, HelloRefusedError):
+            # recusa que não passa sozinha (F5); a da sessão antiga ainda viva
+            # chega como conexão caída e segue o backoff (`HELLO_RETRY_KINDS`)
+            self._refused(ex)
+            return backoff
         if isinstance(ex, PriceUnavailableError):
             # esperado (reinício do trade-runner, Price API fora): sem traceback
             self.logger.warning(f"Sem preço agora: {ex}")

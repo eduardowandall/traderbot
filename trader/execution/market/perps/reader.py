@@ -160,14 +160,24 @@ class JupiterPerpsReader:
 
     async def accounts(self, addresses: list[Pubkey]) -> list[bytes | None]:
         """Os dados das contas (None: não existe), lidas juntas, em Confirmed."""
-        options = {"encoding": "base64", "commitment": "confirmed"}
+        values = await self._multiple(addresses)
+        return [None if v is None else base64.b64decode(v["data"][0]) for v in values]
+
+    async def lamports(self, addresses: list[Pubkey]) -> list[int | None]:
+        """Os lamports das contas (None: não existe), sem os dados (A11c)."""
+        values = await self._multiple(addresses, {"offset": 0, "length": 0})
+        return [None if v is None else int(v["lamports"]) for v in values]
+
+    async def _multiple(
+        self, addresses: list[Pubkey], data_slice: dict | None = None
+    ) -> list[dict | None]:
+        options: dict[str, Any] = {"encoding": "base64", "commitment": "confirmed"}
+        if data_slice is not None:
+            options["dataSlice"] = data_slice
         result = await self._rpc(
             "getMultipleAccounts", [[str(a) for a in addresses], options]
         )
-        return [
-            None if v is None else base64.b64decode(v["data"][0])
-            for v in result["value"]
-        ]
+        return result["value"]
 
     async def program_accounts(
         self, kind: str, matches: list[tuple[int, bytes]]

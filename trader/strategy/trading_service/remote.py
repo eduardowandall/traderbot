@@ -22,8 +22,10 @@ from decimal import Decimal
 from trader.shared.models.public_data import Interval, TickerData
 from trader.shared.spec.terms import SpecTerms
 from trader.shared.trading_service.protocol import (
+    HELLO_RETRY_KINDS,
     REMOTE_ERRORS,
     BucketSnapshot,
+    HelloRefusedError,
     OrderReply,
     OrderRequest,
     TradeServiceError,
@@ -47,10 +49,6 @@ RECONNECT_ATTEMPTS = 5
 # maior linha aceita do trade-runner: 900 candles dão ~120 KB, e o padrão do
 # asyncio (64 KB) recusaria
 LINE_LIMIT = 4 * 1024 * 1024
-
-
-class HelloRefusedError(TradeServiceError):
-    """O trade-runner recusou a spec ou o token: reconectar não resolve."""
 
 
 class RemoteTradeClient:
@@ -136,7 +134,10 @@ class RemoteTradeClient:
         )
         if not answer.get("ok"):
             await self.aclose()
-            raise HelloRefusedError(answer.get("error") or "hello recusado")
+            error = answer.get("error") or "hello recusado"
+            if answer.get("kind") in HELLO_RETRY_KINDS:
+                raise ConnectionError(error)  # passa sozinha: tenta de novo
+            raise HelloRefusedError(error)
         self.bucket_name = answer["bucket"]
 
     async def _exchange(self, message: dict) -> dict:
@@ -183,8 +184,6 @@ class RemoteTradeClient:
         try:
             self._refresh_address()
             await self._connect()
-        except HelloRefusedError:
-            raise
         except (ConnectionError, OSError, ValueError) as ex:
             logger.warning(f"Reconexão falhou: {ex}")
 

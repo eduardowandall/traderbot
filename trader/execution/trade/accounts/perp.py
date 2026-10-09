@@ -11,6 +11,7 @@ colateral em `quote_amount` e a de saída o que voltou, e o `perp` delas dá o
 lado e o preço (`trader/shared/models/perp.py`).
 """
 
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from decimal import Decimal
 
@@ -22,6 +23,8 @@ from trader.execution.trade.gateway.fills import Fill, record_fill_safely
 from trader.execution.trade.gateway.orders import perp_order_from_fill
 from trader.execution.trade.ledger import events
 from trader.shared.models import Order, OrderSide
+from trader.shared.models.costs import lamports_usd
+from trader.shared.models.mints import SOL_MINT
 
 LIQUIDATION = "liquidation"
 # o venue fechou sozinho e algo voltou (a ordem de stop dele disparou)
@@ -103,29 +106,57 @@ class PerpAccount(SpotAccount):
         self.logger.info(f"PERP ABERTA: {asdict(order)}", extra=asdict(order))
         record_fill_safely(self.gateway, intent.intent_id, order)
         self.book.open(order)
-        await self._place_stop(order, key)
+        await self._place_stop(order, key, usd.get(SOL_MINT))
         return order
 
-    async def _place_stop(self, order: Order, key: str) -> None:
+    async def _place_stop(
+        self, order: Order, key: str, sol_usd: Decimal | None
+    ) -> None:
         """A ordem de stop no venue (D7), já com a entrada no ledger.
 
         Se não dá para colocar, a posição fecha agora pelo caminho normal: uma
         perp real nunca fica aberta sem o stop do venue.
         """
+        sent: list[SentTx] = []
+
+        def announce(tx: SentTx) -> None:
+            # gravado antes do envio (como os swaps, A3): um crash deixa o rastro
+            self._event(events.PERP_STOP_SENT, asdict(tx))
+            sent.append(tx)
+
+        await self._send_stop(order, key, announce)
+        # enviado (colocado ou não), o stop pagou a taxa (F2); o paper não envia
+        for tx in sent:
+            await self._book_stop_fee(tx.signature, sol_usd)
+
+    async def _send_stop(
+        self, order: Order, key: str, announce: Callable[[SentTx], None]
+    ) -> None:
         assert order.perp is not None  # `perp_order_from_fill`
         try:
             request = await self.perps.place_stop(
-                self.terms, order.perp, f"{key}:stop", self._announce_stop
+                self.terms, order.perp, f"{key}:stop", announce
             )
         except Exception as ex:
-            await self._stop_failed(order, key, ex)
+            await self._stop_failed(order, key, ex)  # fechar vem antes (D7)
             return
         if request is not None:
             self._event(events.PERP_STOP_PLACED, {"request": request})
 
-    def _announce_stop(self, sent: SentTx) -> None:
-        # gravado antes do envio (como os swaps, A3): um crash deixa o rastro
-        self._event(events.PERP_STOP_SENT, asdict(sent))
+    async def _book_stop_fee(self, signature: str, sol_usd: Decimal | None) -> None:
+        """A taxa do envio do stop: custo do bucket sem trade. Nunca levanta
+        (a posição já está aberta, e o stop colocado ou não)."""
+        try:
+            lamports = await self.perps.fetch_failed_fees([signature])
+        except Exception as ex:
+            self.logger.error(f"Taxa do stop {signature} não lida: {ex}")
+            return
+        usd = lamports_usd(lamports, sol_usd)
+        self.book.charge_cost(usd)
+        self._event(
+            events.PERP_STOP_FEE,
+            {"signature": signature, "fee_lamports": lamports, "fee_usd": usd},
+        )
 
     async def _stop_failed(self, order: Order, key: str, ex: Exception) -> None:
         self.logger.error(f"{self.account_id}: o stop do venue falhou ({ex}); fechando")

@@ -40,6 +40,8 @@ PERP_STOP_SENT = "perp_stop_sent"
 PERP_STOP_PLACED = "perp_stop_placed"
 PERP_STOP_FAILED = "perp_stop_failed"
 PERP_STOP_LEFT = "perp_stop_left"
+# a taxa do envio do stop do venue: custo do bucket, sem trade (A11c F2)
+PERP_STOP_FEE = "perp_stop_fee"
 
 # o relatório diário já enviado (um por dia UTC)
 DAILY_REPORT = "daily_report"

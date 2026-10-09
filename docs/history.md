@@ -3368,3 +3368,65 @@ empty position. No schema change: can run any time after A7.
   the JSON it writes is byte for byte the old one (checked on a plain, a
   costed and a perp order), so ledger rows and the wire don't change. 902
   tests (2 new in `tests/trader/shared/models/test_order_codec.py`).
+
+#### A11c. Perp run 1 fixes (F1-F5) — M (done 2026-10-08)
+
+- **Plan (owner, 2026-10-08):** before the long run.
+  - **Design.**
+    - *F1, position rent.* Before sending an open, `JupiterPerpsVenue` reads
+      whether the position account exists (pre-send: a failed read stops
+      the open). If it doesn't, the open creates it, and after the keeper
+      fills, the account's lamports (a new `JupiterPerpsReader.lamports`,
+      never raising: a failed read books the rent as unknown, 0, with a
+      warning) go into the leg's `TradeCosts.rent_lamports`, carried on the
+      `ExecutionResult` and kept by `fetch_costs`. It is a cost of the
+      first round trip, as a token account's rent is for spot (A15). The
+      account is never closed (Jupiter keeps the PDA and reuses it), so
+      there is no refund to track.
+    - *F2, the stop's fee.* `PerpAccount` keeps the signature its stop send
+      announced, reads its fee (`PerpVenue.fetch_failed_fees`, which only
+      reads fees and never raises) and books a `perp_stop_fee` event
+      (`account`, `signature`, `fee_lamports`, `fee_usd`). `pnl_totals`
+      adds it to `fee_lamports`/`costs_usd` and takes it from `net_usd`;
+      the book takes it from `realized_usd` (`PositionBook.charge_cost`),
+      so the budget sees it. Paper places no stop and books nothing. A12's
+      "venue stop as its own intent" replaces this event.
+    - *F3, `stop_left`.* After a close the venue reads the stop request, waits
+      2 s once if it is still there (the keeper cleared it in 1 s in run 1),
+      and reports it only if it is there on the second read.
+    - *F4, the fee split.* A perp leg's fee is `meta.fee`; its priority part
+      is what passes the one signature's base fee (as `parse_swap_costs`).
+    - *F5, a refused `hello`.* `HelloRefusedError` moves to the shared
+      protocol (the bot only knows that); the bot loop stops on it with an
+      ERROR and a Telegram message, instead of retrying. The one refusal that
+      passes by itself, the spec's old session still alive on `serve`
+      (`SpecConnectedError`, listed in `HELLO_RETRY_KINDS`), reaches the
+      client as a dropped connection and is retried.
+- **Result.** As designed, then two reviews.
+  - **`/code-review`** found:
+    - a refused `hello` on a mid-run reconnect would have stopped the bot
+      and its stop-loss for good; now only a permanent refusal stops it,
+      and the old-session case is retried (F5's split);
+    - post-fill reads in `open_perp`/`close_perp` (the borrow rate, the
+      USDC that came back) could raise after the keeper filled and leave a
+      real position FAILED; one never-raising `_after_fill` now covers them,
+      with an estimate at the oracle price for the close;
+    - the D7 close now comes before the stop fee is booked.
+
+    The rent of a first open that the keeper rejects is left to A12.
+  - **`/simplify`:**
+    - `lamports_usd` and `priority_fee_lamports` live in
+      `shared/models/costs.py` (the failed-fee path, the stop fee, spot swap
+      costs and the perp venue use them);
+    - the stop fee is booked from one place with the open's SOL price;
+    - the reader's two `getMultipleAccounts` share `_multiple`;
+    - `RoundTripCosts` has one signed `charge` (the rent refund is a
+      negative charge);
+    - `AccountPnL._known` holds the "no SOL price" rule;
+    - the stop check is read, wait 2 s, read;
+    - moving the check into the sweep and the stop as its own intent stay
+      in A12.
+  - **Tests:** 910, the CI gate and the live perps suite green (a live
+    check for `reader.lamports`).
+  - **Before the long run:** restart `serve real` and `connect` (the wire
+    gained the `SpecConnectedError` kind).

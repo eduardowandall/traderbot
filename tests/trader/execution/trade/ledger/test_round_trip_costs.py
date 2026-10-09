@@ -108,3 +108,27 @@ async def test_through_paper_and_the_ledger_in_a_window():
     later = ledger.round_trip_costs("paper:b", start=middle)
     assert (later.count, later.cost_usd) == (1, Decimal("0.21945"))
     assert later.notional_usd == Decimal(20)
+
+
+async def test_a_venue_stop_fee_is_part_of_the_round_trip_cost():
+    # A11c F2: a taxa do stop do venue é custo da ida e volta, fora das pernas
+    quotes = ReplayQuoteClient(USDC, Decimal(50))
+    provider = paper_provider(
+        SimulatedWallet(initial={"USDC": Decimal(100), "SOL": Decimal(1)}),
+        jupiter_client=quotes,
+        fee_lamports=0,
+        account_rent_lamports=0,
+        slippage_bps=0,
+    )
+    service = TradeService(SpotVenue(provider), memory_gateway(), mode="paper")
+    quotes.tick = Tick(datetime.now(UTC), Decimal(100))
+    await service.open_bucket("b", USDC.mint, SOL.mint)
+    await _round_trip(service, quotes, "b", "100", "100")
+    ledger = service.gateway.ledger
+    before = ledger.round_trip_costs("paper:b").cost_usd
+
+    fee = {"signature": "s", "fee_lamports": 10_000, "fee_usd": "0.001"}
+    ledger.add_event("perp_stop_fee", {"account": "paper:b", **fee})
+
+    assert ledger.round_trip_costs("paper:b").cost_usd == before + Decimal("0.001")
+    assert ledger.pnl_totals("paper:b").fee_lamports == 10_000

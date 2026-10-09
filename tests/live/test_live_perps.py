@@ -19,6 +19,7 @@ from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.execution.market.perps.idl import decode_account
 from trader.execution.market.perps.reader import (
     CUSTODIES,
+    JLP_POOL,
     SHORT_COLLATERAL,
     JupiterPerpsReader,
 )
@@ -55,6 +56,16 @@ def test_the_pool_and_the_sol_custody_still_decode():
     assert (custody.open_fee_bps, custody.close_fee_bps) == (6, 6)
     assert 0 < custody.utilization < 1
     assert Decimal(0) < custody.borrow_bps_hour < Decimal(10)
+
+
+def test_lamports_are_read_without_the_data():
+    # A11c F1: o rent da conta de uma posição nova sai daqui
+    async def work(reader):
+        return await reader.lamports([JLP_POOL, Keypair().pubkey()])
+
+    pool, missing = _read(work)
+    assert pool is not None and pool > 0
+    assert missing is None
 
 
 def test_the_oracle_price_is_fresh_and_close_to_the_price_api():

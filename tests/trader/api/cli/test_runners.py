@@ -43,6 +43,7 @@ from trader.shared.trading_service import wire
 from trader.shared.trading_service.protocol import (
     BucketSnapshot,
     BucketStatus,
+    HelloRefusedError,
     OrderReply,
     OrderRequest,
     PriceUnavailableError,
@@ -52,11 +53,7 @@ from trader.shared.trading_service.protocol import (
 from trader.strategy.runner import find_connection, strategy_bot
 from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
-from trader.strategy.trading_service.remote import (
-    HelloRefusedError,
-    RemoteCandles,
-    RemoteTradeClient,
-)
+from trader.strategy.trading_service.remote import RemoteCandles, RemoteTradeClient
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
@@ -193,7 +190,9 @@ async def test_one_live_connection_per_spec():
     runner = _runner()
     async with await runner.start() as server:
         first = await _client(runner, server)
-        with pytest.raises(HelloRefusedError, match="já está conectada"):
+        # a sessão de outro cliente passa quando ela cair: o cliente a trata
+        # como conexão caída e tenta de novo, não como recusa (A11c)
+        with pytest.raises(ConnectionError, match="já está conectada"):
             await _client(runner, server)
         await first.aclose()
         await first.bucket()  # reconecta sozinho: a spec voltou a ficar livre

@@ -26,10 +26,10 @@ from trader.execution.models.venue import PostTrade
 from trader.execution.trade.gateway.gateway import TradeGateway
 from trader.execution.trade.ledger.events import POSITION_LEFTOVER
 from trader.shared.models.costs import (
-    LAMPORTS_PER_SOL,
     FailedTxFee,
     PnLResult,
     TradeCosts,
+    lamports_usd,
 )
 from trader.shared.models.mints import SOLANA_MINTS
 from trader.shared.models.order import Order, order_to_json
@@ -158,10 +158,7 @@ class FailedFees:
 
     async def _fee(self, signatures: tuple[str, ...]) -> FailedTxFee:
         lamports = await self.venue.fetch_failed_fees(signatures)
-        usd = None
-        if self.sol_usd is not None:
-            usd = Decimal(lamports) / LAMPORTS_PER_SOL * self.sol_usd
-        return FailedTxFee(signatures, lamports, usd)
+        return FailedTxFee(signatures, lamports, lamports_usd(lamports, self.sol_usd))
 
     def _record(self, fee: FailedTxFee) -> None:
         try:

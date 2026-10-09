@@ -203,6 +203,41 @@ perp backtest) and A10 (reading Jupiter Perps) are done (2026-10-07, in
     after the open, check the position and its stop in the Jupiter UI, and
     after the close look for `perp_stop_left` (cancel that stop in the UI).
     Then the same for a long. Report the keeper's minimum and timing.
+  - **Run 1, the short (owner, 2026-10-08).** `perp-test-short`
+    (`fc12cec93781`): 2x SOL short, 1 USDC of collateral (2 USD size),
+    random entry, `max_hold` 10 min. Opened 17:37:25 UTC at 106.673, closed
+    by `max_hold` at 17:47:29 at 106.388; nothing UNCONFIRMED, FAILED or
+    REJECTED. The ledger matches the chain: posted 1.000000, the position
+    held 0.99845 (opening fee 0.00155), 1.00279 came back (the move
+    +0.00535 less the closing fee 0.00101), gross +0.00279, net +0.00066
+    after the two legs' 20,000 lamports; round trip 23.6 bps. **Keeper:**
+    1 USDC of collateral was accepted; it executed the open 1-2 s after the
+    send and the close 1-4 s after. The A16 changes on the send path
+    (guarded send, single signature) ran clean on all three sends. Before
+    it traded, two `hello`s were refused as designed (`max_trade_usd` 10
+    under the 20 USD exposure; a wallet with no USDC yet). The wallet's SOL
+    across the trip, from the chain: -1,777,520 lamports, of which the
+    ledger has 20,000. Findings:
+    - **F1 (accounting).** The position account's rent (1,747,520
+      lamports, ~0.19 USD) is paid at the first open and was not returned
+      at the close (the position PDA stays); the ledger books none of it.
+      Like the token account's rent (A15): book it at the open, and a
+      refund if the account is ever closed.
+    - **F2 (accounting).** The venue stop's own send (10,000 lamports) is
+      booked nowhere; only the two legs are.
+    - **F3 (false alarm).** `perp_stop_left` fired at 17:47:34, but the
+      keeper closed the stop request (and refunded its rent) at 17:47:35:
+      nothing was left to cancel. `stop_left` must give the keeper time
+      (poll for a few seconds) before it alarms.
+    - **F4 (labels).** Each send's 10,000 lamports is 5,000 base + 5,000
+      priority, booked as `fee_lamports` with `priority_fee_lamports` 0.
+    - **F5 (strategy side).** A refused `hello` (`HelloRefusedError`:
+      reconnecting can't help) is retried by the bot loop until Ctrl+C;
+      it should stop the bot with the reason.
+    - Each request locks ~0.0037 SOL of rent for a few seconds (the keeper
+      refunds it); an open needs ~0.009 SOL free on top of the 0.02 reserve.
+    The long side is still to run.
+- **A11c. Perp run 1 fixes (F1-F5) — M.** Done 2026-10-08 (in `history.md`).
 - **A12. Hardening — M.** Oracle staleness (entries denied on a stale venue
   oracle); partial closes; adding collateral; shared perp state reads through
   the price hub. From the A11b `/simplify` review (left out of A11b, which
@@ -226,7 +261,12 @@ perp backtest) and A10 (reading Jupiter Perps) are done (2026-10-07, in
     `AsyncRPCClient.check_signature_is_confirmed` (the wait after a send)
     and `OnChainExecutor._status_outcome` (the resolver) each turn a status
     into confirmed/failed/pending; one `TxOutcome` mapping for both, with
-    the confirmation tests (`test_swap_confirmation.py`) moved onto it.
+    the confirmation tests (`test_swap_confirmation.py`) moved onto it;
+  - the position account's rent when the first open is rejected (from the
+    A11c review): our request transaction creates the account even when the
+    keeper then drops the request, so the rent is paid on a REJECTED intent
+    and later opens book 0. Book it from the request transaction itself
+    (its `meta` shows the new account), not from the open that fills.
 
 ### A16–A17. Code cleanup (owner, 2026-10-08)
 A pause in features to tidy the code: simpler usage and one clear job per
@@ -264,7 +304,8 @@ first (A16), then the strategy side (A17).
 | A9 Perps: backtest | done | 2026-10-07; in `history.md` |
 | A10 Perps: Jupiter read-only | done | 2026-10-07; in `history.md` |
 | A11a Perps: requests built and simulated | done | 2026-10-07; in `history.md` |
-| A11b Perps: requests sent, first real run | waiting for the owner | Built 2026-10-07; the owner's first real perp run (checklist in §4) |
+| A11b Perps: requests sent, first real run | short done, long waiting for the owner | Built 2026-10-07; run 1 (short) 2026-10-08: clean, findings F1-F5 in §4 |
+| A11c Perp run 1 fixes | done | 2026-10-08; in `history.md` |
 | A12 Perps: hardening | open | |
 | A16 Execution cleanup | done | 2026-10-08; in `history.md` |
 | A16b Execution cleanup, second pass | done | 2026-10-08; in `history.md` |
