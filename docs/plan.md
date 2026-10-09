@@ -33,7 +33,7 @@ it before the code. Track progress in §5, record decisions in §9.
 ## 2. Where we are
 
 **Overall: about 94%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
-and goal 6 is scored on its own so a new goal doesn't hide progress). 829
+and goal 6 is scored on its own so a new goal doesn't hide progress). 957
 tests. The first real run (A6, 2026-10-06/07) is done: 5 JUP-SOL round
 trips on a ~5 USD wallet, nothing UNCONFIRMED or failed, costs at or below
 the backtest's, and the token account's rent refunded at retirement.
@@ -42,10 +42,10 @@ the backtest's, and the token account's rent refunded at retirement.
 |---|---|---|---|
 | 1. Specs as files | `docs/specs.md` is the authoring contract (a test keeps it in step with the code); `backtest`, `/smoke`, `serve` + `connect` for any number of specs; the trade-runner checks each spec's terms against its own policy | Only a tiny-budget spec has traded real money (A6) | **95%** |
 | 2. Manual trades | Removed in stage U | Comes back with a wallet treasury | deferred |
-| 3. Structured building | 18 condition types plus `expr`; `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up (across candle gaps), re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | No crossovers | **90%** |
+| 3. Structured building | 18 condition types plus `expr`; a partial exit (A12); `fixed_usd` and `pct_of_bucket`; any registry token as the input; required stop, warm-up (across candle gaps), re-arm, `ttl_days`; backtests with measured costs, direction-aware candle paths and two series for non-stable pairs | No crossovers | **90%** |
 | 4. One wallet, bucket per strategy | One `serve` holds every bucket of a mode; budget and max-loss caps; budgets must fit the wallet; startup reconcile of every bucket's positions; atomic authorization; three buckets traded side by side in the paper soak (A2) | Nothing planned: one wallet is the decision (2026-10-07) | **95%** |
-| 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included | Replays ignore rent | **96%** |
-| 6. Perps | Design (§8); the seams (A7); perps in paper (A8) and backtests (A9); Jupiter Perps read live (A10); the open, stop and close requests built and simulated on mainnet, and the reconcile (A11a) | Sending and the first real run (A11b), hardening (A12) | **70%** |
+| 5. Accurate trades and costs | Real amounts and fees from the confirmed tx; rent; failed-tx fees; net PnL; USD values on every pair; one priority-fee cap across real, paper and backtest; cost per round trip in every report; daily report; live vs backtest; intents killed mid-swap resolved from their logged sends, fees included; token account rent in replays (A19) | Nothing planned | **97%** |
+| 6. Perps | Design (§8); the seams (A7); perps in paper (A8) and backtests (A9); Jupiter Perps read live (A10); requests built and simulated (A11a), sent through `serve real`, a real short round trip (A11b, A11c); hardening: the venue stop as an intent that the bot cancels when left over, partial closes, adding collateral, perp intents resolved after a crash, stale-oracle refusal (A12) | The real long run (A11b) | **90%** |
 | (Foundations) | Policy, breaker, idempotency, UNCONFIRMED blocking and resolution, key only in `serve`, transaction inspection, quote check against the Price API, no stale prices, agent-session guard hook, enforced layering | A service entrypoint | **95%** |
 
 ## 3. Principles and decisions that stand
@@ -81,7 +81,8 @@ In order. Each item ships on its own with the suite green (`/check`). Size:
 ### A7–A12. Perps
 The design is in §8. A7 (the seams), A8 (perps in paper, schema 3), A9 (the
 perp backtest) and A10 (reading Jupiter Perps) are done (2026-10-07, in
-`history.md`).
+`history.md`); A11c (2026-10-08) and A12 (2026-10-09) too. Left: A11b's
+long run.
 
 - **A11. Jupiter Perps execution — L.** Requests, keeper wait, idempotent
   `counter` (D8); the required venue stop, closing the position if it can't be
@@ -238,35 +239,7 @@ perp backtest) and A10 (reading Jupiter Perps) are done (2026-10-07, in
       refunds it); an open needs ~0.009 SOL free on top of the 0.02 reserve.
     The long side is still to run.
 - **A11c. Perp run 1 fixes (F1-F5) — M.** Done 2026-10-08 (in `history.md`).
-- **A12. Hardening — M.** Oracle staleness (entries denied on a stale venue
-  oracle); partial closes; adding collateral; shared perp state reads through
-  the price hub. From the A11b `/simplify` review (left out of A11b, which
-  waits for the owner's run):
-  - the venue stop as its own gateway intent (key `{key}:stop`): idempotency,
-    `intent_sent` and the resolver for free, instead of the `announce`
-    callback on `PerpVenue.place_stop` and the `perp_stop_sent` event;
-  - `stop_left` reads the stop address from the ledger's `perp_stop_placed`
-    (the venue's in-memory `_stops` is lost on a restart), and cancelling it
-    from the bot;
-  - the A11a `reconcile_perps` (unused) run once at the first open in one
-    batched read, replacing the per-bucket `_check_venue_position`;
-  - a typed perp payload on `SentTx` instead of addresses in the mint fields
-    (needed by the perp resolver);
-  - compute budgeting inside `OnChainExecutor.send_instructions` (one
-    simulation per send; the rent close would get it too);
-  - one mode branch in `wiring` that builds the spot provider and the perp
-    venue together;
-  - paper venue stops that fire in the sweep, so paper runs the D7 path;
-  - one reading of a signature's status (owner, 2026-10-08, from A16b):
-    `AsyncRPCClient.check_signature_is_confirmed` (the wait after a send)
-    and `OnChainExecutor._status_outcome` (the resolver) each turn a status
-    into confirmed/failed/pending; one `TxOutcome` mapping for both, with
-    the confirmation tests (`test_swap_confirmation.py`) moved onto it;
-  - the position account's rent when the first open is rejected (from the
-    A11c review): our request transaction creates the account even when the
-    keeper then drops the request, so the rent is paid on a REJECTED intent
-    and later opens book 0. Book it from the request transaction itself
-    (its `meta` shows the new account), not from the open that fills.
+- **A12. Hardening — L.** Done 2026-10-09 (in `history.md`).
 
 ### A16–A17. Code cleanup (owner, 2026-10-08)
 A pause in features to tidy the code: simpler usage and one clear job per
@@ -279,12 +252,40 @@ first (A16), then the strategy side (A17).
 - **A17. Strategy cleanup — M.** Done 2026-10-08 (in `history.md`).
 - **A17b. Strategy cleanup, second pass — S.** Done 2026-10-08 (in `history.md`).
 
+### A18–A22. The backlog, in order (owner, 2026-10-09)
+Fixes first, then cleanup, then features. The service entrypoint and manual
+trades (goal 2) stay in the backlog. Each item writes its full design here
+before the code (`/phase`).
+
+- **A18. Borrow rate of a short — S.** Done 2026-10-09 (in `history.md`).
+- **A19. Token account rent in replays — S.** Done 2026-10-09 (in `history.md`).
+- **A20. Perps cleanup from the A12 reviews — M.** Done 2026-10-09 (in `history.md`).
+- **A21. One round trip per `connect` tick — S.** Today a tick is a `price`
+  op (two for a pair without a stable quote) plus a `bucket` op, and a fill
+  adds another `bucket`. A `tick` op answers with the token's and the quote
+  token's USD prices (the hub's, `StalePriceError` as today) and the bucket
+  snapshot in one reply; `HubMarketData` and `TradeClient` share it, and the
+  pair division (`market_for`) stays on the strategy side. The submit reply
+  carries the snapshot after the fill. `price` and `bucket` stay for the
+  warm-up and tests. Wire change: restart them together. Tests: one round
+  trip per tick against a real `TradeRunner`; the live runner suite.
+- **A22. Crossovers in specs — M.** An indicator can look back: in `expr`,
+  `NAME(window, back)` is the indicator `back` closed bars ago (0–50,
+  default 0; `IndicatorBank.get` takes the shift, the lookback grows by it),
+  so a cross is `ema(9) > ema(21) and ema(9, 1) <= ema(21, 1)`. Two typed
+  blocks for the common case: `ma_crosses_above {fast, slow, kind}` and
+  `ma_crosses_below` (true on the tick the fast average moves to the other
+  side of the slow one; four places, as AGENTS.md says). The ids of
+  existing specs don't change (new types; an `expr` without the second
+  argument renders as before). Tests: the cross fires once per cross in a
+  backtest, the shifted value matches the indicator on the shorter series,
+  `docs/specs.md` rows.
+
 ### Backlog (numbered when scheduled)
-- One round trip per `connect` tick (old B10 C7).
-- A service entrypoint (systemd, Docker or a Windows service).
-- Crossovers in specs (an `expr` only compares levels on the current bar).
-- Rent of new token accounts in replays.
-- Manual trades (goal 2), with a wallet treasury.
+- A service entrypoint (systemd, Docker or a Windows service): kept here by
+  the owner on 2026-10-09.
+- Manual trades (goal 2), with a wallet treasury: deferred again on
+  2026-10-09.
 
 ## 5. Progress
 
@@ -306,11 +307,16 @@ first (A16), then the strategy side (A17).
 | A11a Perps: requests built and simulated | done | 2026-10-07; in `history.md` |
 | A11b Perps: requests sent, first real run | short done, long waiting for the owner | Built 2026-10-07; run 1 (short) 2026-10-08: clean, findings F1-F5 in §4 |
 | A11c Perp run 1 fixes | done | 2026-10-08; in `history.md` |
-| A12 Perps: hardening | open | |
+| A12 Perps: hardening | done | 2026-10-09; in `history.md` (all of it, perp resolving included: owner) |
 | A16 Execution cleanup | done | 2026-10-08; in `history.md` |
 | A16b Execution cleanup, second pass | done | 2026-10-08; in `history.md` |
 | A17 Strategy cleanup | done | 2026-10-08; in `history.md` |
 | A17b Strategy cleanup, second pass | done | 2026-10-08; in `history.md` |
+| A18 Borrow rate of a short | done | 2026-10-09; in `history.md` |
+| A19 Token account rent in replays | done | 2026-10-09; in `history.md` |
+| A20 Perps cleanup from the A12 reviews | done | 2026-10-09; in `history.md` |
+| A21 One round trip per `connect` tick | open | |
+| A22 Crossovers in specs | open | |
 
 ## 6. Known issues and limitations
 
@@ -342,18 +348,19 @@ first (A16), then the strategy side (A17).
   owner moves or deletes the file;
   `.claude/scripts/ledger_dump.py` prints it read-only.
 - **Replays** measure fees on Jupiter now (or take flags), not at the time of
-  the candles; the rent of a token account is not modelled. The network
+  the candles. The rent of a token account is paid on the first buy and
+  refunded only if the replay ends flat (A19). The network
   fee is a fixed USD amount per leg. The live vs
   backtest comparison assumes the bucket started the window flat with its
   whole budget.
 - **Paper perps are a model** (A8, and the backtest, A9): the spot price stands in for the
-  venue oracle (the Doves price is read, not used yet: A12), borrow is
+  venue oracle (real opens refuse a Doves price older than 30 s, A12), borrow is
   Jupiter's live rate when the position opens (A10; the backtest takes
   `--borrow-bps-hour`), kept for the life of the position while the real one
   moves with utilization, and the impact fee is linear. A liquidation is only seen while a
-  `connect` has its bucket open. A perp intent left EXECUTING blocks the mode
-  until the owner checks (no send log until A11). Sells close the whole
-  position (partial closes: A12).
+  `connect` has its bucket open. A perp intent left EXECUTING is resolved from its
+  logged send like a swap (A12). A partial close or a top-up resolved after a
+  crash takes the price of the oracle at resolution, not the keeper's.
 - **One tick per second** from the hub: conditions that count ticks, like
   `random_chance`, fire at a steady rate.
 - **The daily report needs Telegram**; without it the day is still marked as
@@ -403,9 +410,9 @@ Moved here from `perps.md` on 2026-10-05; the owner's decisions are from
 One perp market per spec, one direction per spec (`long` or `short`), one
 position per bucket. Market entry and exit; spec-level stops and exits as
 today, plus a stop the venue holds on-chain (D7). Paper, backtest, then real
-on one venue. Out of scope: flipping direction in a bucket, changing
-collateral of an open position, limit orders, cross-margin, several venues,
-funding-rate strategies.
+on one venue. Out of scope: flipping direction in a bucket, limit orders,
+cross-margin, several venues, funding-rate strategies. Adding collateral to
+an open position came in with A12 (owner, 2026-10-09).
 
 ### 8.2 Perps in one page
 
@@ -589,3 +596,10 @@ Decisions up to 2026-10-04 are in [`history.md`](history.md).
 - **2026-10-08 (owner):** the duplicated signature-status reading that A16b
   left alone goes into A12 (its last bullet). A16, A16b and A17 stay
   uncommitted for now.
+- **2026-10-09 (owner, A12):** A12 takes everything listed under it in one
+  item, partial closes and adding collateral included (so §8.1 no longer
+  lists changing the collateral of an open position as out of scope), and
+  the A3 resolver learns perp intents.
+- **2026-10-09 (owner):** the backlog becomes A18–A22, fixes first, then
+  cleanup, then features. The service entrypoint stays in the backlog and
+  manual trades (goal 2) stay deferred.

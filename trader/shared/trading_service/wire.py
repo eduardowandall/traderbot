@@ -52,7 +52,12 @@ def position_to_dict(position: Position | None) -> dict | None:
     if position is None:
         return None
     # o lado vai na ordem de entrada (`Order.perp`, A8)
-    return {"entry": _order(position.entry_order), "exit": _order(position.exit_order)}
+    return {
+        "entry": _order(position.entry_order),
+        "exit": _order(position.exit_order),
+        "partial_sells": position.partial_sells,  # A20
+        "top_ups": position.top_ups,
+    }
 
 
 def position_from_dict(data: dict | None) -> Position | None:
@@ -60,7 +65,12 @@ def position_from_dict(data: dict | None) -> Position | None:
         return None
     entry = _order_back(data["entry"])
     assert entry is not None
-    return Position(entry, _order_back(data.get("exit")))
+    return Position(
+        entry,
+        _order_back(data.get("exit")),
+        partial_sells=data.get("partial_sells", 0),
+        top_ups=data.get("top_ups", 0),
+    )
 
 
 def snapshot_to_dict(s: BucketSnapshot) -> dict:

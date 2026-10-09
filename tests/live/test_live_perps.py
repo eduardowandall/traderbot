@@ -22,13 +22,20 @@ from trader.execution.market.perps.reader import (
     JLP_POOL,
     SHORT_COLLATERAL,
     JupiterPerpsReader,
+    position_address,
 )
 from trader.execution.models.perp import PerpTerms
 from trader.execution.trade.venues.jupiter_perps.requests import (
+    USDC as USDC_PUBKEY,
+)
+from trader.execution.trade.venues.jupiter_perps.requests import (
+    Part,
     build_transaction,
+    cancel_request,
     close_request,
     open_request,
     stop_request,
+    token_account,
 )
 from trader.shared.models.direction import Direction
 from trader.shared.models.mints import SOL_MINT
@@ -55,6 +62,14 @@ def test_the_pool_and_the_sol_custody_still_decode():
     # o modelo do paper cobra 0.06% em cada ponta: se mudar, avisa
     assert (custody.open_fee_bps, custody.close_fee_bps) == (6, 6)
     assert 0 < custody.utilization < 1
+    assert Decimal(0) < custody.borrow_bps_hour < Decimal(10)
+
+
+def test_the_usdc_custody_a_short_borrows_from_decodes():
+    # A18: um vendido toma USDC emprestado; a taxa dessa custody é a dele
+    custody = _read(lambda reader: reader.custody(SHORT_COLLATERAL))
+    assert custody.decimals == 6
+    assert 0 <= custody.utilization < 1
     assert Decimal(0) < custody.borrow_bps_hour < Decimal(10)
 
 
@@ -100,16 +115,8 @@ EXCHANGE_WALLET = Pubkey.from_string("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuA
 
 async def _open_short_owner(reader) -> Pubkey | None:
     """O dono de um vendido SOL aberto na Jupiter (para simular fechar/stop)."""
-    # `custody` e `collateralCustody` da Position (8 do discriminador + 2 chaves)
-    matches = [
-        (72, bytes(CUSTODIES[SOL_MINT])),
-        (104, bytes(CUSTODIES[SHORT_COLLATERAL])),
-    ]
-    addresses = (await reader.program_accounts("Position", matches))[:100]
-    for data in await reader.accounts(addresses):
-        raw = decode_account("Position", data)
-        if raw["sizeUsd"]:
-            return raw["owner"]
+    async for owner in _open_short_owners(reader):
+        return owner
     return None
 
 
@@ -160,3 +167,107 @@ def test_close_and_stop_requests_simulate_on_an_open_short():
     if units is None:
         pytest.skip("nenhum vendido SOL aberto na Jupiter agora")
     assert all(0 < u < 200_000 for u in units)
+
+
+# --- A12: fechar uma parte, colateral a mais, cancelar o stop ------------------
+
+
+async def _open_short_owners(reader, pages: int = 20):
+    """Donos de vendidos SOL abertos na Jupiter, de 100 em 100 contas (só
+    leitura; as contas fechadas ficam com tamanho 0 e são a maioria)."""
+    # `custody` e `collateralCustody` da Position (8 do discriminador + 2 chaves)
+    matches = [
+        (72, bytes(CUSTODIES[SOL_MINT])),
+        (104, bytes(CUSTODIES[SHORT_COLLATERAL])),
+    ]
+    addresses = await reader.program_accounts("Position", matches)
+    for start in range(0, min(len(addresses), pages * 100), 100):
+        for data in await reader.accounts(addresses[start : start + 100]):
+            raw = decode_account("Position", data)
+            if raw["sizeUsd"] > 10 * 10**6:  # uma posição de mais de 10 USD
+                yield raw["owner"]
+
+
+def test_a_partial_close_and_a_top_up_simulate_on_an_open_short():
+    async def work(reader):
+        price = (await reader.oracle_price(SOL_MINT)).price
+        terms = PerpTerms(SOL_MINT, Direction.SHORT, Decimal(2))
+        async for owner in _open_short_owners(reader):
+            usdc = await reader.token_amount(token_account(owner))
+            if usdc < 1_000_000:  # a simulação do aumento gasta 1 USDC dele
+                continue
+            position = await reader.position(owner, terms)
+            part = Part(position.size_usd / 4, position.collateral_usd / 4)
+            requests = (
+                close_request(owner, terms, price, Decimal("0.02"), "live-part", part),
+                open_request(
+                    owner,
+                    terms,
+                    1_000_000,
+                    Decimal(0),
+                    price,
+                    Decimal("0.02"),
+                    "live-add",
+                ),
+            )
+            return [
+                (await reader.simulate(bytes(build_transaction(owner, r, 20_000))))[0]
+                for r in requests
+            ]
+        return None
+
+    units = _read(work)
+    if units is None:
+        pytest.skip("nenhum vendido SOL aberto (com USDC na carteira) agora")
+    assert all(0 < u < 200_000 for u in units)
+
+
+async def _cancellable(reader):
+    """Um gatilho SOL em USDC aberto: (dono, termos, endereço), ou None."""
+    matches = [(72, bytes(CUSTODIES[SOL_MINT])), (136, bytes(USDC_PUBKEY))]
+    addresses = (await reader.program_accounts("PositionRequest", matches))[:100]
+    for address, data in zip(addresses, await reader.accounts(addresses), strict=True):
+        raw = decode_account("PositionRequest", data)
+        side = Direction.LONG if raw["side"] == "Long" else Direction.SHORT
+        terms = PerpTerms(SOL_MINT, side, Decimal(2))
+        trigger = raw["requestType"] == "Trigger" and not raw["executed"]
+        # a mesma posição que o venue deriva (colateral da mesma custody)
+        if trigger and position_address(raw["owner"], terms) == raw["position"]:
+            return raw["owner"], terms, address
+    return None
+
+
+def test_a_leftover_trigger_request_cancels_on_mainnet():
+    # o stop de alguém: cancelá-lo, simulado como o dono (nada é enviado)
+    async def work(reader):
+        found = await _cancellable(reader)
+        if found is None:
+            return None
+        owner, terms, address = found
+        tx = build_transaction(owner, cancel_request(owner, terms, address), 20_000)
+        return (await reader.simulate(bytes(tx)))[0]
+
+    units = _read(work)
+    if units is None:
+        pytest.skip("nenhum gatilho SOL em USDC aberto na Jupiter agora")
+    assert 0 < units < 200_000
+
+
+def test_an_open_position_owes_a_sane_borrow():
+    # A12: o empréstimo devido (acumulado da custody - o da posição) que o
+    # `held` do venue real tira do colateral
+    async def work(reader):
+        # um vendido toma USDC emprestado: a custody do colateral
+        custody = await reader.custody(SHORT_COLLATERAL)
+        terms = PerpTerms(SOL_MINT, Direction.SHORT, Decimal(2))
+        async for owner in _open_short_owners(reader):
+            position = await reader.position(owner, terms)
+            if position is not None:
+                return position, position.borrow_usd(custody)
+        return None
+
+    found = _read(work)
+    if found is None:
+        pytest.skip("nenhum vendido SOL aberto na Jupiter agora")
+    position, owed = found
+    assert 0 <= owed < position.collateral_usd

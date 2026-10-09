@@ -31,6 +31,7 @@ from tenacity import (
 )
 
 from trader.execution.market.jupiter.logging_utils import logger_wrapper
+from trader.execution.models.intent import TxOutcome
 from trader.execution.trade.venues.jupiter.tx_inspection import (
     WalletState,
     token_amount,
@@ -65,6 +66,26 @@ class TransactionFailedError(Exception):
     """A transação foi processada pela rede, mas falhou (status.err)."""
 
 
+def tx_outcome(status) -> TxOutcome:
+    """O status de uma assinatura (`signature_status`), em Confirmed.
+
+    A única leitura de um status (A12): a espera depois do envio e a
+    resolução de uma intenção (A3) usam esta. Transações que falham também
+    são confirmadas no bloco, então o erro vem antes. None (a rede ainda
+    não a viu) e Processed são PENDING.
+    """
+    if status is None:
+        return TxOutcome.PENDING
+    if status.err is not None:
+        return TxOutcome.FAILED
+    if status.confirmation_status in (
+        TransactionConfirmationStatus.Confirmed,
+        TransactionConfirmationStatus.Finalized,
+    ):
+        return TxOutcome.LANDED
+    return TxOutcome.PENDING
+
+
 @dataclass(frozen=True)
 class TokenAccount:
     """Uma conta de token da carteira, lida pelo endereço."""
@@ -84,6 +105,30 @@ class SignedTx:
     @property
     def signature(self) -> str:
         return str(self.tx.signatures[0])
+
+
+def resign(
+    instructions: list[Instruction], keypair: Keypair, like: SignedTx
+) -> SignedTx:
+    """As instruções assinadas de novo com o blockhash de `like` (A12).
+
+    Local, sem rede: o limite de unidades muda depois da simulação, e a
+    transação final vale até a mesma altura de bloco.
+    """
+    blockhash = like.tx.message.recent_blockhash
+    return _signed(instructions, keypair, blockhash, like.last_valid_block_height)
+
+
+def _signed(
+    instructions: list[Instruction],
+    keypair: Keypair,
+    blockhash,
+    last_valid_block_height: int,
+) -> SignedTx:
+    """Uma transação nossa compilada e assinada pela carteira (que paga)."""
+    message = MessageV0.try_compile(keypair.pubkey(), instructions, [], blockhash)
+    tx = VersionedTransaction(message, [keypair])
+    return SignedTx(tx, last_valid_block_height)
 
 
 class AsyncRPCClient:
@@ -126,32 +171,17 @@ class AsyncRPCClient:
         return None
 
     @logger_wrapper
-    async def check_signature_is_confirmed(self, signature) -> bool:
-        result = await self.client.get_signature_statuses([signature])
-        status = result.value[0]
+    async def signature_status(self, signature, history: bool = False):
+        """O status da assinatura, ou None se a rede não a viu (`tx_outcome`).
 
-        if status is None:
-            # ainda não visível para o RPC
-            return False
-        # transações que falham também são incluídas no bloco (e confirmadas),
-        # por isso o erro precisa ser checado antes do status de confirmação
-        if status.err is not None:
-            raise TransactionFailedError(f"Transação falhou: {status.err}")
-        return status.confirmation_status in [
-            TransactionConfirmationStatus.Confirmed,
-            TransactionConfirmationStatus.Finalized,
-        ]
-
-    @logger_wrapper
-    @_READ_RETRY
-    async def signature_status(self, signature: str):
-        """O status da assinatura (busca no histórico), ou None se a rede não a viu.
-
-        Para resolver uma intenção depois (A3): o nó pode já ter esquecido o
-        status recente, por isso `search_transaction_history`.
+        `history`: busca no histórico, para resolver uma intenção depois (A3):
+        o nó pode já ter esquecido o status recente. A espera depois de um
+        envio não re-tenta aqui: quem espera já consulta de novo.
         """
+        if isinstance(signature, str):
+            signature = Signature.from_string(signature)
         result = await self.client.get_signature_statuses(
-            [Signature.from_string(signature)], search_transaction_history=True
+            [signature], search_transaction_history=history
         )
         return result.value[0]
 
@@ -168,11 +198,12 @@ class AsyncRPCClient:
     ) -> SignedTx:
         """Uma transação nossa (não da Jupiter), paga e assinada pela carteira."""
         latest = await self.client.get_latest_blockhash()
-        message = MessageV0.try_compile(
-            keypair.pubkey(), instructions, [], latest.value.blockhash
+        return _signed(
+            instructions,
+            keypair,
+            latest.value.blockhash,
+            latest.value.last_valid_block_height,
         )
-        tx = VersionedTransaction(message, [keypair])
-        return SignedTx(tx, latest.value.last_valid_block_height)
 
     @logger_wrapper
     async def sign_transaction(

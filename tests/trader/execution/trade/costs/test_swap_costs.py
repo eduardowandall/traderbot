@@ -5,7 +5,7 @@ from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import inspection_passes, signs
+from factories import confirms, inspection_passes, signs
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
@@ -276,9 +276,7 @@ class TestFetchSwapCosts:
         provider.executor.rpc_client.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
-            return_value=True
-        )
+        confirms(provider.executor.rpc_client)
         provider.executor.rpc_client.get_confirmed_transaction = AsyncMock(
             side_effect=RuntimeError("boom")
         )

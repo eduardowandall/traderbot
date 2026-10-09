@@ -134,18 +134,21 @@ class SimulatedWallet:
         record: dict | None,
         moves: dict[str, int],
         signature: str | None = None,
+        amend: bool = False,
     ) -> None:
         """Abre (`record`) ou fecha (None) a posição `key` e move os saldos.
 
         `moves`: mint -> raw (negativo debita). Como `apply_swap`: sob o lock,
         relê, confere o saldo, grava e só então muda a memória. Abrir uma
         posição que já existe, ou fechar uma que não existe, é recusado.
+        `amend` (A12): troca o registro de uma posição aberta (parte fechada,
+        colateral a mais, o stop).
         """
         with _file_lock(self.path):
             self._read()
-            if (key in self._perps) == (record is not None):
-                state = "já existe" if record is not None else "não existe"
-                raise InsufficientFundsError(f"posição perp {key} {state}")
+            refusal = self._perp_refusal(key, record, amend)
+            if refusal:
+                raise InsufficientFundsError(f"posição perp {key} {refusal}")
             raw = self._moved(moves)
             perps = {k: v for k, v in self._perps.items() if k != key}
             if record is not None:
@@ -154,6 +157,14 @@ class SimulatedWallet:
             if signature is not None:
                 logged = self._logged(signature, 0, 0, -moves.get(SOL_MINT, 0), 0)
             self._commit(raw=raw, perps=perps, logged=logged)
+
+    def _perp_refusal(self, key: str, record: dict | None, amend: bool) -> str | None:
+        exists = key in self._perps
+        if amend:
+            return None if exists and record is not None else "não existe"
+        if exists == (record is not None):
+            return "já existe" if exists else "não existe"
+        return None
 
     def _moved(self, moves: dict[str, int]) -> dict[str, int]:
         raw = dict(self._raw)

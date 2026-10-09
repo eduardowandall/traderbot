@@ -33,6 +33,7 @@ from trader.execution.trade.policy import (
 )
 from trader.shared.models.costs import FailedTxFee, PnLResult
 from trader.shared.models.order import Order
+from trader.shared.models.position import Position
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +62,18 @@ class AccountState:
 
     realized_usd: Decimal
     totals: AccountPnL
-    open_entry: Order | None = None  # ordem de compra da posição aberta
+    # a posição aberta, com as contagens desde a entrada (A20)
+    open_position: Position | None = None
     entry_intent_id: str | None = None
     # para a estratégia retomar cooldown/rearme e a validade (`ttl_days`)
     opened_at: datetime | None = None  # abertura da conta (`bucket_opened`)
     last_exit_at: datetime | None = None  # última venda executada
     last_exit_price: Decimal | None = None  # preço dela (`below_last_exit`)
+
+    @property
+    def open_entry(self) -> Order | None:
+        """A ordem de entrada da posição aberta."""
+        return None if self.open_position is None else self.open_position.entry_order
 
 
 class TradeGateway:
@@ -120,13 +127,17 @@ class TradeGateway:
 
     def restore(self, account_id: str) -> AccountState:
         """PnL e posição aberta da conta, para reconstruir após reinício."""
-        entry, entry_intent_id = self.ledger.open_entry(account_id) or (None, None)
+        position, entry_intent_id = self.ledger.open_position(account_id) or (
+            None,
+            None,
+        )
+        entry = position and position.entry_order
         opened_at, last_exit_at = self.ledger.account_times(account_id)
         totals = self.ledger.pnl_totals(account_id)
         return AccountState(
             realized_usd=totals.net_usd,
             totals=totals,
-            open_entry=entry,
+            open_position=position,
             entry_intent_id=entry_intent_id,
             opened_at=opened_at,
             last_exit_at=None if entry else last_exit_at,

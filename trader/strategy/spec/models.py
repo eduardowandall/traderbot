@@ -387,12 +387,30 @@ class Entry(_Block):
     conditions: Annotated[list[EntryCondition], Field(min_length=1, max_length=8)]
 
 
+class Partial(_Block):
+    """Uma saída parcial (A12): vende `pct`% da entrada quando `conditions`
+    valem (`mode`), uma vez por posição, se o stop e a saída inteira não
+    dispararam no mesmo tick."""
+
+    pct: Annotated[
+        Decimal,
+        Field(gt=0, lt=100),
+        WithJsonSchema(
+            {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 100}
+        ),
+    ]
+    mode: Mode = "any"
+    conditions: Annotated[list[ExitCondition], Field(min_length=1, max_length=8)]
+
+
 class Exit(_Block):
     # o stop é obrigatório e sempre combinado com OU: `mode` vale só para
     # `conditions`, então `mode: all` nunca desliga a proteção
     stop: Stop
     mode: Mode = "any"
     conditions: Annotated[list[ExitCondition], Field(max_length=8)] = []
+    # fora do `canonical_json` quando None: os ids não mudam
+    partial: Partial | None = None
 
 
 class FixedUsd(_Block):
@@ -516,7 +534,13 @@ class StrategySpec(_Block):
         return expiry(self.expires_at, self.ttl_days, start)
 
     def conditions(self) -> list[_Block]:
-        return [*self.entry.conditions, self.exit.stop, *self.exit.conditions]
+        partial = self.exit.partial.conditions if self.exit.partial else []
+        return [
+            *self.entry.conditions,
+            self.exit.stop,
+            *self.exit.conditions,
+            *partial,
+        ]
 
     def lookback(self) -> int:
         """Barras mínimas para todas as condições terem valor."""
@@ -535,8 +559,8 @@ class StrategySpec(_Block):
         """
         # um campo novo com valor padrão fica de fora: os ids antigos valem
         omit = METADATA_FIELDS | ({"market"} if self.market is None else set())
-        data = _canonical(self.model_dump(mode="python", exclude=omit))
-        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+        data = _without_unset(self.model_dump(mode="python", exclude=omit))
+        return json.dumps(_canonical(data), sort_keys=True, separators=(",", ":"))
 
     def spec_id(self) -> str:
         """Id pelo conteúdo: a mesma spec (mesmo com `3` vs `3.0`) gera o mesmo id."""
@@ -559,6 +583,18 @@ class StrategySpec(_Block):
             stop_pct=self.exit.stop.pct if self.market else None,
             max_hold_minutes=self.max_hold_minutes() if self.market else None,
         )
+
+
+# blocos opcionais dentro de outros (A12): sem valor, ficam fora do id
+_OPTIONAL_INNER = (("exit", "partial"), ("market", "add_collateral"))
+
+
+def _without_unset(data: dict) -> dict:
+    for parent, key in _OPTIONAL_INNER:
+        block = data.get(parent)
+        if isinstance(block, dict) and block.get(key) is None:
+            block.pop(key, None)
+    return data
 
 
 def _canonical(value: Any) -> Any:

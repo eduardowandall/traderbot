@@ -8,16 +8,17 @@ componentes já montados.
 
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from trader.execution.market.perps.reader import JupiterPerpsReader
+from trader.execution.market.perps.feed import PerpsFeed
 from trader.execution.market.prices import JupiterPriceOracle, PriceOracle
 from trader.execution.models.mode import RunningMode
 from trader.execution.models.venue import PerpVenue
 from trader.execution.trade.gateway import TradeGateway
-from trader.execution.trade.policy import load_policy
+from trader.execution.trade.policy import Policy, load_policy
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
 from trader.execution.trade.venues.jupiter.provider import (
@@ -66,54 +67,48 @@ def open_paper_wallet(
     return wallet
 
 
-def build_provider(
+@dataclass(frozen=True)
+class _Venues:
+    """O que o modo decide: onde os swaps e as perps executam, e os preços."""
+
+    provider: AsyncJupiterProvider
+    prices: PriceOracle
+    perps: PerpVenue | None
+
+
+def _venues(
     mode: RunningMode,
-    max_priority_fee_lamports: int,  # da política do modo
-    on_wallet_created: Callable[[str], None] = lambda message: None,
-    wallet: SimulatedWallet | None = None,  # paper: a carteira já aberta
-    **limits,
-) -> AsyncJupiterProvider:
-    """Provider real (com chave) ou paper (carteira simulada, sem chave).
+    policy: Policy,
+    prices: PriceOracle | None,
+    on_wallet_created: Callable[[str], None],
+    limits: dict,
+) -> _Venues:
+    """Um ramo por modo (A12): o provider spot e o venue de perps juntos.
 
-    Os dois conferem cada quote contra a Price API (`max_quote_deviation_pct`).
-    O teto da priority fee vai para a Jupiter no real e é cobrado inteiro em
-    paper, por perna.
+    Paper: a carteira simulada para os dois, a taxa de empréstimo ao vivo
+    (A10). Real: a chave no provider; as perps, no mesmo executor (um caminho
+    de envio só), só com `perps_enabled` (A11b). Os dois conferem cada quote
+    contra a Price API (`max_quote_deviation_pct`); o teto da priority fee
+    vai para a Jupiter no real e é cobrado inteiro em paper, por envio.
     """
-    limits.setdefault("max_quote_deviation_pct", DEFAULT_MAX_QUOTE_DEVIATION_PCT)
+    fee_cap = policy.max_priority_fee_lamports
+    limits = {"max_quote_deviation_pct": DEFAULT_MAX_QUOTE_DEVIATION_PCT} | limits
     if mode == RunningMode.PAPER:
-        return paper_provider(
-            wallet or open_paper_wallet(on_wallet_created),
-            priority_fee_lamports=max_priority_fee_lamports,
-            **limits,
+        wallet = open_paper_wallet(on_wallet_created)
+        provider = paper_provider(wallet, priority_fee_lamports=fee_cap, **limits)
+        prices = prices or JupiterPriceOracle(provider.jupiter_client)
+        perps = SimulatedPerpsVenue(
+            wallet, prices, priority_fee_lamports=fee_cap, borrow_rates=PerpsFeed()
         )
-    return AsyncJupiterProvider.on_chain(
-        keypair=keypair_from_env(),
-        max_priority_fee_lamports=max_priority_fee_lamports,
-        **limits,
+        return _Venues(provider, prices, perps)
+    provider = AsyncJupiterProvider.on_chain(
+        keypair=keypair_from_env(), max_priority_fee_lamports=fee_cap, **limits
     )
-
-
-def _perps_venue(
-    provider: AsyncJupiterProvider,
-    wallet: SimulatedWallet | None,
-    prices: PriceOracle,
-    enabled: bool,
-    fee_cap: int,
-) -> PerpVenue | None:
-    """O venue de perps do modo: o paper na carteira simulada (A8, com a taxa
-    de empréstimo ao vivo, A10); o real só com `perps_enabled` (A11b)."""
-    if wallet is not None:
-        return SimulatedPerpsVenue(
-            wallet,
-            prices,
-            priority_fee_lamports=fee_cap,
-            borrow_rates=JupiterPerpsReader(),
-        )
+    prices = prices or JupiterPriceOracle(provider.jupiter_client)
     executor = provider.executor
-    if not enabled or not isinstance(executor, OnChainExecutor):
-        return None
-    # a chave fica no executor do spot: um caminho de envio só
-    return JupiterPerpsVenue(executor, JupiterPerpsReader(), provider, fee_cap)
+    if not policy.perps_enabled or not isinstance(executor, OnChainExecutor):
+        return _Venues(provider, prices, None)
+    return _Venues(provider, prices, JupiterPerpsVenue(executor, PerpsFeed(), provider))
 
 
 def build_trade_service(
@@ -132,18 +127,14 @@ def build_trade_service(
     ledger do gateway.
     """
     policy = load_policy(mode=str(mode))
-    fee_cap = policy.max_priority_fee_lamports
-    wallet = open_paper_wallet(on_wallet_created) if mode == RunningMode.PAPER else None
-    provider = build_provider(mode, fee_cap, on_wallet_created, wallet, **limits)
-    prices = prices or JupiterPriceOracle(provider.jupiter_client)
-    provider.usd_prices = prices.usd_prices
+    venues = _venues(mode, policy, prices, on_wallet_created, limits)
+    venues.provider.usd_prices = venues.prices.usd_prices
     gateway = TradeGateway.for_mode(mode, policy)  # política + ledger do modo
-    perps = _perps_venue(provider, wallet, prices, policy.perps_enabled, fee_cap)
     return TradeService(
-        SpotVenue(provider),
+        SpotVenue(venues.provider),
         gateway,
         mode=str(mode),
-        prices=prices,
+        prices=venues.prices,
         notifier=notifier,
-        perps=perps,
+        perps=venues.perps,
     )

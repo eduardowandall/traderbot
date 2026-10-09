@@ -271,3 +271,34 @@ class TestBacktest:
         spec_logs = [r for r in caplog.records if r.name.startswith("trader.strategy")]
         assert spec_logs == []
         assert spec_logger.level == before  # o nível volta depois do replay
+
+
+class TestPartialExit:
+    """`exit.partial` (A12): uma parte da posição, uma vez por posição."""
+
+    EXIT = {
+        "stop": {"type": "stop_loss", "pct": 5},
+        "conditions": [{"type": "take_profit", "pct": 10}],
+        "partial": {"pct": 25, "conditions": [{"type": "take_profit", "pct": 2}]},
+    }
+
+    def test_it_sells_its_share_once_and_the_full_exit_still_wins(self):
+        strategy, clock = _strategy(exit=self.EXIT)
+        position = _position("100", quantity="0.4")
+        assert _tick(strategy, clock, "101", position) is None
+
+        signal = _fire(strategy, clock, "103", position)
+
+        assert signal.side == OrderSide.SELL and signal.quantity == Decimal("0.1")
+        assert signal.rationale and "partial25%" in signal.rationale
+        # a posição que já teve uma venda parcial (A20) não reduz de novo
+        reduced = _position("100", quantity="0.3")
+        reduced.partial_sells = 1
+        assert _tick(strategy, clock, "103", reduced) is None
+        full = _fire(strategy, clock, "111", reduced)  # o take_profit inteiro
+        assert full.quantity == Decimal("0.3")
+
+    def test_the_stop_comes_before_the_partial(self):
+        strategy, clock = _strategy(exit=self.EXIT)
+        signal = _fire(strategy, clock, "94", _position("100", quantity="0.4"))
+        assert signal.quantity == Decimal("0.4")

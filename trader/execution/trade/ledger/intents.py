@@ -17,6 +17,8 @@ from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     ACTIVE_STATUSES,
     MOVED_FUNDS_STATUSES,
+    POSITION_SIDES,
+    TRADE_SIDES,
     IntentRecord,
     IntentSide,
     IntentStatus,
@@ -305,7 +307,10 @@ class IntentStore(LedgerStore):
 
     def sends_of(self, intent_id: str) -> list[SentTx]:
         """Os envios gravados da intenção, na ordem das tentativas."""
-        return [SentTx(**payload) for payload in self._payloads(INTENT_SENT, intent_id)]
+        return [
+            SentTx.from_payload(payload)
+            for payload in self._payloads(INTENT_SENT, intent_id)
+        ]
 
     def has_send_log(self, intent_id: str) -> bool:
         """A intenção é de uma versão que grava todo envio antes de enviar."""
@@ -347,7 +352,8 @@ class IntentStore(LedgerStore):
         return [r["account"] for r in rows]
 
     def legs_since_last_buy(self, account: str) -> list[IntentRecord]:
-        """A última compra executada da conta e as vendas depois dela.
+        """A última compra executada da conta e as pernas depois dela (vendas e
+        colateral a mais, A12; não as ordens no venue).
 
         Pela ordem de criação: `updated_at` muda depois (a ordem gravada), e
         não pode reordenar as pernas.
@@ -361,12 +367,11 @@ class IntentStore(LedgerStore):
             return []
         rows = self.conn.execute(
             "SELECT * FROM intents WHERE account = ? AND status = ? "
-            "AND side IN (?, ?) AND created_at >= ? ORDER BY created_at, rowid",
+            "AND side IN (?, ?, ?) AND created_at >= ? ORDER BY created_at, rowid",
             (
                 account,
                 str(IntentStatus.EXECUTED),
-                str(IntentSide.BUY),
-                str(IntentSide.SELL),
+                *map(str, POSITION_SIDES),
                 buy["created_at"],
             ),
         ).fetchall()
@@ -375,12 +380,13 @@ class IntentStore(LedgerStore):
     def executed_between(
         self, account: str, start: datetime, end: datetime
     ) -> list[IntentRecord]:
-        """Pernas executadas da conta criadas em `[start, end)`, em ordem."""
+        """Compras e vendas executadas da conta criadas em `[start, end)`, em
+        ordem (colateral a mais e ordens no venue não são trades, A12)."""
         window, params = _window("created_at", start, end)
         rows = self.conn.execute(
-            f"SELECT * FROM intents WHERE account = ? AND status = ?{window} "
-            "ORDER BY created_at, rowid",
-            (account, str(IntentStatus.EXECUTED), *params),
+            f"SELECT * FROM intents WHERE account = ? AND status = ? "
+            f"AND side IN (?, ?){window} ORDER BY created_at, rowid",
+            (account, str(IntentStatus.EXECUTED), *map(str, TRADE_SIDES), *params),
         ).fetchall()
         return [_record(r) for r in rows]
 

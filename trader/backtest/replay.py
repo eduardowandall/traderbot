@@ -23,6 +23,7 @@ mínima -> máxima -> fechamento), então o extremo contra a posição é visto.
 """
 
 import logging
+import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -32,13 +33,18 @@ from decimal import ROUND_CEILING, Decimal
 from trader.backtest.ticks import Tick
 from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.execution import ExecutionResult
+from trader.execution.models.intent import SentTx
 from trader.execution.models.perp import PerpTerms
+from trader.execution.models.rent import RentRefund
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.trading_service.service import TradeService
 from trader.execution.trade.venues.jupiter.provider import (
     AsyncJupiterProvider,
 )
-from trader.execution.trade.venues.paper.executor import SimulatedExecutor
+from trader.execution.trade.venues.paper.executor import (
+    DEFAULT_ACCOUNT_RENT_LAMPORTS,
+    SimulatedExecutor,
+)
 from trader.execution.trade.venues.paper.perps import (
     DEFAULT_BORROW_BPS_HOUR,
     SimulatedPerpsVenue,
@@ -48,6 +54,7 @@ from trader.execution.trade.venues.spot import SpotVenue
 from trader.shared.indicators import to_utc
 from trader.shared.models import SOLANA_MINTS, Mint, Order, OrderSide, TickerData
 from trader.shared.models.costs import (
+    BASE_FEE_LAMPORTS,
     BPS,
     LAMPORTS_PER_SOL,
     REPLAY,
@@ -55,6 +62,7 @@ from trader.shared.models.costs import (
     TradeCosts,
 )
 from trader.shared.models.mints import SOL_MINT
+from trader.shared.models.perp import PerpFill
 from trader.shared.trading_service.protocol import BucketSnapshot, OrderRequest
 from trader.strategy.bot.config import Strategy
 from trader.strategy.bot.decision import bucket_done, order_for
@@ -72,16 +80,28 @@ STRATEGY_LOGGERS = ("trader.strategy.spec",)
 
 
 @contextmanager
-def quiet_strategy_logs() -> Iterator[None]:
-    loggers = [logging.getLogger(name) for name in STRATEGY_LOGGERS]
+def _quieted(names: Sequence[str], level: int) -> Iterator[None]:
+    loggers = [logging.getLogger(name) for name in names]
     previous = [lg.level for lg in loggers]
     for lg in loggers:
-        lg.setLevel(logging.WARNING)
+        lg.setLevel(level)
     try:
         yield
     finally:
-        for lg, level in zip(loggers, previous, strict=True):
-            lg.setLevel(level)
+        for lg, before in zip(loggers, previous, strict=True):
+            lg.setLevel(before)
+
+
+def quiet_strategy_logs():
+    return _quieted(STRATEGY_LOGGERS, logging.WARNING)
+
+
+# o fim de todo replay sem posição encerra o bucket e fecha a conta do token
+# (A19): avisos do serviço que ao vivo importam, aqui são rotina
+CLOSING_LOGGERS = (
+    "trader.execution.trade.trading_service.service",
+    "trader.execution.trade.trading_service.rent",
+)
 
 
 class ReplayQuoteClient:
@@ -166,6 +186,10 @@ class ReplayPrices:
         return {mint: known[mint] for mint in mints if mint in known}
 
 
+# a assinatura do fechamento de uma conta no replay (A19)
+CLOSE_PREFIX = "replay-close-"
+
+
 class ReplayExecutor(SimulatedExecutor):
     """O executor do replay: o fill da quote e a taxa de rede como custo.
 
@@ -173,6 +197,10 @@ class ReplayExecutor(SimulatedExecutor):
     da perna (`network_fee_usd` ao SOL do replay), e o ledger a desconta do
     PnL como ao vivo. A carteira do replay não tem SOL: o executor soma as
     taxas em `fees_usd`, que o patrimônio desconta.
+
+    O rent da conta de um token (A19) também: a primeira compra dele o leva
+    em `rent_lamports`, e fechar a conta vazia no fim (`close_token_account`)
+    devolve o rent menos a taxa base, como o `serve` faz ao encerrar.
     """
 
     def __init__(
@@ -191,14 +219,61 @@ class ReplayExecutor(SimulatedExecutor):
         self.network_fee_usd = network_fee_usd
         self.sol_usd = sol_usd
         self.fees_usd = ZERO
+        # o rent pago e o devolvido (A19), em USD ao SOL de cada momento
+        self.rent_usd = ZERO
+        self.rent_refund_usd = ZERO
+        # o rent que esta carteira cobra ao abrir a conta de um token
+        self.rent_lamports = DEFAULT_ACCOUNT_RENT_LAMPORTS
 
     async def execute(
         self, input_mint: str, output_mint: str, quote: JupiterQuoteResponse
     ) -> ExecutionResult:
+        # antes do swap, que abre a conta
+        opens = self.wallet.needs_account(output_mint)
         result = await super().execute(input_mint, output_mint, quote)
         result, usd = with_network_fee(result, self.network_fee_usd, self.sol_usd())
         self.fees_usd += usd
-        return result
+        return self._with_rent(result) if opens else result
+
+    def _with_rent(self, result: ExecutionResult) -> ExecutionResult:
+        """A perna que abriu a conta do token paga o rent dela (A19)."""
+        costs = replace(
+            result.costs or TradeCosts(REPLAY), rent_lamports=self.rent_lamports
+        )
+        usd = self._usd(self.rent_lamports)
+        self.rent_usd += usd
+        self.fees_usd += usd
+        return replace(result, costs=costs)
+
+    def _usd(self, lamports: int) -> Decimal:
+        return Decimal(lamports) / LAMPORTS_PER_SOL * self.sol_usd()
+
+    async def close_token_account(
+        self, mint: str, announce: Callable[[SentTx], None]
+    ) -> RentRefund | None:
+        """Fecha a conta vazia do token: o rent volta, menos a taxa base.
+
+        Como a taxa de rede, o SOL fica fora da carteira do replay (o rent
+        nunca saiu dela): o líquido sai de `fees_usd`, que o patrimônio
+        desconta, e a taxa vem de `fetch_fee`, que o provider lê.
+        """
+        if self.wallet.needs_account(mint) or self.wallet.raw_balance(mint):
+            return None
+        signature = f"{CLOSE_PREFIX}{uuid.uuid4().hex}"
+        rent = self.rent_lamports
+        announce(SentTx(signature, mint, SOL_MINT, 0, rent))
+        if not self.wallet.close_account(mint, 0, 0, signature):
+            return None
+        net = self._usd(rent - BASE_FEE_LAMPORTS)
+        self.rent_refund_usd += net
+        self.fees_usd -= net
+        return RentRefund(signature, mint, rent)
+
+    async def fetch_fee(self, signature: str) -> int | None:
+        """O fechamento de uma conta paga a taxa base; o resto, a do registro."""
+        if signature.startswith(CLOSE_PREFIX):
+            return BASE_FEE_LAMPORTS
+        return await super().fetch_fee(signature)
 
 
 def with_network_fee(
@@ -249,9 +324,28 @@ class ReplayPerpsVenue(SimulatedPerpsVenue):
         )
 
     async def close_perp(
-        self, collateral_mint: str, terms: PerpTerms, key: str
+        self,
+        collateral_mint: str,
+        terms: PerpTerms,
+        key: str,
+        fraction: Decimal = ONE,
     ) -> ExecutionResult:
-        return self._charged(await super().close_perp(collateral_mint, terms, key))
+        return self._charged(
+            await super().close_perp(collateral_mint, terms, key, fraction)
+        )
+
+    async def add_collateral(
+        self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
+    ) -> ExecutionResult:
+        return self._charged(
+            await super().add_collateral(collateral_mint, terms, collateral, key)
+        )
+
+    async def place_stop(
+        self, terms: PerpTerms, fill: PerpFill, key: str
+    ) -> ExecutionResult:
+        # o stop do venue é um envio ao vivo (A12): paga a taxa de rede
+        return self._charged(await super().place_stop(terms, fill, key))
 
     async def _price(self, market_mint: str) -> Decimal:
         # o tick é o oráculo: sem a volta pelo `usd_snapshot` a cada tick
@@ -301,6 +395,10 @@ class BacktestResult:
     # do ledger do replay, como nos relatórios ao vivo
     round_trip_costs: RoundTripCosts = field(default_factory=RoundTripCosts)
     perp: PerpSummary | None = None  # None: spot
+    # o rent das contas de token que o replay abriu e o que voltou ao fechar
+    # (A19), em USD; os dois já estão no patrimônio e no PnL realizado
+    rent_usd: Decimal = Decimal(0)
+    rent_refund_usd: Decimal = Decimal(0)
 
     @property
     def return_pct(self) -> Decimal:
@@ -429,6 +527,7 @@ class Backtester:
                 break  # bucket encerrado e sem posição: ao vivo, o bot pararia
             run.track(self._equity(executor, perps, tick))
 
+        await self._close_flat(service)
         final = await service.get_bucket(self.symbol)
         return BacktestResult(
             symbol=self.symbol,
@@ -446,7 +545,19 @@ class Backtester:
             # o bucket do replay é o par (serviço sem modo)
             round_trip_costs=gateway.ledger.round_trip_costs(self.symbol),
             perp=self._perp_summary(run),
+            rent_usd=executor.rent_usd,
+            rent_refund_usd=executor.rent_refund_usd,
         )
+
+    async def _close_flat(self, service: TradeService) -> None:
+        """No fim, sem posição: o bucket encerra e a conta do token fecha, como
+        o `serve` faz quando a spec vence (A15, A19). Com posição (ou poeira
+        do token), a conta fica aberta, como ao vivo."""
+        if (await service.get_bucket(self.symbol)).position is not None:
+            return
+        with _quieted(CLOSING_LOGGERS, logging.ERROR):
+            service.retire(self.symbol, "fim do replay")
+            await service.close_token_account(self.symbol)
 
     def _perp_summary(self, run: _Run) -> PerpSummary | None:
         if self.perp is None:
@@ -522,7 +633,7 @@ class Backtester:
         """Uma perp aberta que o preço do tick liquida: vira um trade marcado."""
         if self.perp is None or snapshot.position is None:
             return False
-        order = (await service.check_liquidations()).get(self.symbol)
+        order = (await service.check_perps()).get(self.symbol)
         if order is None:
             return False
         await self._record(service, tick, snapshot, order, run)

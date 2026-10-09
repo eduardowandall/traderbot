@@ -14,7 +14,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from trader.execution.models.intent import IntentSide, IntentStatus
+from trader.execution.models.intent import (
+    POSITION_SIDES,
+    TRADE_SIDES,
+    IntentSide,
+    IntentStatus,
+)
 from trader.execution.models.perp import terms_from_json
 from trader.execution.trade.ledger.events import (
     DAILY_REPORT,
@@ -134,8 +139,8 @@ class Reports(LedgerStore):
         window, params = _window("created_at", start, end)
         for row in self.conn.execute(
             f"SELECT * FROM intents WHERE status = ? AND account = ?{window} "
-            "ORDER BY created_at",
-            (str(IntentStatus.EXECUTED), account, *params),
+            "AND side IN (?, ?, ?) ORDER BY created_at",
+            (str(IntentStatus.EXECUTED), account, *params, *map(str, POSITION_SIDES)),
         ):
             totals.add(row)
         add = {
@@ -163,6 +168,16 @@ class Reports(LedgerStore):
             (*types, account, *params),
         )
         return [(row["type"], json.loads(row["payload"])) for row in rows]
+
+    def last_event(self, type_: str, account: str) -> dict | None:
+        """O payload do último evento `type_` da conta (ex: o último stop do
+        venue que ela colocou, A12); None se nenhum."""
+        row = self.conn.execute(
+            "SELECT payload FROM events WHERE type = ? "
+            "AND json_extract(payload, '$.account') = ? ORDER BY id DESC LIMIT 1",
+            (type_, account),
+        ).fetchone()
+        return None if row is None else json.loads(row["payload"])
 
     def rent_payer(self, prefix: str, mint: str) -> str | None:
         """A conta cuja compra abriu a conta de token de `mint`, se ainda aberta.
@@ -212,10 +227,12 @@ class Reports(LedgerStore):
         totals = RoundTripCosts()
         window, params = _window("created_at", None, end)
         entry = None
+        # só compras e vendas: o custo de colateral a mais está na entrada, e o
+        # de uma ordem no venue nos eventos (A12)
         for row in self.conn.execute(
             f"SELECT * FROM intents WHERE status = ? AND account = ?{window} "
-            "ORDER BY created_at",
-            (str(IntentStatus.EXECUTED), account, *params),
+            "AND side IN (?, ?) ORDER BY created_at",
+            (str(IntentStatus.EXECUTED), account, *params, *map(str, TRADE_SIDES)),
         ):
             if row["side"] == str(IntentSide.BUY):
                 entry = row

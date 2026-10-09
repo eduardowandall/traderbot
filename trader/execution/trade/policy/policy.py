@@ -20,7 +20,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
-from trader.execution.models.intent import IntentSide, PolicyDecision, TradeIntent
+from trader.execution.models.intent import (
+    IntentSide,
+    PolicyDecision,
+    TradeIntent,
+)
 from trader.execution.models.mode import RunningMode
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
@@ -350,6 +354,17 @@ _BUDGET_RULES: tuple[Rule, ...] = (
 )
 
 
+def _rules_for(side: IntentSide) -> tuple[Rule, ...]:
+    """Uma ordem no venue (o stop de uma perp, A12) não troca nada: só as
+    travas de envio. Uma venda não sofre o orçamento; compra e colateral a
+    mais, sim."""
+    if not side.moves_position:
+        return _SEND_RULES
+    if side.spends:
+        return _SAFETY_RULES + _BUDGET_RULES
+    return _SAFETY_RULES
+
+
 def evaluate(
     intent: TradeIntent,
     policy: Policy,
@@ -358,9 +373,7 @@ def evaluate(
     real_mode: bool,
 ) -> PolicyDecision:
     check = _Check(policy, state, real_mode, intent)
-    rules = _SAFETY_RULES
-    if intent.side != IntentSide.SELL:
-        rules += _BUDGET_RULES
+    rules = _rules_for(intent.side)
     reasons = tuple(reason for rule in rules for reason in rule(check))
     return PolicyDecision(
         allowed=not reasons, reasons=reasons, policy_version=policy.version

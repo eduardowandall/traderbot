@@ -12,6 +12,7 @@ from factories import make_spec
 
 from trader.backtest import Tick
 from trader.backtest.spec import ReplayCosts, spec_backtester
+from trader.execution.trade.accounts.perp import PerpAccount
 from trader.strategy.spec.models import StrategySpec
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
@@ -47,6 +48,7 @@ async def test_a_gap_past_the_liquidation_price_liquidates_before_the_stop():
     result = await spec_backtester(_spec(), ticks, NO_FEES, "0").run()
 
     assert result.perp is not None and result.perp.liquidations == 1
+    assert result.rent_usd == 0  # A19: uma perp não abre conta de token
     [entry, liquidation] = result.trades
     assert liquidation.liquidated and liquidation.price == 140
     # o colateral inteiro (10 USD) se foi; as taxas da abertura estavam nele
@@ -105,3 +107,72 @@ async def test_a_round_trip_cost_is_measured_on_the_exposure():
     assert costs.count == 1 and costs.notional_usd == 30
     # 2 x 0.06% de 30 (e um impacto ínfimo): ~12 bps, mesmo vendido
     assert Decimal(11) < costs.bps < Decimal(13)  # type: ignore[operator]
+
+
+async def test_a_partial_take_profit_and_a_top_up_replay_like_live(monkeypatch):
+    # A12: vendido 3x; -2% vende metade (uma vez); depois o preço sobe até
+    # ficar a 20% da liquidação e entra colateral; o max_hold fecha o resto
+    exit_ = {
+        "stop": {"type": "stop_loss", "pct": 15},
+        "conditions": [{"type": "max_hold", "minutes": 8}],
+        "partial": {"pct": 50, "conditions": [{"type": "take_profit", "pct": 2}]},
+    }
+    market = {
+        "kind": "perp",
+        "venue": "jupiter",
+        "direction": "short",
+        "leverage": 3,
+        "add_collateral": {"within_pct": 20, "usd": 2},
+    }
+    spec = _spec(exit=exit_, market=market)
+    ticks = _ticks(100, 100, 97, 97, 110, 110, 110, 110, 110, 110, 110, 110)
+
+    added = []
+    add = PerpAccount.add_collateral
+
+    async def counted(self, *args):
+        order = await add(self, *args)
+        added.append(order.quote_amount)
+        return order
+
+    monkeypatch.setattr(PerpAccount, "add_collateral", counted)
+    result = await spec_backtester(spec, ticks, NO_FEES, "0").run()
+
+    assert added == [2]  # uma vez (`max_times` 1), 2 USD
+    sells = [t for t in result.trades if t.side == "sell"]
+    assert len(sells) == 2 and not result.open_position
+    half, rest = sells
+    assert half.quantity == rest.quantity  # metade, depois o resto
+    assert half.realized_pnl is not None and half.realized_pnl > 0
+    # o resto perdeu ~10% em 15 de tamanho, e devolveu o colateral a mais
+    assert rest.realized_pnl is not None and Decimal(-2) < rest.realized_pnl < 0
+
+
+async def test_a_spot_spec_takes_its_partial_profit_too():
+    # A12: o mesmo bloco no spot; a venda parcial passa pelo SpotAccount
+    spec = StrategySpec.model_validate(
+        make_spec(
+            entry={"conditions": [{"type": "random_chance", "pct": 100}]},
+            exit={
+                "stop": {"type": "stop_loss", "pct": 10},
+                "conditions": [{"type": "max_hold", "minutes": 4}],
+                "partial": {
+                    "pct": 40,
+                    "conditions": [{"type": "take_profit", "pct": 2}],
+                },
+            },
+            sizing={"type": "fixed_usd", "usd": 10},
+            budget_usd=30,
+            max_loss_usd=30,
+            cooldown_minutes=10080,
+            timeframe="1_MINUTE",
+        )
+    )
+    ticks = _ticks(100, 100, 103, 103, 103, 103, 103, 103)
+
+    result = await spec_backtester(spec, ticks, NO_FEES, "0").run()
+
+    sells = [t for t in result.trades if t.side == "sell"]
+    assert len(sells) == 2 and not result.open_position
+    assert sells[0].quantity == pytest.approx(Decimal("0.04"))  # 40% de 0.1
+    assert sells[1].quantity == pytest.approx(Decimal("0.06"))

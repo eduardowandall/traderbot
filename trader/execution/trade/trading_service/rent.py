@@ -71,7 +71,10 @@ class RentRefunds:
         Devolve a conta que pagou, se o desfecho foi gravado; pendente fica
         para a próxima varredura.
         """
-        tx = SentTx(**{f.name: sent[f.name] for f in fields(SentTx)})
+        # o envio gravado: os campos do `SentTx` (os de antes da A12 não têm
+        # todos; o payload também tem `account` e `mint`)
+        names = {f.name for f in fields(SentTx)}
+        tx = SentTx.from_payload({k: v for k, v in sent.items() if k in names})
         outcome = await self.venue.send_outcome(tx)
         if outcome == TxOutcome.PENDING:
             return None

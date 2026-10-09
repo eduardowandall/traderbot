@@ -71,7 +71,7 @@ async def test_on_chain_execution_order(mock_rpc_client, mock_jupiter_client):
         "wallet_state",
         "simulate_transaction",
         "send_transaction",
-        "check_signature_is_confirmed",
+        "signature_status",
         "get_confirmed_transaction",
     ]
     assert (result.in_amount, result.out_amount) == (50_000_000, 5_000_000)

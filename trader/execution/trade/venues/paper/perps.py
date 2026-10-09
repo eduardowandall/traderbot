@@ -2,7 +2,7 @@
 
 Uma posição por mercado e lado (como na Jupiter), guardada em `perps` no
 `paper-wallet.json`; o colateral sai e volta pelo token de cotação da
-carteira simulada, e cada perna paga a taxa de rede em SOL como o spot do
+carteira simulada, e cada envio paga a taxa de rede em SOL como o spot do
 paper. O preço é o do oráculo do processo (o hub): o preço spot faz o papel
 do oráculo do venue.
 
@@ -10,12 +10,18 @@ As contas são as de `trader/shared/models/perp.py`: 0.06% do tamanho em
 cada ponta mais um impacto linear no tamanho, o empréstimo por hora sobre o
 tamanho (pago no fechamento) e a liquidação quando o que sobra do colateral
 chega a 0.2% do tamanho. Com `borrow_rates` (A10: a custody da Jupiter, ao
-vivo), a taxa de empréstimo é a do mercado na abertura e fica na posição;
-uma leitura que falha usa a padrão.
+vivo, pelo `PerpsFeed`), a taxa de empréstimo é a do mercado na abertura e
+fica na posição; uma leitura que falha usa a padrão.
+
+A12: a ordem de stop do venue fica no registro da posição (`place_stop`) e
+dispara na varredura (`liquidations`), como o keeper faria; uma posição pode
+fechar em parte e receber colateral; cada envio é gravado antes
+(`announce_send`, com o fill calculado), e `resolve_send` o refaz.
 """
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -24,11 +30,18 @@ from decimal import Decimal
 from functools import partial
 from typing import Protocol
 
+from trader.execution.market.perps.reader import collateral_mint as borrowed_from
 from trader.execution.market.prices import PriceOracle, price_fn
 from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.execution import ExecutionResult
-from trader.execution.models.perp import PerpTerms
-from trader.execution.models.venue import Liquidation
+from trader.execution.models.intent import (
+    PerpSend,
+    PerpSendKind,
+    SentTx,
+    announce_send,
+)
+from trader.execution.models.perp import PerpTerms, stop_level
+from trader.execution.models.venue import Liquidation, PerpSweep
 from trader.execution.trade.venues.paper.executor import DEFAULT_FEE_LAMPORTS
 from trader.execution.trade.venues.paper.wallet import (
     InsufficientFundsError,
@@ -37,6 +50,7 @@ from trader.execution.trade.venues.paper.wallet import (
 from trader.shared.logging_config import error_text
 from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.costs import SIMULATED, TradeCosts
+from trader.shared.models.direction import Direction
 from trader.shared.models.mints import SOL_MINT
 from trader.shared.models.perp import (
     BPS,
@@ -47,6 +61,8 @@ from trader.shared.models.perp import (
     liquidation_price,
     perp_from_dict,
     perp_to_dict,
+    scaled,
+    with_collateral,
 )
 
 # empréstimo por hora, em bps do tamanho (A10 lê a taxa de verdade)
@@ -57,13 +73,14 @@ BORROW_RATE_TTL = timedelta(minutes=5)
 BORROW_READ_TIMEOUT_SECONDS = 5
 # impacto: bps do tamanho a cada 10 mil USD de tamanho
 DEFAULT_IMPACT_BPS_PER_10K = Decimal(1)
+ONE = Decimal(1)
 
 
 logger = logging.getLogger(__name__)
 
 
 class BorrowRates(Protocol):
-    """De onde vem a taxa de empréstimo (o `JupiterPerpsReader`, A10)."""
+    """De onde vem a taxa de empréstimo (o `PerpsFeed`, A10, A12)."""
 
     async def borrow_bps_hour(self, mint: str) -> Decimal: ...
 
@@ -72,6 +89,11 @@ class BorrowRates(Protocol):
 
 def position_key(terms: PerpTerms) -> str:
     return f"{terms.market_mint}:{terms.direction}"
+
+
+def _market_of(key: str) -> tuple[str, Direction]:
+    mint, direction = key.split(":")
+    return mint, Direction(direction)
 
 
 class SimulatedPerpsVenue:
@@ -89,7 +111,7 @@ class SimulatedPerpsVenue:
     ):
         self.wallet = wallet
         self.price_of = price_fn(prices)
-        # como no spot do paper: a taxa total por perna (base + o teto da priority)
+        # como no spot do paper: a taxa total por envio (base + o teto da priority)
         self.fee_lamports = fee_lamports + priority_fee_lamports
         self.priority_fee_lamports = priority_fee_lamports
         self.borrow_bps_hour = borrow_bps_hour
@@ -98,17 +120,21 @@ class SimulatedPerpsVenue:
         self.borrow_rates = borrow_rates
         # mint -> (taxa, quando foi lida): a última leitura boa
         self._rates: dict[str, tuple[Decimal, datetime]] = {}
+        # posição -> raw do colateral que volta: saídas do venue (o stop dele,
+        # uma liquidação) informadas e ainda não registradas (`acknowledge`)
+        self._exits: dict[str, int] = {}
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.wallet.path})"
 
-    # --- abrir e fechar ---------------------------------------------------------
+    # --- abrir, fechar, colateral ---------------------------------------------
 
     async def open_perp(
         self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
     ) -> ExecutionResult:
         price = await self._price(terms.market_mint)
-        borrow = await self._borrow_rate(terms.market_mint)
+        # a custody de onde a posição toma emprestado (USDC num vendido, A18)
+        borrow = await self._borrow_rate(borrowed_from(terms))
         fill = self._entry(terms, price, collateral, borrow)
         quote, market = SOLANA_MINTS[collateral_mint], SOLANA_MINTS[terms.market_mint]
         posted = quote.ui_to_raw(collateral)
@@ -119,51 +145,152 @@ class SimulatedPerpsVenue:
             "collateral_mint": collateral_mint,
             "size_raw": size_raw,
         }
-        signature = _signature()
+        result = self._result(
+            _signature(), collateral_mint, terms, posted, size_raw, fill
+        )
+        self._announce(result, PerpSendKind.OPEN)
         moves = {collateral_mint: -posted, SOL_MINT: -self.fee_lamports}
-        self.wallet.apply_perp(position_key(terms), record, moves, signature)
-        return self._result(signature, collateral_mint, terms, posted, size_raw, fill)
+        self.wallet.apply_perp(position_key(terms), record, moves, result.signature)
+        return result
 
     async def close_perp(
-        self, collateral_mint: str, terms: PerpTerms, key: str
+        self,
+        collateral_mint: str,
+        terms: PerpTerms,
+        key: str,
+        fraction: Decimal = ONE,
     ) -> ExecutionResult:
         held = position_key(terms)
-        record = self.wallet.perps().get(held)
-        if record is None:
-            raise SwapRejectedError(f"nenhuma posição perp aberta em {held}")
-        fill = self._exit(record, await self._price(terms.market_mint))
+        record = self._record(held)
+        fraction = min(fraction, ONE)
+        fill = scaled(
+            self._exit(record, await self._price(terms.market_mint)), fraction
+        )
         returned = SOLANA_MINTS[collateral_mint].ui_to_raw(fill.collateral_usd)
-        signature = _signature()
+        size_raw = int(record["size_raw"] * fraction)
+        result = self._result(
+            _signature(), collateral_mint, terms, size_raw, returned, fill, True
+        )
+        self._announce(result, PerpSendKind.CLOSE)
         moves = {collateral_mint: returned, SOL_MINT: -self.fee_lamports}
-        self.wallet.apply_perp(held, None, moves, signature)
-        return self._result(
-            signature, collateral_mint, terms, record["size_raw"], returned, fill, True
+        rest = None if fraction >= ONE else _rest(record, fraction)
+        self.wallet.apply_perp(
+            held, rest, moves, result.signature, amend=rest is not None
+        )
+        return result
+
+    async def add_collateral(
+        self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
+    ) -> ExecutionResult:
+        """O colateral da posição cresce; o tamanho, não (A12)."""
+        held = position_key(terms)
+        record = self._record(held)
+        entry = perp_from_dict(record["fill"])
+        assert entry is not None
+        grown = with_collateral(entry, collateral, self._fees(entry.size_usd))
+        posted = SOLANA_MINTS[collateral_mint].ui_to_raw(collateral)
+        result = self._result(_signature(), collateral_mint, terms, posted, 0, grown)
+        self._announce(result, PerpSendKind.ADD)
+        moves = {collateral_mint: -posted, SOL_MINT: -self.fee_lamports}
+        amended = {**record, "fill": perp_to_dict(grown)}
+        self.wallet.apply_perp(held, amended, moves, result.signature, amend=True)
+        return result
+
+    def _held(self, record: dict) -> PerpFill:
+        """A posição agora: o colateral menos o empréstimo até aqui, e a
+        liquidação desse colateral."""
+        entry = perp_from_dict(record["fill"])
+        assert entry is not None
+        borrow = entry.borrow_at(
+            datetime.fromisoformat(record["opened_at"]), self.clock()
+        )
+        return with_collateral(entry, -borrow, self._fees(entry.size_usd))
+
+    async def check_fresh(self, terms: PerpTerms) -> None:
+        return None  # o preço é o do hub, que já recusa um velho (`StalePriceError`)
+
+    # --- a ordem de stop no venue (D7, A12) -------------------------------------
+
+    async def place_stop(
+        self, terms: PerpTerms, fill: PerpFill, key: str
+    ) -> ExecutionResult:
+        """Guarda o nível no registro da posição; a varredura o confere."""
+        held = position_key(terms)
+        record = self._record(held)
+        level = stop_level(terms, fill)
+        signature = _signature()
+        order = f"paper-stop:{held}"
+        result = ExecutionResult(
+            signature,
+            record["collateral_mint"],
+            terms.market_mint,
+            0,
+            0,
+            costs=self._costs(),
+            venue_order=order,
+        )
+        self._announce(result, PerpSendKind.STOP, request=order)
+        amended = {**record, "stop": str(level)}
+        moves = {SOL_MINT: -self.fee_lamports}
+        self.wallet.apply_perp(held, amended, moves, signature, amend=True)
+        return result
+
+    async def stop_left(self, terms: PerpTerms, order: str) -> bool:
+        return False  # o stop do paper vive no registro: some com a posição
+
+    async def cancel_stop(
+        self, terms: PerpTerms, order: str, key: str
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            _signature(), "", terms.market_mint, 0, 0, venue_order=order
         )
 
-    async def liquidations(self, open_: Sequence[PerpTerms]) -> list[Liquidation]:
-        """Das posições `open_`, as que chegaram à margem de manutenção.
+    async def has_position(self, terms: PerpTerms) -> bool:
+        return position_key(terms) in self.wallet.perps()
+
+    async def open_markets(self) -> list[tuple[str, Direction]]:
+        return [_market_of(key) for key in self.wallet.perps()]
+
+    # --- saídas que o venue fez sozinho -----------------------------------------
+
+    async def sweep(self, open_: Sequence[PerpTerms]) -> PerpSweep:
+        """Das posições `open_` (uma leitura da carteira), as que o venue fecha
+        agora: na margem de manutenção (liquidada, nada volta) ou além do stop
+        dele (o que valem); as outras, como estão.
 
         Só as pedidas: a de um bucket que nenhum `connect` abriu fica para
         quando ele abrir (o restore a traz, a varredura confere).
         """
-        found = []
+        swept = PerpSweep([], {})
         positions = self.wallet.perps()
         for terms in open_:
+            record = positions.get(position_key(terms))
+            if record is not None:
+                await self._sweep_one(swept, terms, record)
+        return swept
+
+    async def _sweep_one(
+        self, swept: PerpSweep, terms: PerpTerms, record: dict
+    ) -> None:
+        fill = self._exit(record, await self._price(terms.market_mint))
+        if fill.liquidated or _stopped(record, fill):
             key = position_key(terms)
-            record = positions.get(key)
-            if record is None:
-                continue
-            fill = self._exit(record, await self._price(terms.market_mint))
-            if fill.liquidated:
-                found.append(self._liquidate(record, terms, fill))
-        return found
+            swept.exits.append(self._venue_exit(key, record, terms, fill))
+        else:
+            swept.held[terms] = self._held(record)
 
     async def acknowledge(self, terms: PerpTerms) -> None:
-        """Esquece a posição liquidada (o colateral fica com o venue)."""
+        """A saída está no ledger: a posição sai, e o que valia volta."""
+        key = position_key(terms)
+        returned = self._exits.pop(key, 0)
+        record = self.wallet.perps().get(key)
+        if record is None:
+            return  # já esquecida
+        moves = {record["collateral_mint"]: returned} if returned else {}
         try:
-            self.wallet.apply_perp(position_key(terms), None, {})
+            self.wallet.apply_perp(key, None, moves)
         except InsufficientFundsError:
-            pass  # já esquecida
+            pass  # outro processo já a tirou
 
     def equity_at(self, price: Decimal) -> Decimal:
         """O que fechar as posições abertas a `price` devolveria (0 se liquidada).
@@ -175,32 +302,55 @@ class SimulatedPerpsVenue:
             ZERO,
         )
 
-    async def place_stop(
-        self, terms: PerpTerms, fill: PerpFill, key: str, announce
-    ) -> str | None:
-        return None  # o paper não guarda stops: o da spec (e a liquidação) bastam
-
-    async def stop_left(self, terms: PerpTerms) -> str | None:
-        return None
-
-    async def has_position(self, terms: PerpTerms) -> bool:
-        return position_key(terms) in self.wallet.perps()
-
-    def _liquidate(self, record: dict, terms: PerpTerms, fill: PerpFill) -> Liquidation:
-        # o venue fica com o colateral: nada volta, e não há taxa de rede.
-        # A posição só sai com `acknowledge`, depois de o ledger registrar
+    def _venue_exit(
+        self, key: str, record: dict, terms: PerpTerms, fill: PerpFill
+    ) -> Liquidation:
+        # o keeper fecha: nada de taxa de rede nossa. A posição só sai com
+        # `acknowledge`, depois de o ledger registrar
+        returned = SOLANA_MINTS[record["collateral_mint"]].ui_to_raw(
+            fill.collateral_usd
+        )
+        self._exits[key] = returned
+        kind = "liquidation" if fill.liquidated else "venue-stop"
         result = self._result(
-            f"liquidation-{uuid.uuid4().hex}",
+            f"{kind}-{uuid.uuid4().hex}",
             record["collateral_mint"],
             terms,
             record["size_raw"],
-            0,
+            returned,
             fill,
             True,
         )
         return Liquidation(terms, replace(result, costs=TradeCosts(SIMULATED)))
 
+    # --- resolução (A3, A12) ----------------------------------------------------
+
+    async def resolve_send(
+        self, sent: SentTx, terms: PerpTerms
+    ) -> ExecutionResult | None:
+        """O envio está no registro da carteira (quem chama já conferiu): o
+        resultado é o que foi gravado antes dele."""
+        perp = sent.perp
+        if perp is None:
+            raise ValueError(f"envio {sent.signature} sem o pedido da perp")
+        return ExecutionResult(
+            sent.signature,
+            sent.input_mint,
+            sent.output_mint,
+            sent.in_amount,
+            sent.out_amount,
+            costs=self._costs(),
+            perp=perp_from_dict(perp.fill),
+            venue_order=perp.request,
+        )
+
     # --- contas -----------------------------------------------------------------
+
+    def _record(self, key: str) -> dict:
+        record = self.wallet.perps().get(key)
+        if record is None:
+            raise SwapRejectedError(f"nenhuma posição perp aberta em {key}")
+        return record
 
     def _fees(self, size: Decimal) -> Decimal:
         """Taxa de uma ponta: 0.06% do tamanho + o impacto linear."""
@@ -208,7 +358,8 @@ class SimulatedPerpsVenue:
         return size * PERP_FEE_RATE + size * impact_bps / BPS
 
     async def _borrow_rate(self, mint: str) -> Decimal:
-        """A taxa do mercado (A10): lida no máximo a cada `BORROW_RATE_TTL`.
+        """A taxa da custody `mint` (A10; a do colateral, A18): lida no
+        máximo a cada `BORROW_RATE_TTL`.
 
         A abertura roda sob o lock de ordens do serviço: uma leitura vale por
         alguns minutos (a utilização muda devagar) e espera no máximo
@@ -278,6 +429,13 @@ class SimulatedPerpsVenue:
             raise SwapRejectedError(f"sem preço de {symbol} para a perp")
         return price
 
+    def _costs(self) -> TradeCosts:
+        return TradeCosts(
+            source=SIMULATED,
+            fee_lamports=self.fee_lamports,
+            priority_fee_lamports=self.priority_fee_lamports,
+        )
+
     def _result(
         self,
         signature: str,
@@ -292,13 +450,35 @@ class SimulatedPerpsVenue:
         spend, receive = collateral_mint, terms.market_mint
         if closing:
             spend, receive = receive, spend
-        costs = TradeCosts(
-            source=SIMULATED,
-            fee_lamports=self.fee_lamports,
-            priority_fee_lamports=self.priority_fee_lamports,
-        )
         return ExecutionResult(
-            signature, spend, receive, in_amount, out_amount, costs=costs, perp=fill
+            signature,
+            spend,
+            receive,
+            in_amount,
+            out_amount,
+            costs=self._costs(),
+            perp=fill,
+        )
+
+    def _announce(
+        self,
+        result: ExecutionResult,
+        kind: PerpSendKind,
+        request: str | None = None,
+    ) -> None:
+        """Grava o envio antes de aplicá-lo (A3), com o fill já calculado: a
+        resolução refaz o resultado a partir dele (A12)."""
+        send = PerpSend(kind, request=request, fill=perp_to_dict(result.perp))
+        announce_send(
+            SentTx(
+                result.signature,
+                result.input_mint,
+                result.output_mint,
+                result.in_amount,
+                result.out_amount,
+                sent_at=time.time(),
+                perp=send,
+            )
         )
 
     # --- depois da execução (nada a buscar: o paper já sabe) -------------------
@@ -312,6 +492,27 @@ class SimulatedPerpsVenue:
     async def aclose(self) -> None:
         if self.borrow_rates is not None:
             await self.borrow_rates.aclose()
+
+
+def _stopped(record: dict, fill: PerpFill) -> bool:
+    """O preço passou do stop do venue (num vendido, subindo; num comprado,
+    caindo)?"""
+    level = record.get("stop")
+    if level is None:
+        return False
+    return fill.direction.sign * (fill.price - Decimal(level)) <= 0
+
+
+def _rest(record: dict, fraction: Decimal) -> dict:
+    """O registro do que fica depois de fechar `fraction` (A12)."""
+    entry = perp_from_dict(record["fill"])
+    assert entry is not None
+    keep = ONE - fraction
+    return {
+        **record,
+        "fill": perp_to_dict(scaled(entry, keep)),
+        "size_raw": record["size_raw"] - int(record["size_raw"] * fraction),
+    }
 
 
 def _signature() -> str:

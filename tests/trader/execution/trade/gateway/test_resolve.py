@@ -301,3 +301,104 @@ def _drop_send_log(gateway, intent_id: str) -> None:
             "WHERE intent_id = ?",
             (intent_id,),
         )
+
+
+# --- perps (A12): o keeper decide depois do envio ------------------------------
+
+
+class KeeperVenue:
+    """O `PerpVenue` só no que a resolução usa: o que o keeper fez."""
+
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.fees: list[tuple[str, ...]] = []
+
+    async def resolve_send(self, sent, terms):
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    async def fetch_costs(self, result):
+        return result.costs
+
+    async def fetch_failed_fees(self, signatures):
+        self.fees.append(tuple(signatures))
+        return 10_000 + 1_747_520  # a taxa e o rent da conta da posição
+
+
+def _perp_executing(gateway):
+    from trader.execution.models.perp import PerpTerms
+    from trader.shared.models.direction import Direction
+
+    terms = PerpTerms(SOL.mint, Direction.SHORT, Decimal(3))
+    intent = make_intent(account="paper:p", perp=terms, price=Decimal(100))
+    gateway.ledger.record_intent(intent, PolicyDecision(True))
+    gateway.ledger.record_send(intent.intent_id, _sent("sig-p"))
+    return intent
+
+
+async def test_a_perp_request_the_keeper_has_not_taken_keeps_blocking():
+    gateway = memory_gateway()
+    intent = _perp_executing(gateway)
+    provider = mock_provider()
+    provider.send_outcome = AsyncMock(return_value=TxOutcome.LANDED)
+    resolver = IntentResolver(
+        gateway,
+        SpotVenue(provider),
+        perps=KeeperVenue(None),  # type: ignore[arg-type]
+    )
+    assert await resolver.run() == set()
+    assert gateway.ledger.get(intent.intent_id).status == IntentStatus.EXECUTING  # type: ignore[union-attr]
+
+
+async def test_a_perp_request_the_keeper_dropped_is_rejected_and_pays_its_costs():
+    from trader.execution.models.errors import SwapRejectedError
+
+    gateway = memory_gateway()
+    intent = _perp_executing(gateway)
+    provider = mock_provider()
+    provider.send_outcome = AsyncMock(return_value=TxOutcome.LANDED)
+    perps = KeeperVenue(SwapRejectedError("o keeper recusou"))
+    resolver = IntentResolver(gateway, SpotVenue(provider), perps=perps)  # type: ignore[arg-type]
+
+    assert await resolver.run() == {intent.account}
+
+    record = gateway.ledger.get(intent.intent_id)
+    assert record and record.status == IntentStatus.REJECTED
+    assert perps.fees == [("sig-p",)]  # a taxa e o rent do pedido
+    [fee] = events_of(gateway.ledger, "failed_tx_fee")
+    assert fee["fee_lamports"] == 10_000 + 1_747_520
+
+
+@pytest.mark.parametrize("kind", ["stop", "cancel"])
+async def test_a_resolved_venue_order_books_its_fee_and_only_a_stop_is_placed(kind):
+    from trader.execution.models.execution import ExecutionResult
+    from trader.execution.models.intent import IntentSide, PerpSend, PerpSendKind
+    from trader.execution.models.perp import PerpTerms
+    from trader.shared.models.costs import ONCHAIN, TradeCosts
+    from trader.shared.models.direction import Direction
+
+    gateway = memory_gateway()
+    terms = PerpTerms(SOL.mint, Direction.SHORT, Decimal(3))
+    side = IntentSide.STOP if kind == "stop" else IntentSide.CANCEL
+    intent = make_intent(account="paper:p", side=side, perp=terms, spend_amount="0")
+    gateway.ledger.record_intent(intent, PolicyDecision(True))
+    send = PerpSend(PerpSendKind(kind), "request-address", "position")
+    sent = SentTx("sig-s", USDC.mint, SOL.mint, 0, 0, 1_000, perp=send)
+    gateway.ledger.record_send(intent.intent_id, sent)
+    provider = mock_provider()
+    provider.send_outcome = AsyncMock(return_value=TxOutcome.LANDED)
+    costs = TradeCosts(ONCHAIN, fee_lamports=10_000)
+    result = ExecutionResult(
+        "sig-s", USDC.mint, SOL.mint, 0, 0, costs=costs, venue_order="request-address"
+    )
+    resolver = IntentResolver(gateway, SpotVenue(provider), perps=KeeperVenue(result))  # type: ignore[arg-type]
+
+    assert await resolver.run() == {intent.account}
+
+    [fee] = events_of(gateway.ledger, "perp_stop_fee")
+    assert (fee["signature"], fee["fee_lamports"]) == ("sig-s", 10_000)
+    placed = events_of(gateway.ledger, "perp_stop_placed")
+    assert [p["request"] for p in placed] == (
+        ["request-address"] if kind == "stop" else []
+    )

@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from trader.shared.models.costs import FailedTxFee, PnLResult, TradeCosts
 from trader.shared.models.order import Order
+from trader.shared.models.perp import scaled
 from trader.shared.models.position import Position
 
 ZERO = Decimal("0")
@@ -36,6 +37,58 @@ def remainder_entry(entry: Order, sold: Decimal) -> Order | None:
         quantity=remaining,
         quote_amount=None if quote_amount is None else quote_amount * share,
         costs=_scaled(entry.costs, share),
+        perp=None if entry.perp is None else scaled(entry.perp, share),
+    )
+
+
+def asked_for_part(entry: Order, requested: Decimal | None) -> bool:
+    """A venda pediu só uma parte da posição (A20)? Uma saída inteira que
+    preencheu menos não conta (`requested` é o pedido, não o fill)."""
+    if requested is None:
+        return False
+    return requested < entry.quantity * (1 - DUST_FRACTION)
+
+
+def rest_of(
+    held: Position, sold: Decimal, requested: Decimal | None
+) -> Position | None:
+    """A posição que sobra de `held` depois de vender `sold`; None se nada
+    (ou poeira). Conta a venda como parcial se ela pediu só uma parte."""
+    rest = remainder_entry(held.entry_order, sold)
+    if rest is None:
+        return None
+    partial = asked_for_part(held.entry_order, requested)
+    return replace(held, entry_order=rest, partial_sells=held.partial_sells + partial)
+
+
+def added_entry(entry: Order, added: Order) -> Order:
+    """A entrada de uma perp depois de colateral a mais (`added`, A12).
+
+    O mesmo tamanho; o postado cresce (o PnL segue "voltou - postado"), o
+    `perp` passa a ser o da perna (colateral e liquidação novos) e os custos
+    das duas pernas se somam.
+    """
+    posted = (entry.quote_amount or ZERO) + (added.quote_amount or ZERO)
+    return replace(
+        entry,
+        quote_amount=posted,
+        perp=added.perp or entry.perp,
+        costs=_summed(entry.costs, added.costs),
+    )
+
+
+def _summed(a: TradeCosts | None, b: TradeCosts | None) -> TradeCosts | None:
+    if a is None or b is None:
+        return a or b
+    return replace(
+        a,
+        fee_lamports=a.fee_lamports + b.fee_lamports,
+        priority_fee_lamports=a.priority_fee_lamports + b.priority_fee_lamports,
+        rent_lamports=a.rent_lamports + b.rent_lamports,
+        other_lamports=a.other_lamports + b.other_lamports,
+        actual_in_amount=None,
+        actual_out_amount=None,
+        quoted_out_amount=None,
     )
 
 
@@ -86,11 +139,12 @@ class PositionBook:
         net_quote: Decimal,
         costs_sol: Decimal,
         incomplete: int,
-        entry: Order | None,
+        entry: Position | None,
         failed_fee_sol: Decimal = ZERO,
         rent_refund_sol: Decimal = ZERO,
     ) -> PositionBook:
-        """O livro reconstruído a partir do ledger (totais + entrada aberta)."""
+        """O livro reconstruído a partir do ledger (totais + posição aberta,
+        com as contagens dela, A20)."""
         book = cls(
             quote_symbol,
             realized_usd=realized_usd,
@@ -101,14 +155,23 @@ class PositionBook:
             failed_fee_sol=failed_fee_sol,
             rent_refund_sol=rent_refund_sol,
         )
-        if entry is not None:
-            book.open(entry)
+        book.position = entry
         return book
 
     def open(self, entry: Order) -> Position:
         if self.position is not None:
             raise ValueError("já existe uma posição aberta")
         self.position = Position(entry)
+        return self.position
+
+    def add(self, added: Order) -> Position:
+        """Colateral a mais na perp aberta (A12): a entrada cresce."""
+        held = self._open()
+        self.position = replace(
+            held,
+            entry_order=added_entry(held.entry_order, added),
+            top_ups=held.top_ups + 1,
+        )
         return self.position
 
     def close(self, exit_order: Order) -> ClosedPosition:
@@ -119,10 +182,11 @@ class PositionBook:
 
     def reduce(self, exit_order: Order) -> ClosedPosition:
         """Venda parcial: realiza a fração vendida e mantém o resto aberto."""
-        entry = self._open().entry_order
+        held = self._open()
         closed = self._realize(exit_order)
-        rest = remainder_entry(entry, exit_order.quantity)
-        self.position = None if rest is None else Position(rest)
+        self.position = rest_of(
+            held, exit_order.quantity, exit_order.requested_quantity
+        )
         return closed
 
     def settle_sell(

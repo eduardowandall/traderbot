@@ -21,10 +21,12 @@ from pathlib import Path
 from trader.execution.models.intent import IntentRecord, PolicyDecision, TradeIntent
 from trader.execution.trade.ledger.intents import IntentStore
 from trader.execution.trade.ledger.policy_state import PolicyStateQueries
-from trader.execution.trade.ledger.positions import open_entry
+from trader.execution.trade.ledger.positions import open_entry, open_position
 from trader.execution.trade.ledger.reports import AccountPnL, Reports
 from trader.execution.trade.policy import PolicyState
+from trader.shared.models.direction import Direction
 from trader.shared.models.order import Order
+from trader.shared.models.position import Position
 from trader.shared.paths import data_dir
 
 __all__ = ["AccountPnL", "Ledger", "ledger_path"]
@@ -62,9 +64,29 @@ class Ledger(IntentStore, Reports, PolicyStateQueries):
 
     def open_entry(self, account: str) -> tuple[Order, str] | None:
         """A entrada da posição aberta da conta e a intenção que a abriu."""
+        opened = self.open_position(account)
+        return None if opened is None else (opened[0].entry_order, opened[1])
+
+    def open_position(self, account: str) -> tuple[Position, str] | None:
+        """A posição aberta (com as contagens dela, A20) e a intenção que a abriu."""
         legs = self.legs_since_last_buy(account)
-        entry = open_entry(legs)
-        return None if entry is None else (entry, legs[0].intent.intent_id)
+        position = open_position(legs)
+        return None if position is None else (position, legs[0].intent.intent_id)
+
+    def _open_entries(self, prefix: str) -> list[Order]:
+        """A entrada aberta de cada conta do prefixo."""
+        entries = (
+            open_entry(self.legs_since_last_buy(a)) for a in self.accounts(prefix)
+        )
+        return [entry for entry in entries if entry is not None]
+
+    def open_perp_markets(self, prefix: str = "") -> list[tuple[str, Direction]]:
+        """(mercado, lado) das perps abertas nas contas do prefixo (A12)."""
+        return [
+            (entry.output_mint, entry.perp.direction)
+            for entry in self._open_entries(prefix)
+            if entry.perp is not None
+        ]
 
     def open_positions(self, prefix: str = "") -> dict[str, Decimal]:
         """Tokens em posições abertas, somados por mint, nas contas do prefixo.

@@ -12,6 +12,11 @@ antes de acontecer (`intent_sent`, via `send_hook`), então dá para perguntar
 - algum PENDING, ou uma intenção de uma versão sem o registro: continua
   bloqueando, e o log diz o que conferir (uma vez por intenção).
 
+Uma perp (A12) passa pelo mesmo caminho até o envio que entrou; depois o
+`PerpVenue` diz o que o keeper fez com ele (`resolve_send`): ainda nada
+(continua bloqueando), executado (a perna vira ordem como na conta) ou
+recusado (REJECTED, com a taxa e o rent do pedido como custo do bucket).
+
 Quem chama garante que nada do processo está em execução (o lock de ordens
 do `TradeService`). Cada resolução grava um evento `intent_resolved`.
 """
@@ -23,6 +28,8 @@ from decimal import Decimal
 
 from trader.execution.market.prices import PriceOracle, usd_snapshot
 from trader.execution.models.book import PositionBook
+from trader.execution.models.errors import SwapRejectedError
+from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     IntentRecord,
     IntentSide,
@@ -31,16 +38,23 @@ from trader.execution.models.intent import (
     TradeIntent,
     TxOutcome,
 )
-from trader.execution.models.venue import Venue
+from trader.execution.models.venue import PerpVenue, PostTrade, Venue
 from trader.execution.trade.gateway.fills import (
     FailedFees,
     record_fill_safely,
     record_leftover,
+    record_venue_order,
     settle,
 )
 from trader.execution.trade.gateway.gateway import TradeGateway
-from trader.execution.trade.gateway.orders import order_from_fill, priced_mints
-from trader.execution.trade.ledger.events import INTENT_RESOLVED
+from trader.execution.trade.gateway.orders import (
+    order_from_fill,
+    perp_order_from_fill,
+    priced_mints,
+)
+from trader.execution.trade.ledger.events import (
+    INTENT_RESOLVED,
+)
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
 from trader.shared.models.mints import SOL_MINT
 
@@ -52,6 +66,8 @@ class IntentResolver:
     gateway: TradeGateway
     venue: Venue
     prices: PriceOracle | None = None
+    # as perps do modo (A12); None: uma intenção de perp continua bloqueando
+    perps: PerpVenue | None = None
     # intenções já avisadas como pendentes neste processo
     _warned: set[str] = field(default_factory=set)
 
@@ -67,9 +83,8 @@ class IntentResolver:
         return accounts
 
     async def _resolve(self, record: IntentRecord) -> bool:
-        if record.intent.perp is not None:
-            # uma perp não grava envios ainda (A11): o dono confere o venue
-            self._warn(record, "é uma perp: confira a posição no venue")
+        if record.intent.perp is not None and self.perps is None:
+            self._warn(record, "é uma perp sem venue neste modo: confira o venue")
             return False
         sends = self.gateway.ledger.sends_of(record.intent.intent_id)
         if not sends:
@@ -78,14 +93,43 @@ class IntentResolver:
         failed = [s.signature for s, o in outcomes if o == TxOutcome.FAILED]
         landed = [s for s, o in outcomes if o == TxOutcome.LANDED]
         if landed:
-            await self._executed(record, landed[-1], failed)
-            return True
+            return await self._landed(record, landed[-1], failed)
         pending = [s.signature for s, o in outcomes if o == TxOutcome.PENDING]
         if pending:
             self._warn(record, f"a transação {pending[-1]} ainda está pendente")
             return False
         self._mark_failed(record, "nenhum envio entrou na rede (falhou ou expirou)")
         await self._fees(record.intent, {}).book(self._unbooked(record, failed))
+        return True
+
+    async def _landed(
+        self, record: IntentRecord, sent: SentTx, failed: Sequence[str]
+    ) -> bool:
+        if record.intent.perp is not None:
+            return await self._perp_landed(record, sent, failed)
+        await self._executed(record, sent, failed)
+        return True
+
+    async def _perp_landed(
+        self, record: IntentRecord, sent: SentTx, failed: Sequence[str]
+    ) -> bool:
+        """Um pedido de perp entrou na rede: o que o keeper fez com ele."""
+        assert self.perps is not None and record.intent.perp is not None
+        try:
+            result = await self.perps.resolve_send(sent, record.intent.perp)
+        except SwapRejectedError as ex:
+            self.gateway.ledger.mark_rejected(
+                record.intent.intent_id, f"resolvida: {ex}"
+            )
+            self._note(record, IntentStatus.REJECTED, sent.signature, str(ex))
+            await self._fees(record.intent, {}, self.perps).book(
+                self._unbooked(record, [*failed, sent.signature])
+            )
+            return True
+        if result is None:
+            self._warn(record, f"o keeper ainda não executou {sent.signature}")
+            return False
+        await PerpResolution(self, record, result, failed).run()
         return True
 
     def _unsent(self, record: IntentRecord) -> bool:
@@ -157,8 +201,15 @@ class IntentResolver:
         if order.closes_position:
             record_leftover(self.gateway, intent.account, entry, order)
 
-    def _fees(self, intent: TradeIntent, usd: Mapping[str, Decimal]) -> FailedFees:
-        return FailedFees(self.gateway, self.venue, intent, usd.get(SOL_MINT), None)
+    def _fees(
+        self,
+        intent: TradeIntent,
+        usd: Mapping[str, Decimal],
+        venue: PostTrade | None = None,
+    ) -> FailedFees:
+        return FailedFees(
+            self.gateway, venue or self.venue, intent, usd.get(SOL_MINT), None
+        )
 
     def _unbooked(self, record: IntentRecord, failed: Sequence[str]) -> list[str]:
         """Os envios falhos cuja taxa ainda não foi registrada."""
@@ -199,3 +250,66 @@ class IntentResolver:
             f"sem desfecho: {what}; o modo segue bloqueado (nova tentativa a "
             "cada varredura)"
         )
+
+
+@dataclass
+class PerpResolution:
+    """Uma perna de perp que o keeper executou, registrada como a conta faria.
+
+    Compra: a entrada; colateral a mais: a ordem (o restore soma); venda: o
+    PnL contra a entrada do ledger; uma ordem no venue (o stop): o endereço
+    dele, sem ordem.
+    """
+
+    resolver: IntentResolver
+    record: IntentRecord
+    result: ExecutionResult
+    failed: Sequence[str]
+
+    async def run(self) -> None:
+        resolver, intent = self.resolver, self.record.intent
+        assert resolver.perps is not None
+        quote, token = intent.pair()
+        usd = await usd_snapshot(resolver.prices, priced_mints(quote, token))
+        entry = None
+        if intent.side == IntentSide.SELL:
+            entry = resolver.gateway.restore(intent.account).open_entry
+        if not resolver.gateway.ledger.mark_executed(intent.intent_id, self.result):
+            return
+        resolver._note(
+            self.record,
+            IntentStatus.EXECUTED,
+            self.result.signature,
+            "o keeper executou o pedido",
+        )
+        fill = await settle(
+            resolver.perps,
+            self.result,
+            resolver._fees(intent, usd, resolver.perps),
+            resolver._unbooked(self.record, self.failed),
+        )
+        if not intent.side.moves_position:
+            # o livro desconta a taxa no restore (o serviço relê o bucket)
+            stop = intent.side == IntentSide.STOP
+            placed = self.result.venue_order if stop else None
+            gateway = resolver.gateway
+            record_venue_order(gateway, intent, fill, usd.get(SOL_MINT), placed)
+            return
+        side = OrderSide.SELL if intent.side == IntentSide.SELL else OrderSide.BUY
+        order = perp_order_from_fill(
+            fill,
+            quote,
+            token,
+            side,
+            intent.created_at,
+            signal_price=self._signal_price(),
+            usd=usd,
+            requested_quantity=intent.quantity or Decimal(0),
+        )
+        resolver._record_fill(self.record, order, entry)
+
+    def _signal_price(self) -> Decimal:
+        price = self.record.intent.price
+        if price is None and self.result.perp is not None:
+            price = self.result.perp.price
+        return price or Decimal(0)

@@ -32,3 +32,5 @@ class ExecutionResult:
     failed_signatures: tuple[str, ...] = field(default=(), compare=False)
     # perna de perp: preço do oráculo, tamanho, colateral, taxas (A8)
     perp: PerpFill | None = field(default=None, compare=False)
+    # a ordem que a perna deixou no venue (o endereço do stop de uma perp, A12)
+    venue_order: str | None = field(default=None, compare=False)

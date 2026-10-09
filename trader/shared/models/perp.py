@@ -12,7 +12,7 @@ ponta, o empréstimo por hora sobre o tamanho e a liquidação na margem de
 manutenção (0.2% do tamanho).
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -74,6 +74,28 @@ def liquidation_price(fill: PerpFill, close_fee: Decimal | None = None) -> Decim
     cushion = fill.equity(fill.price, close_fee=close_fee)
     cushion -= fill.size_usd * MAINTENANCE_RATE
     return fill.price * (1 - fill.direction.sign * cushion / fill.size_usd)
+
+
+def scaled(fill: PerpFill, share: Decimal) -> PerpFill:
+    """A parte `share` da posição (fechamento parcial, A12): tamanho,
+    colateral e taxas na proporção; o preço e a liquidação não mudam."""
+    return replace(
+        fill,
+        size_usd=fill.size_usd * share,
+        collateral_usd=fill.collateral_usd * share,
+        fees_usd=fill.fees_usd * share,
+        borrow_usd=fill.borrow_usd * share,
+    )
+
+
+def with_collateral(
+    fill: PerpFill, added: Decimal, close_fee: Decimal | None = None
+) -> PerpFill:
+    """A posição com `added` de colateral a mais (A12; negativo: o empréstimo
+    que ela já deve), o mesmo tamanho e a liquidação desse colateral.
+    `close_fee`: a do venue (com o impacto), como em `liquidation_price`."""
+    moved = replace(fill, collateral_usd=fill.collateral_usd + added)
+    return replace(moved, liquidation_price=liquidation_price(moved, close_fee))
 
 
 def _liquidation_text(fill: PerpFill) -> str:

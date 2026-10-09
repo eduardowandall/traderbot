@@ -374,13 +374,40 @@ def signs_instructions(rpc, last_valid_block_height: int = 1_000):
     return rpc
 
 
-def simulation(lamports: int = 10**9, tokens=()):
-    """Resposta de simulação com a carteira e as contas de token pedidas."""
+def tx_status(confirmation="confirmed", err=None):
+    """Um status de assinatura como o do RPC (`tx_outcome` o lê, A12).
+
+    `confirmation`: "processed", "confirmed" ou "finalized".
+    """
+    from types import SimpleNamespace
+
+    from solders.solders import TransactionConfirmationStatus
+
+    status = getattr(TransactionConfirmationStatus, confirmation.capitalize())
+    return SimpleNamespace(confirmation_status=status, err=err)
+
+
+def confirms(rpc, *statuses):
+    """Um RPC falso cujos envios confirmam (ou seguem `statuses`, em ordem;
+    None: a rede ainda não viu a assinatura)."""
+    from unittest.mock import AsyncMock
+
+    if statuses:
+        rpc.signature_status = AsyncMock(side_effect=list(statuses))
+    else:
+        rpc.signature_status = AsyncMock(return_value=tx_status())
+    return rpc
+
+
+def simulation(lamports: int = 10**9, tokens=(), units: int | None = None):
+    """Resposta de simulação com a carteira e as contas de token pedidas
+    (e as unidades de computação usadas, A12)."""
     from types import SimpleNamespace
 
     accounts = [SimpleNamespace(lamports=lamports)]
     accounts += [SimpleNamespace(data=data) for data in tokens]
-    return SimpleNamespace(value=SimpleNamespace(accounts=accounts, err=None))
+    value = SimpleNamespace(accounts=accounts, err=None, units_consumed=units)
+    return SimpleNamespace(value=value)
 
 
 class Inbox:

@@ -84,6 +84,8 @@ def backtest_summary(result: dict) -> str:
     ]
     if result.get("measured_costs"):
         lines.insert(-1, f"  {_measured_line(result['measured_costs'])}")
+    if result.get("rent_usd"):
+        lines.insert(-1, f"  {_rent_line(result)}")
     return "\n".join(lines + _trade_lines(result["trades"]))
 
 
@@ -102,6 +104,15 @@ def _costs_line(result: dict) -> str:
         f"${perp['borrow_usd']:.4f} "
         f"({perp['borrow_bps_hour']} bps/h), {perp['liquidations']} liquidação(ões);"
         f" {network}"
+    )
+
+
+def _rent_line(result: dict) -> str:
+    """O rent da conta do token (A19): pago na primeira compra, de volta se o
+    replay acabou sem posição (menos a taxa do fechamento)."""
+    return (
+        f"rent da conta do token: {result['rent_usd']:.4f} USD pago, "
+        f"{result['rent_refund_usd']:.4f} USD de volta"
     )
 
 

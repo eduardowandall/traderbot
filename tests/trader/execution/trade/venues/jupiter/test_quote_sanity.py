@@ -11,7 +11,7 @@ from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import TxOutcome
 from trader.execution.models.mode import RunningMode
 from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
-from trader.execution.wiring import build_provider
+from trader.execution.wiring import build_trade_service
 from trader.shared.models import SOLANA_MINTS
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
@@ -115,6 +115,9 @@ async def test_off_by_default_and_on_in_the_wiring():
     provider, _ = _provider("0.05", PRICES)
     provider.max_quote_deviation_pct = None
     await _buy(provider)  # sem conferir
-    assert build_provider(
-        RunningMode.PAPER, 100_000
-    ).max_quote_deviation_pct == Decimal(2)
+    service = build_trade_service(RunningMode.PAPER)
+    try:
+        assert service.venue.provider.max_quote_deviation_pct == Decimal(2)  # type: ignore[attr-defined]
+    finally:
+        await service.aclose()
+        service.gateway.ledger.close()

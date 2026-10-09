@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from trader.execution.models.intent import (
     MOVED_FUNDS_STATUSES,
-    IntentSide,
+    SPENDING_SIDES,
     IntentStatus,
 )
 from trader.execution.trade.ledger.store import LedgerStore, _in
@@ -45,8 +45,8 @@ class PolicyStateQueries(LedgerStore):
         placeholders, statuses = _in(MOVED_FUNDS_STATUSES)
         rows = self.conn.execute(
             f"SELECT notional_usd, created_at, account FROM intents "
-            f"WHERE created_at >= ? AND side != ? AND status IN ({placeholders})",
-            (day_ago, str(IntentSide.SELL), *statuses),
+            f"WHERE created_at >= ? AND side IN (?, ?) AND status IN ({placeholders})",
+            (day_ago, *map(str, SPENDING_SIDES), *statuses),
         ).fetchall()
         notional = sum(
             (Decimal(r["notional_usd"]) for r in rows if r["notional_usd"]),

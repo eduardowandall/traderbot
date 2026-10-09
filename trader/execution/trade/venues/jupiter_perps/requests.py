@@ -1,16 +1,20 @@
-"""Os pedidos da Jupiter Perps (A11a): abrir, a ordem de stop no venue e fechar.
+"""Os pedidos da Jupiter Perps (A11a, A12): abrir, fechar, o stop no venue.
 
 Na Jupiter Perps quem opera não mexe na posição direto: cria um pedido
 (`PositionRequest`) assinado pela carteira, e um keeper da Jupiter o executa
-segundos depois (ou recusa). Aqui só se montam as instruções e a transação,
-sem assinar: o envio é da A11b, só no `serve real`.
+segundos depois (ou recusa). Aqui só se montam as instruções (e, para
+simular, a transação sem assinar): o envio é do venue, só no `serve real`.
 
 - `open_request`: `createIncreasePositionMarketRequest`. O colateral entra em
   USDC (o token de cotação do bucket); num comprado o keeper troca por SOL
-  (`jupiter_minimum_out` é o mínimo de SOL dessa troca).
+  (`jupiter_minimum_out` é o mínimo de SOL dessa troca). Com tamanho 0, é
+  colateral a mais numa posição aberta (A12).
 - `stop_request`: `createDecreasePositionRequest2` com gatilho, a posição
   inteira, USDC de volta: a ordem de stop que fica no venue (D7).
-- `close_request`: `createDecreasePositionMarketRequest`, a posição inteira.
+- `close_request`: `createDecreasePositionMarketRequest`, a posição inteira
+  ou uma parte (A12: o tamanho e o colateral na mesma fração).
+- `cancel_request`: `closePositionRequest2`, um pedido nosso que ficou no
+  venue (a ordem de stop depois de um fechamento, A12).
 
 O preço-limite (`priceSlippage`) protege a execução: um comprado abre por no
 máximo preço x (1 + slippage) e fecha por no mínimo preço x (1 - slippage);
@@ -28,7 +32,6 @@ import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
 
-from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
 from solders.hash import Hash
 from solders.instruction import AccountMeta, Instruction
 from solders.message import MessageV0
@@ -55,15 +58,18 @@ from trader.execution.market.perps.reader import (
     position_address,
 )
 from trader.execution.models.perp import PerpTerms
+from trader.execution.trade.venues.jupiter.compute_budget import (
+    MAX_UNITS,
+    budgeted,
+    unit_price,
+)
 from trader.shared.models.direction import Direction
-
-# o simulado usa ~95 mil; o teto dá folga sem pagar a mais (a taxa é por unidade)
-COMPUTE_UNIT_LIMIT = 200_000
-MICRO_PER_LAMPORT = 1_000_000
 
 OPEN = "createIncreasePositionMarketRequest"
 STOP = "createDecreasePositionRequest2"
 CLOSE = "createDecreasePositionMarketRequest"
+# a versão que o programa tem hoje (a IDL dele na rede, A12)
+CANCEL = "closePositionRequest2"
 
 
 def _pda(*seeds: bytes) -> Pubkey:
@@ -106,6 +112,14 @@ class PerpRequest:
     counter: int
 
 
+@dataclass(frozen=True)
+class Part:
+    """Um fechamento parcial (A12): quanto do tamanho e do colateral sai."""
+
+    size_usd: Decimal
+    collateral_usd: Decimal
+
+
 def _usd(value: Decimal) -> int:
     return int(value * USD_SCALE)
 
@@ -117,12 +131,15 @@ def _limit(price: Decimal, slippage: Decimal, pay_more: bool) -> int:
 
 def _instruction(name: str, args: dict, accounts: dict[str, Pubkey]) -> Instruction:
     """A instrução `name` com as contas pela ordem da IDL (opcional ausente: o
-    próprio programa, a convenção do Anchor)."""
-    metas = [
-        AccountMeta(accounts.get(a["name"], PERPS_PROGRAM), a["isSigner"], a["isMut"])
-        for a in instruction_accounts(name)
-    ]
+    próprio programa, sem assinar nem escrever, a convenção do Anchor)."""
+    metas = [_meta(a, accounts.get(a["name"])) for a in instruction_accounts(name)]
     return Instruction(PERPS_PROGRAM, encode_instruction(name, {"params": args}), metas)
+
+
+def _meta(account: dict, address: Pubkey | None) -> AccountMeta:
+    if address is None:
+        return AccountMeta(PERPS_PROGRAM, False, False)
+    return AccountMeta(address, account["isSigner"], account["isMut"])
 
 
 def _common(owner: Pubkey, terms: PerpTerms, position: Pubkey, request: Pubkey) -> dict:
@@ -154,7 +171,10 @@ def open_request(
     idempotency_key: str,
     jupiter_minimum_out: int | None = None,
 ) -> PerpRequest:
-    """Abre (ou aumenta) a posição com `collateral_raw` de USDC e `size_usd`."""
+    """Abre (ou aumenta) a posição com `collateral_raw` de USDC e `size_usd`.
+
+    Tamanho 0: só colateral a mais, a posição fica do mesmo tamanho (A12).
+    """
     long = terms.direction == Direction.LONG
     if long and not jupiter_minimum_out:
         raise ValueError("um comprado em USDC precisa do mínimo da troca por SOL")
@@ -192,20 +212,25 @@ def close_request(
     price: Decimal,
     slippage: Decimal,
     idempotency_key: str,
+    part: Part | None = None,
 ) -> PerpRequest:
-    """Fecha a posição inteira a mercado; o colateral volta em USDC."""
+    """Fecha a posição a mercado (inteira, ou `part`); o colateral volta em USDC.
+
+    Uma parte leva o tamanho e o colateral na mesma fração: a alavancagem do
+    que fica não muda, e o PnL da parte volta junto com o colateral.
+    """
     position = position_address(owner, terms)
     counter = request_counter(idempotency_key)
     request = request_address(position, counter, increase=False)
     args = {
-        "collateralUsdDelta": 0,
-        "sizeUsdDelta": 0,
+        "collateralUsdDelta": 0 if part is None else _usd(part.collateral_usd),
+        "sizeUsdDelta": 0 if part is None else _usd(part.size_usd),
         # fechar um vendido é recomprar: aceita pagar até o limite acima
         "priceSlippage": _limit(
             price, slippage, pay_more=terms.direction == Direction.SHORT
         ),
         "jupiterMinimumOut": None,
-        "entirePosition": True,
+        "entirePosition": part is None,
         "counter": counter,
     }
     accounts = _decrease_accounts(owner, terms, position, request)
@@ -245,25 +270,40 @@ def stop_request(
     return PerpRequest(_instruction(STOP, args, accounts), request, position, counter)
 
 
-def budgeted(request: PerpRequest, limit: int, micro_price: int) -> list[Instruction]:
-    """O pedido com o limite de unidades e o preço por unidade na frente."""
-    return [
-        set_compute_unit_limit(limit),
-        set_compute_unit_price(micro_price),
-        request.instruction,
-    ]
+def cancel_request(owner: Pubkey, terms: PerpTerms, request: Pubkey) -> PerpRequest:
+    """Cancela um pedido nosso que ficou no venue (a ordem de stop, A12).
+
+    Sem keeper: o dono paga e assina; o rent do pedido volta para a carteira.
+    """
+    position = position_address(owner, terms)
+    accounts = {
+        "owner": owner,
+        "ownerAta": token_account(owner),
+        "pool": JLP_POOL,
+        "positionRequest": request,
+        "positionRequestAta": token_account(request),
+        "position": position,
+        "mint": USDC,
+        "tokenProgram": TOKEN_PROGRAM_ID,
+        "systemProgram": SYSTEM_PROGRAM,
+        "associatedTokenProgram": ASSOCIATED_TOKEN_PROGRAM_ID,
+        "eventAuthority": EVENT_AUTHORITY,
+        "program": PERPS_PROGRAM,
+    }
+    return PerpRequest(_instruction(CANCEL, {}, accounts), request, position, 0)
 
 
 def build_transaction(
     owner: Pubkey, request: PerpRequest, priority_fee_lamports: int
 ) -> VersionedTransaction:
-    """A transação v0 do pedido, sem assinatura (a A11b assina no `serve`).
+    """A transação v0 do pedido, sem assinatura, para simular (A11a).
 
-    O preço por unidade sai do teto da política: no máximo
-    `priority_fee_lamports` de prioridade com o limite de unidades inteiro.
+    O envio de verdade assina no executor (`send_instructions`, que também
+    acerta o limite de unidades). Aqui o limite é o máximo, e o preço por
+    unidade o teto da política.
     """
-    micro = priority_fee_lamports * MICRO_PER_LAMPORT // COMPUTE_UNIT_LIMIT
-    instructions = budgeted(request, COMPUTE_UNIT_LIMIT, micro)
-    # o blockhash é o da hora na simulação; a A11b compila de novo ao assinar
+    price = unit_price(priority_fee_lamports, MAX_UNITS, None)
+    instructions = budgeted([request.instruction], MAX_UNITS, price)
+    # o blockhash é o da hora na simulação
     message = MessageV0.try_compile(owner, instructions, [], Hash.default())
     return VersionedTransaction.populate(message, [Signature.default()])

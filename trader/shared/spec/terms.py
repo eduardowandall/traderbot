@@ -31,6 +31,21 @@ Usd = Annotated[Decimal, Field(gt=0)]
 Leverage = Annotated[Decimal, Field(ge=Decimal("1.1"), le=250)]
 
 
+class AddCollateral(BaseModel):
+    """`market.add_collateral` (A12): colateral a mais perto da liquidação.
+
+    Com o preço a `within_pct`% do preço de liquidação, o trade-runner põe
+    `usd` de colateral na posição (dentro do orçamento do bucket), no máximo
+    `max_times` vezes por posição.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    within_pct: Annotated[Decimal, Field(gt=0, le=50)]
+    usd: Usd
+    max_times: Annotated[int, Field(ge=1, le=10)] = 1
+
+
 class PerpMarket(BaseModel):
     """`market` de uma spec de perp (A8, D2); sem ele, a spec é spot."""
 
@@ -40,6 +55,8 @@ class PerpMarket(BaseModel):
     venue: Literal["jupiter"]
     direction: Direction
     leverage: Leverage
+    # fora do `canonical_json` quando None: os ids das specs de perp não mudam
+    add_collateral: AddCollateral | None = None
 
     def max_stop_pct(self) -> Decimal:
         """O stop mais largo: metade da distância até a liquidação, menos as

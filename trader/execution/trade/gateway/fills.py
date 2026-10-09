@@ -24,7 +24,11 @@ from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import TradeIntent
 from trader.execution.models.venue import PostTrade
 from trader.execution.trade.gateway.gateway import TradeGateway
-from trader.execution.trade.ledger.events import POSITION_LEFTOVER
+from trader.execution.trade.ledger.events import (
+    PERP_STOP_FEE,
+    PERP_STOP_PLACED,
+    POSITION_LEFTOVER,
+)
 from trader.shared.models.costs import (
     FailedTxFee,
     PnLResult,
@@ -167,3 +171,40 @@ class FailedFees:
             self.gateway.record_failed_fee(self.intent, fee)
         except Exception as ex:
             logger.error(f"Taxa de transações falhas não registrada ({fee}): {ex}")
+
+
+def record_venue_order(
+    gateway: TradeGateway,
+    intent: TradeIntent,
+    fill: Fill,
+    sol_usd: Decimal | None,
+    placed: str | None,
+) -> Decimal | None:
+    """Uma ordem no venue (o stop de uma perp, ou o cancelamento dele, A12).
+
+    Grava a taxa do envio (`perp_stop_fee`: custo do bucket sem trade, A11c
+    F2) e, num stop colocado (`placed`), o endereço dele (`perp_stop_placed`),
+    para conferir depois de fechar. Devolve o USD da taxa (None: sem preço do
+    SOL), que quem tem o livro desconta. **Nunca** levanta: a ordem já foi
+    enviada.
+    """
+    lamports = fill.costs.fee_lamports if fill.costs else 0
+    usd = lamports_usd(lamports, sol_usd) if lamports else Decimal(0)
+    account = {"account": intent.account}
+    try:
+        if lamports:
+            fee = {"signature": fill.result.signature, "fee_lamports": lamports}
+            gateway.ledger.add_event(
+                PERP_STOP_FEE,
+                account | fee | {"fee_usd": usd},
+                intent_id=intent.intent_id,
+            )
+        if placed is not None:
+            gateway.ledger.add_event(
+                PERP_STOP_PLACED,
+                account | {"request": placed},
+                intent_id=intent.intent_id,
+            )
+    except Exception as ex:
+        logger.error(f"Ordem no venue {fill.result.signature} sem registro: {ex}")
+    return usd

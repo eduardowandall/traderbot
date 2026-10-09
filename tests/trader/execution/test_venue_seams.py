@@ -70,4 +70,5 @@ def test_the_executed_payload_keeps_the_swap_result_fields():
         "quote",
         "failed_signatures",
         "perp",  # A8: None no spot
+        "venue_order",  # A12: o stop de uma perp
     ]

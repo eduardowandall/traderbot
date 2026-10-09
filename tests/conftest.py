@@ -7,6 +7,7 @@ import pytest
 from factories import (
     bonk_quote,
     close_open_ledgers,
+    confirms,
     inspection_passes,
     open_ledger,
     signs,
@@ -55,7 +56,7 @@ def mock_rpc_client():
             },
         ]
     )
-    _mock.check_signature_is_confirmed = AsyncMock(return_value=True)
+    confirms(_mock)
     inspection_passes(_mock)
     signs(_mock)
     _mock.send_transaction = AsyncMock(

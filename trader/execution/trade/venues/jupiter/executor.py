@@ -27,7 +27,7 @@ from typing import Protocol
 from solders.instruction import Instruction
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.solders import SendTransactionResp, TransactionConfirmationStatus
+from solders.solders import SendTransactionResp
 from solders.transaction import VersionedTransaction
 from spl.token.instructions import close_account
 from spl.token.models import CloseAccountParams
@@ -42,10 +42,18 @@ from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import SentTx, TxOutcome, announce_send
 from trader.execution.models.rent import RentRefund
 from trader.execution.models.venue import DEFAULT_SOL_FEE_RESERVE, MintBalance
+from trader.execution.trade.venues.jupiter.compute_budget import (
+    ComputeBudget,
+    budgeted,
+    unit_limit,
+    unit_price,
+)
 from trader.execution.trade.venues.jupiter.rpc import (
     AsyncRPCClient,
     SignedTx,
     TransactionFailedError,
+    resign,
+    tx_outcome,
 )
 from trader.execution.trade.venues.jupiter.swap_costs import SwapLegs, parse_swap_costs
 from trader.execution.trade.venues.jupiter.tx_inspection import (
@@ -156,12 +164,9 @@ class OnChainExecutor:
         )
         # no ledger antes de enviar: um processo morto daqui em diante deixa a
         # assinatura para resolver a intenção (A3); sem quem grave, não envia
-        resp = await self._guarded_send(
-            signed,
-            sent,
-            partial(announce_send, required=True),
-            quote.inputMint,
-            int(quote.inAmount),
+        await self._inspect(signed, quote.inputMint, int(quote.inAmount))
+        resp = await self._announce_and_send(
+            signed, sent, partial(announce_send, required=True)
         )
         # valores da quote; os efetivos (e os custos) vêm de `fetch_costs`,
         # chamado só depois que o ledger marcou a intenção como executada
@@ -184,22 +189,15 @@ class OnChainExecutor:
     async def _get_signed_transaction(self, tx: VersionedTransaction) -> SignedTx:
         return await self.rpc_client.sign_transaction(tx, self.keypair)
 
-    async def _guarded_send(
-        self,
-        signed: SignedTx,
-        sent: SentTx,
-        announce: Callable[[SentTx], None],
-        spend_mint: str,
-        spend_max: int,
-    ) -> SendTransactionResp:
-        """Simula, grava o envio e envia: o caminho de toda transação nossa.
+    async def _inspect(
+        self, signed: SignedTx, spend_mint: str, spend_max: int
+    ) -> int | None:
+        """Simula com a carteira: só `spend_mint` sai, até `spend_max` (e SOL
+        para taxas), senão `TransactionInspectionError`.
 
-        A simulação devolve a carteira: só `spend_mint` sai, até `spend_max`
-        (e SOL para taxas), senão `TransactionInspectionError`; uma simulação
-        que falha (nada saiu) pode ser re-tentada. `announce` grava o envio
-        antes dele (se falha, nada é enviado). Depois do envio, uma falha é
-        `TransactionFailedOnChainError` (nada trocado) ou
-        `TransactionSubmittedError` (resolver depois).
+        O caminho de toda transação nossa, antes de `_announce_and_send`. Uma
+        simulação que falha (nada saiu) pode ser re-tentada. Devolve as
+        unidades de computação que a simulação usou (None: não informou).
         """
         before = await self.rpc_client.wallet_state(self.pubkey)
         simulation = await self.rpc_client.simulate_transaction(
@@ -207,6 +205,14 @@ class OnChainExecutor:
         )
         after = state_after(before, simulation.value.accounts)
         check_balances(before, after, spend_mint, spend_max)
+        return getattr(simulation.value, "units_consumed", None)
+
+    async def _announce_and_send(
+        self, signed: SignedTx, sent: SentTx, announce: Callable[[SentTx], None]
+    ) -> SendTransactionResp:
+        """Grava o envio e envia. `announce` grava antes (se falha, nada é
+        enviado). Depois do envio, uma falha é `TransactionFailedOnChainError`
+        (nada trocado) ou `TransactionSubmittedError` (resolver depois)."""
         announce(sent)
         return await self._send_transaction_and_wait_for_confirmation(signed.tx)
 
@@ -237,14 +243,20 @@ class OnChainExecutor:
             await asyncio.sleep(1.0)
 
     async def _poll_confirmation(self, signature) -> bool:
-        """Uma consulta; erros transitórios de RPC contam como "ainda não"."""
+        """Uma consulta; erros transitórios de RPC contam como "ainda não".
+
+        Confirmada com erro: `TransactionFailedError` (nada foi trocado).
+        """
         try:
-            return await self.rpc_client.check_signature_is_confirmed(signature)
-        except TransactionFailedError:
-            raise
+            status = await self.rpc_client.signature_status(signature)
         except Exception as ex:
             self.logger.warning(f"Erro ao consultar confirmação: {ex}")
             return False
+        outcome = tx_outcome(status)
+        if outcome == TxOutcome.FAILED:
+            assert status is not None  # FAILED só vem de um status com erro
+            raise TransactionFailedError(f"Transação falhou: {status.err}")
+        return outcome == TxOutcome.LANDED
 
     async def _send_transaction_and_wait_for_confirmation(
         self, new_tx: VersionedTransaction
@@ -315,16 +327,37 @@ class OnChainExecutor:
         spend_mint: str,
         spend_max: int,
         extra_programs: frozenset[str] = frozenset(),
+        budget: ComputeBudget | None = None,
     ) -> SignedTx:
         """Uma transação nossa (não da Jupiter): assina, confere, envia.
 
-        Só programas conhecidos (mais `extra_programs`), depois o
-        `_guarded_send` dos swaps.
+        Só programas conhecidos (mais `extra_programs`), depois a mesma
+        simulação e o mesmo envio dos swaps. Com `budget` (A12), a primeira
+        assinatura vai com o limite máximo, e a simulação (uma só) dá as
+        unidades: a transação é assinada de novo, localmente, com o limite
+        justo e o preço por unidade do `budget`. Sem ele, só a taxa base.
         """
-        signed = await self.rpc_client.sign_instructions(instructions, self.keypair)
+        first = self._budgeted(instructions, budget, None)
+        signed = await self.rpc_client.sign_instructions(first, self.keypair)
         check_programs(signed.tx, extra_programs)
-        await self._guarded_send(signed, sent(signed), announce, spend_mint, spend_max)
+        units = await self._inspect(signed, spend_mint, spend_max)
+        if budget is not None:
+            final = self._budgeted(instructions, budget, units)
+            signed = resign(final, self.keypair, signed)
+        await self._announce_and_send(signed, sent(signed), announce)
         return signed
+
+    def _budgeted(
+        self,
+        instructions: list[Instruction],
+        budget: ComputeBudget | None,
+        units: int | None,
+    ) -> list[Instruction]:
+        if budget is None:
+            return instructions
+        limit = unit_limit(units)
+        price = unit_price(self.max_priority_fee_lamports, limit, budget.recent)
+        return budgeted(instructions, limit, price)
 
     async def fetch_costs(self, result: ExecutionResult) -> TradeCosts | None:
         """Custos lidos da transação confirmada."""
@@ -356,9 +389,9 @@ class OnChainExecutor:
         Sem status: expirou se a altura finalizada passou do
         `last_valid_block_height` (nunca mais entra), senão ainda pendente.
         """
-        status = await self.rpc_client.signature_status(sent.signature)
+        status = await self.rpc_client.signature_status(sent.signature, history=True)
         if status is not None:
-            return _status_outcome(status)
+            return tx_outcome(status)
         if sent.last_valid_block_height is None:
             return TxOutcome.PENDING
         height = await self.rpc_client.finalized_block_height()
@@ -369,18 +402,6 @@ class OnChainExecutor:
     async def aclose(self) -> None:
         # só o RPC é exclusivo do executor; o cliente Jupiter é do provider
         await self.rpc_client.aclose()
-
-
-def _status_outcome(status) -> TxOutcome:
-    # transações que falham também são confirmadas: o erro vem antes
-    if status.err is not None:
-        return TxOutcome.FAILED
-    if status.confirmation_status in (
-        TransactionConfirmationStatus.Confirmed,
-        TransactionConfirmationStatus.Finalized,
-    ):
-        return TxOutcome.LANDED
-    return TxOutcome.PENDING
 
 
 def _signature_of(tx: VersionedTransaction) -> str | None:

@@ -176,9 +176,24 @@ class SpecStrategy:
         labels = [stop.label()] if holds(stop, ctx) else None
         labels = labels or fired(self.spec.exit.mode, self.spec.exit.conditions, ctx)
         if not labels:
-            return None
+            return self._partial(ctx, position)
         self._sell_px = ctx.price
         return self._signal(OrderSide.SELL, position.entry_order.quantity, labels)
+
+    def _partial(self, ctx: TickContext, position: Position) -> OrderSignal | None:
+        """A saída parcial da spec (A12): `pct`% da entrada, uma vez por posição
+        (uma que já teve uma venda parcial não reduz de novo, A20)."""
+        partial = self.spec.exit.partial
+        entry = position.entry_order
+        if partial is None or position.partial_sells:
+            return None
+        labels = fired(partial.mode, partial.conditions, ctx)
+        if not labels:
+            return None
+        quantity = entry.quantity * partial.pct / 100
+        return self._signal(
+            OrderSide.SELL, quantity, [f"partial{partial.pct}%", *labels]
+        )
 
     def _entry(
         self, ctx: TickContext, balance: Decimal, quote_usd: Decimal | None

@@ -6,7 +6,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from factories import events_of, inspection_passes, memory_gateway, spot_provider
+from factories import (
+    confirms,
+    events_of,
+    inspection_passes,
+    memory_gateway,
+    spot_provider,
+)
 from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.message import MessageV0
@@ -234,6 +240,36 @@ class TestUnsettledCloses:
         assert (done["refund_lamports"], done["fee_lamports"]) == (RENT, FEE)
         assert wallet.needs_account(JUP.mint)
 
+    async def test_a_send_logged_before_a12_still_resolves(self):
+        # A19: o `rent_refund_sent` de antes da A12 não tem `perp`
+        service, _ = _setup()
+        await _round_trip(service, "a")
+        service.retire("a", "teste")
+        close = spot_provider(service).close_token_account
+
+        async def dies_after_send(mint, announce):
+            def old_announce(sent):
+                announce(sent)
+                with service.gateway.ledger.conn:
+                    service.gateway.ledger.conn.execute(
+                        "UPDATE events SET payload = json_remove(payload, '$.perp') "
+                        "WHERE type = ?",
+                        (RENT_REFUND_SENT,),
+                    )
+
+            await close(mint, old_announce)
+            raise RuntimeError("processo morto")
+
+        spot_provider(service).close_token_account = dies_after_send
+        with pytest.raises(RuntimeError):
+            await service.close_token_account("a")
+        [sent] = service.gateway.ledger.pending_rent_refunds("paper:")
+        assert "perp" not in sent
+
+        await service.resolve_rent_refunds()
+
+        assert service.gateway.ledger.pending_rent_refunds("paper:") == []
+
 
 class TestOnChainClose:
     def _executor(self, account_amount=0):
@@ -255,7 +291,7 @@ class TestOnChainClose:
         rpc.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        rpc.check_signature_is_confirmed = AsyncMock(return_value=True)
+        confirms(rpc)
         rpc.get_confirmed_transaction = AsyncMock(
             return_value=SimpleNamespace(meta=SimpleNamespace(fee=5000))
         )

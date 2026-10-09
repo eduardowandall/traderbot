@@ -27,8 +27,9 @@ from trader.execution.market.perps.reader import (
     position_address,
 )
 from trader.execution.models.perp import PerpTerms
-from trader.execution.trade.venues.jupiter_perps.reconcile import (
+from trader.execution.models.reconcile import (
     MismatchKind,
+    market_of,
     reconcile_perps,
 )
 from trader.execution.trade.venues.jupiter_perps.requests import (
@@ -170,11 +171,13 @@ def test_the_transaction_is_unsigned_and_capped_by_the_policy():
 
 def test_reconcile_lists_both_kinds_of_mismatch():
     other = PerpTerms(str(Pubkey.new_unique()), Direction.LONG, Decimal(2))
-    found = reconcile_perps([SHORT, LONG], [LONG, other])
+    found = reconcile_perps(
+        map(market_of, [SHORT, LONG]), map(market_of, [LONG, other])
+    )
     assert {(m.market_mint, m.direction, m.kind) for m in found} == {
         (SOL_MINT, Direction.SHORT, MismatchKind.MISSING_ON_VENUE),
         (other.market_mint, Direction.LONG, MismatchKind.UNKNOWN_TO_LEDGER),
     }
     # a alavancagem não identifica a posição: o venue não a guarda
     same_side = PerpTerms(SOL_MINT, Direction.SHORT, Decimal(9))
-    assert reconcile_perps([SHORT], [same_side]) == []
+    assert reconcile_perps([market_of(SHORT)], [market_of(same_side)]) == []

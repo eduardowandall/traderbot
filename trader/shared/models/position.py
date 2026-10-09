@@ -48,6 +48,10 @@ class Position:
 
     entry_order: Order
     exit_order: Order | None = None
+    # desde a entrada (A20): vendas que pediram só uma parte (a saída
+    # parcial da spec dispara uma vez) e colateral a mais (`add_collateral`)
+    partial_sells: int = 0
+    top_ups: int = 0
 
     @property
     def direction(self) -> Direction:

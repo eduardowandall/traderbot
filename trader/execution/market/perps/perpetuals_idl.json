@@ -1,5 +1,5 @@
 {
- "source": "Jupiter Perpetuals IDL 0.1.0 (program PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu) via github.com/julianfssen/jupiter-perps-anchor-idl-parsing, and Doves (DoVEsk76QybCEHQGzkvYPWLQu9gzNoZZZt3TPiL597e) AgPriceFeed; only the accounts read here, the three request instructions (A11a) and their types (2026-10-07)",
+ "source": "Jupiter Perpetuals IDL 0.1.0 (program PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu) via github.com/julianfssen/jupiter-perps-anchor-idl-parsing, and Doves (DoVEsk76QybCEHQGzkvYPWLQu9gzNoZZZt3TPiL597e) AgPriceFeed; only the accounts read here, the three request instructions (A11a) and their types (2026-10-07); closePositionRequest2 from the program's on-chain Anchor IDL (A12, 2026-10-09: the community copy's closePositionRequest is gone)",
  "accounts": [
   {
    "name": "Custody",
@@ -1286,6 +1286,78 @@
      }
     }
    ]
+  },
+  {
+   "name": "closePositionRequest2",
+   "accounts": [
+    {
+     "name": "keeper",
+     "isMut": true,
+     "isSigner": true,
+     "isOptional": true
+    },
+    {
+     "name": "owner",
+     "isMut": true,
+     "isSigner": false
+    },
+    {
+     "name": "ownerAta",
+     "isMut": true,
+     "isSigner": false
+    },
+    {
+     "name": "pool",
+     "isMut": true,
+     "isSigner": false
+    },
+    {
+     "name": "positionRequest",
+     "isMut": true,
+     "isSigner": false
+    },
+    {
+     "name": "positionRequestAta",
+     "isMut": true,
+     "isSigner": false
+    },
+    {
+     "name": "position",
+     "isMut": false,
+     "isSigner": false
+    },
+    {
+     "name": "mint",
+     "isMut": false,
+     "isSigner": false
+    },
+    {
+     "name": "tokenProgram",
+     "isMut": false,
+     "isSigner": false
+    },
+    {
+     "name": "systemProgram",
+     "isMut": false,
+     "isSigner": false
+    },
+    {
+     "name": "associatedTokenProgram",
+     "isMut": false,
+     "isSigner": false
+    },
+    {
+     "name": "eventAuthority",
+     "isMut": false,
+     "isSigner": false
+    },
+    {
+     "name": "program",
+     "isMut": false,
+     "isSigner": false
+    }
+   ],
+   "args": []
   }
  ]
 }

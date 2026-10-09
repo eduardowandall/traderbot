@@ -247,3 +247,23 @@ class TestPerModePolicy:
     def test_rejects_unknown_mode(self, tmp_path):
         with pytest.raises(ValueError, match="modo"):
             self._load(tmp_path, "staging")
+
+
+class TestVenueOrdersAndAddedCollateral:
+    """A12: um stop no venue só passa pelas travas de envio; colateral a mais
+    é gasto como uma compra."""
+
+    def test_a_venue_stop_ignores_the_budget_but_not_the_send_gates(self):
+        busy = PolicyState(trades_last_hour=10**6, daily_realized_pnl_usd=Decimal(-1e6))
+        stop = make_intent(side=IntentSide.STOP, notional=None, spend_amount="0")
+        assert _eval(stop, state=busy).allowed
+        assert not _eval(stop, state=PolicyState(consecutive_failures=3)).allowed
+        assert not _eval(stop, state=PolicyState(unresolved_intent_ids=("x",))).allowed
+        assert not _eval(stop, real_mode=True).allowed
+
+    def test_added_collateral_spends_like_a_buy(self):
+        add = make_intent(side=IntentSide.ADD, notional="20", spend_amount="20")
+        assert _eval(add).allowed
+        assert not _eval(add, Policy(max_trade_usd=Decimal(10))).allowed
+        busy = PolicyState(trades_last_hour=10**6)
+        assert not _eval(add, state=busy).allowed

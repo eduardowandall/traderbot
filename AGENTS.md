@@ -43,7 +43,9 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `trader/shared/trading_service/wire.py`, `trader/strategy/trading_service/remote.py`,
   `trader/execution/runner.py`, `trader/strategy/runner.py`. A `serve`
   and a `connect` from different versions may not talk (B6 renamed snapshot
-  fields, B7 added the `price` op, B12 the `candles` op): restart them together.
+  fields, B7 added the `price` op, B12 the `candles` op, A12
+  `market.add_collateral`, A20 the position's leg counts): restart them
+  together.
 - **Prices come from a hub** (`trader/execution/market/hub.py`, B7): one websocket for
   every mint plus a batched Price API poll for quiet ones. `serve` runs it and
   answers `connect`s through the `price` op (warm-up candles through the
@@ -98,6 +100,9 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   quote at the spec's trade size, and (5000 + `max_priority_fee_lamports`)
   lamports at the SOL price; the result has `measured_costs`. Pass both flags
   for an offline, repeatable run. Every result has `round_trip_costs`.
+  A token's account rent is paid on its first buy and refunded when the
+  replay ends flat, as `serve` does at expiry (A19: `rent_usd`,
+  `rent_refund_usd`).
 - The pair is the spec's `symbol`, `OUTPUT-INPUT` (`SOL-USDC` buys SOL with
   USDC; `JUP-SOL` buys JUP with SOL). New symbols go in `SOLANA_MINTS`
   (`trader/shared/models/mints.py`).
@@ -117,7 +122,9 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   don't use a CLI: write the file, `backtest` it, `/smoke --spec` it (an
   isolated `serve paper` + `connect`), iterate.
 - Every strategy is a JSON spec run by `SpecStrategy`. Composition is
-  `entry.mode`/`exit.mode` (`all`/`any`).
+  `entry.mode`/`exit.mode` (`all`/`any`). `exit.partial` sells a part once
+  per position (A12; a position with `partial_sells` doesn't reduce again,
+  A20).
 - Exactly one of `expires_at` or `ttl_days` (counted from the first tick).
 - Add a condition type in four places: a model in `models.py` (with
   `lookback()`/`label()`), its union there (`EntryCondition` for entry-only
@@ -218,22 +225,34 @@ command to run in a terminal. The rules are tested in
   (`rent_refund_sent` before the send, `rent_refund` after; events, no schema
   change). Shown by the backtest, the daily report,
   `live_vs_backtest.py` and `ledger_dump.py`.
-- **Perps (A8, paper only).** A spec with `market` (`PerpMarket`,
+- **Perps (A8).** A spec with `market` (`PerpMarket`,
   `trader/shared/spec/terms.py`) gets a `PerpAccount`
   (`trade/accounts/perp.py`) on the mode's `PerpVenue`
-  (`SimulatedPerpsVenue`, `trade/venues/paper/perps.py`; real has none until
-  A11). A perp leg rides the spot path: `TradeIntent.perp` (`PerpTerms`, ledger
+  (`SimulatedPerpsVenue`, `trade/venues/paper/perps.py`; real: below). A perp leg rides the spot path: `TradeIntent.perp` (`PerpTerms`, ledger
   `instrument`/`perp_json`), `ExecutionResult.perp`/`Order.perp` (`PerpFill`,
   `trader/shared/models/perp.py`; `quantity` = size in base, `quote_amount` =
   collateral posted/returned, so PnL = back - posted); `Position.direction`
-  comes from the entry's `perp`. One position per market and side; sells close
-  it all. Exposure (collateral x leverage) is the notional the policy sees
-  (`perps_enabled`, `max_leverage`, `allowed_perp_markets`). The sweep books
-  liquidations (`check_liquidations` -> `Ledger.record_external`, outside the
-  policy, then `PerpVenue.acknowledge`). One position per market and side is
-  checked at the buy (`PerpVenue.has_position`), before any intent. The resolver leaves perp intents blocking. `backtest` replays perps
+  comes from the entry's `perp`. One position per market and side; a sell
+  smaller than the position (past the 1% dust rule) closes that part (A12).
+  Exposure (collateral x leverage) is the notional the policy sees
+  (`perps_enabled`, `max_leverage`, `allowed_perp_markets`). What each intent
+  side means is declared on `IntentSide` (`spends`, `moves_position`,
+  `is_trade`; `execution/models/intent.py`): `STOP`/`CANCEL` (a venue stop
+  placed or cancelled, send rules only, A12/A20) and `ADD` (collateral
+  added, budget rules; the entry grows, `PositionBook.add`). `Position`
+  counts `partial_sells` and `top_ups` since the entry (A20). The sweep's
+  `check_perps` reads the venue once (`PerpVenue.sweep`), books the exits it
+  made (liquidation or its stop: `Ledger.record_external`, outside the
+  policy, then `PerpVenue.acknowledge`), then adds collateral per
+  `market.add_collateral`. A stale venue price refuses a buy before the
+  intent (`PerpVenue.check_fresh`). One position per market and side is checked at the
+  buy (`PerpVenue.has_position`), before any intent; at the first perp open,
+  `reconcile_perps` (`execution/models/reconcile.py`) checks the venue's
+  positions against the ledger's in one read (`perp_mismatch`). The resolver
+  settles perp intents through `PerpVenue.resolve_send`. `backtest` replays perps
   through `ReplayPerpsVenue` (A9; `Policy.unlimited()` allows them;
-  `round_trip_costs` measures a perp on its exposure and direction).
+  `round_trip_costs` measures a perp on its exposure and direction; paper
+  and the replay fire the venue stop too).
 - **Ledger schema** is one `_SCHEMA` with a `user_version` in
   `trader/execution/trade/ledger/store.py`. There are no migrations: an older file is refused
   (`LedgerFormatError`); bump `SCHEMA_VERSION` when the schema changes.
@@ -291,20 +310,28 @@ command to run in a terminal. The rules are tested in
   community copy; `idl.py` is the Borsh reader) over JSON-RPC
   (`HELIUS_RPC_URL`, else the public RPC; never logged). The borrow rate is
   the custody's jump-rate curve; the price Jupiter uses is the Doves
-  aggregated feed; a position is a PDA. Paper opens at the live borrow rate.
+  aggregated feed; a position is a PDA. Paper opens at the live borrow rate
+  of the custody it borrows from (`collateral_mint`: USDC for a short, A18).
   If `tests/live/test_live_perps.py` fails, the IDL may have changed.
   A11a: `encode.py` builds Anchor instructions from the same IDL, and
-  `trade/venues/jupiter_perps/requests.py` builds the open, venue-stop and
-  close requests as unsigned transactions (counter = sha256 of the
+  `trade/venues/jupiter_perps/requests.py` builds the open (size 0: add
+  collateral), partial or whole close, venue-stop and cancel
+  (`closePositionRequest2`, from the program's on-chain IDL: the community
+  copy's `closePositionRequest` is gone) requests (counter = sha256 of the
   idempotency key); the live suite simulates them on mainnet. A11b:
   `JupiterPerpsVenue` signs and sends them through
   `OnChainExecutor.send_instructions` (the spot path: program allowlist +
-  perps, balance simulation, send logged first), waits for the keeper (60 s),
-  and is given to `serve real` only with `perps_enabled` in `[real]`. The
-  account places the venue stop after each open and sells at once if it
-  can't; venue exits (its stop fired, a liquidation) are booked from the
-  keeper's USDC payout in the sweep. Costs outside the collateral (A11c):
-  the first open in a market and side pays the position account's rent
-  (`rent_lamports` of that leg; Jupiter keeps the account, nothing comes
-  back), and the venue stop's own send fee is a `perp_stop_fee` event
-  (in `pnl_totals`, the round-trip cost and the bucket's budget).
+  perps, one balance simulation that also sets the compute limit, A12's
+  `compute_budget.py`, send logged first with a typed `SentTx.perp`), waits
+  for the keeper (60 s), and is given to `serve real` only with
+  `perps_enabled` in `[real]`. Custody and Doves price reads go through one
+  cached `PerpsFeed` (`market/perps/feed.py`); an open refuses a Doves price
+  older than 30 s. The venue stop is its own intent (`{key}:stop`); one left
+  after a close is cancelled (`{key}:cancel`; `perp_stop_left` only if that
+  fails). Venue exits (its stop fired, a liquidation) are booked from the
+  keeper's USDC payout in the sweep. Costs outside the collateral (A11c,
+  A12): a request's fee and the rent of a position account it created come
+  from its transaction's `meta`, filled or rejected (Jupiter keeps the
+  account, nothing comes back), and a venue order's send fee is a
+  `perp_stop_fee` event (in `pnl_totals`, the round-trip cost and the
+  bucket's budget).

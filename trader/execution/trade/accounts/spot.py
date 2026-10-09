@@ -20,7 +20,12 @@ from solders.pubkey import Pubkey
 from trader.execution.market.prices import PriceOracle, usd_snapshot
 from trader.execution.models.book import PositionBook, remainder_entry
 from trader.execution.models.execution import ExecutionResult
-from trader.execution.models.intent import IntentSide, TradeIntent, with_idempotency_key
+from trader.execution.models.intent import (
+    SPENDING_SIDES,
+    IntentSide,
+    TradeIntent,
+    with_idempotency_key,
+)
 from trader.execution.models.venue import PostTrade, Venue
 from trader.execution.trade.accounts.wallet import WalletBalances
 from trader.execution.trade.gateway.fills import (
@@ -153,7 +158,7 @@ class SpotAccount:
             net_quote=totals.net_quote,
             costs_sol=totals.costs_sol,
             incomplete=totals.incomplete,
-            entry=state.open_entry,
+            entry=state.open_position,
             failed_fee_sol=Decimal(totals.failed_fee_lamports) / LAMPORTS_PER_SOL,
             rent_refund_sol=Decimal(totals.rent_refund_lamports) / LAMPORTS_PER_SOL,
         )
@@ -253,7 +258,7 @@ class SpotAccount:
     ) -> TradeIntent:
         spend, receive = (
             (self.input_mint, self.output_mint)
-            if side == IntentSide.BUY
+            if side in SPENDING_SIDES
             else (self.output_mint, self.input_mint)
         )
         intent = TradeIntent(

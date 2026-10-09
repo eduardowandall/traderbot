@@ -5,66 +5,57 @@ from unittest.mock import AsyncMock
 import pytest
 from factories import (
     bonk_quote,
+    confirms,
     inspection_passes,
     make_intent,
     memory_gateway,
     signs,
     simulation,
+    tx_status,
 )
 from solders.keypair import Keypair
 from solders.signature import Signature
-from solders.solders import SendTransactionResp, TransactionConfirmationStatus
+from solders.solders import SendTransactionResp
 
 from trader.execution.market.jupiter.client import AsyncJupiterClient
 from trader.execution.models.errors import TransactionSubmittedError
-from trader.execution.models.intent import IntentStatus
+from trader.execution.models.intent import IntentStatus, TxOutcome
 from trader.execution.trade.venues.jupiter.provider import AsyncJupiterProvider
 from trader.execution.trade.venues.jupiter.rpc import (
     AsyncRPCClient,
     SignedTx,
     TransactionFailedError,
+    tx_outcome,
 )
 
 
-def _rpc_with_status(status):
-    client = AsyncMock()
-    client.get_signature_statuses = AsyncMock(
-        return_value=SimpleNamespace(value=[status])
-    )
-    return AsyncRPCClient(client=client)
-
-
-def _status(confirmation_status, err=None):
-    return SimpleNamespace(confirmation_status=confirmation_status, err=err)
-
-
-class TestCheckSignatureIsConfirmed:
-    async def test_not_yet_visible_returns_false(self):
-        rpc = _rpc_with_status(None)
-        assert await rpc.check_signature_is_confirmed("sig") is False
-
-    async def test_processed_returns_false(self):
-        rpc = _rpc_with_status(_status(TransactionConfirmationStatus.Processed))
-        assert await rpc.check_signature_is_confirmed("sig") is False
+class TestTxOutcome:
+    """Um status só é lido em `tx_outcome`: a espera e a resolução (A12)."""
 
     @pytest.mark.parametrize(
-        "confirmation",
+        "status, outcome",
         [
-            TransactionConfirmationStatus.Confirmed,
-            TransactionConfirmationStatus.Finalized,
+            (None, TxOutcome.PENDING),  # ainda não visível para o RPC
+            (tx_status("processed"), TxOutcome.PENDING),
+            (tx_status("confirmed"), TxOutcome.LANDED),
+            (tx_status("finalized"), TxOutcome.LANDED),
+            # transações que falham também são confirmadas no bloco
+            (tx_status("confirmed", err="InstructionError"), TxOutcome.FAILED),
         ],
     )
-    async def test_confirmed_returns_true(self, confirmation):
-        rpc = _rpc_with_status(_status(confirmation))
-        assert await rpc.check_signature_is_confirmed("sig") is True
+    def test_each_status_maps_to_one_outcome(self, status, outcome):
+        assert tx_outcome(status) == outcome
 
-    async def test_confirmed_but_failed_raises(self):
-        # transações que falham também são confirmadas no bloco
-        rpc = _rpc_with_status(
-            _status(TransactionConfirmationStatus.Confirmed, err="InstructionError")
+    async def test_the_wait_reads_the_recent_status_only(self):
+        client = AsyncMock()
+        client.get_signature_statuses = AsyncMock(
+            return_value=SimpleNamespace(value=[tx_status()])
         )
-        with pytest.raises(TransactionFailedError):
-            await rpc.check_signature_is_confirmed("sig")
+        rpc = AsyncRPCClient(client=client)
+        assert tx_outcome(await rpc.signature_status("1" * 64)) == TxOutcome.LANDED
+        assert client.get_signature_statuses.await_args.kwargs == {
+            "search_transaction_history": False
+        }
 
 
 @pytest.fixture
@@ -79,36 +70,24 @@ def provider():
 
 class TestWaitForConfirmation:
     async def test_polls_until_confirmed(self, provider, mock_sleep):
-        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
-            side_effect=[False, False, True]
-        )
+        rpc = confirms(provider.executor.rpc_client, None, None, tx_status())
         assert await provider.executor._wait_for_confirmation("sig") is True
-        assert (
-            provider.executor.rpc_client.check_signature_is_confirmed.await_count == 3
-        )
+        assert rpc.signature_status.await_count == 3
 
     async def test_failed_transaction_raises_immediately(self, provider, mock_sleep):
-        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
-            side_effect=TransactionFailedError("Transação falhou: err")
-        )
-        with pytest.raises(TransactionFailedError):
+        rpc = confirms(provider.executor.rpc_client, tx_status(err="err"))
+        with pytest.raises(TransactionFailedError, match="err"):
             await provider.executor._wait_for_confirmation("sig")
-        assert (
-            provider.executor.rpc_client.check_signature_is_confirmed.await_count == 1
-        )
+        assert rpc.signature_status.await_count == 1
 
     async def test_transient_errors_are_retried_with_sleep(self, provider):
-        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
-            side_effect=[ConnectionError("rpc down"), True]
-        )
+        confirms(provider.executor.rpc_client, ConnectionError("rpc down"), tx_status())
         with mock.patch("asyncio.sleep") as sleep:
             assert await provider.executor._wait_for_confirmation("sig") is True
         sleep.assert_awaited_once_with(1.0)
 
     async def test_timeout(self, provider, mock_sleep):
-        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
-            return_value=False
-        )
+        provider.executor.rpc_client.signature_status = AsyncMock(return_value=None)
         with pytest.raises(TimeoutError):
             await provider.executor._wait_for_confirmation("sig", timeout=0)
 
@@ -138,9 +117,7 @@ class TestNoRetryAfterBroadcast:
         provider.executor.rpc_client.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
-            return_value=False
-        )
+        provider.executor.rpc_client.signature_status = AsyncMock(return_value=None)
         with (
             mock.patch("time.time", side_effect=[0, 100]),
             pytest.raises(TransactionSubmittedError),
@@ -189,9 +166,7 @@ class TestSendErrorsCountAsSubmitted:
         provider.executor.rpc_client.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        provider.executor.rpc_client.check_signature_is_confirmed = AsyncMock(
-            return_value=True
-        )
+        confirms(provider.executor.rpc_client)
 
         await provider.swap_with_details("mint_in", "mint_out", 1000)
 
@@ -208,9 +183,7 @@ class TestFailedOnChain:
         rpc.send_transaction = AsyncMock(
             return_value=SendTransactionResp(value=Signature.new_unique())
         )
-        rpc.check_signature_is_confirmed = AsyncMock(
-            side_effect=TransactionFailedError("Transação falhou: slippage")
-        )
+        rpc.signature_status = AsyncMock(return_value=tx_status(err="slippage"))
         provider.jupiter_client.get_quote = AsyncMock(return_value=bonk_quote())
         provider.jupiter_client.get_swap_transaction = AsyncMock()
         return rpc

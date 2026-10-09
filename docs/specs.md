@@ -54,7 +54,7 @@ Specs live next to the examples in [`examples/`](examples/). Start from
 | `symbol` | yes | `OUTPUT-INPUT`: `SOL-USDC` buys SOL paying USDC; `JUP-SOL` buys JUP paying SOL. The input (the **quote token**) can be any token in `SOLANA_MINTS`; the output must be a different one and not a stablecoin. See "Prices and units" below. |
 | `timeframe` | yes | Bar size for the indicators: `15_SECOND`, `1_MINUTE` or `1_HOUR`. |
 | `entry` | yes | `{"mode": "all" \| "any", "conditions": [...]}`, 1–8 entry conditions. `all` is the default. |
-| `exit` | yes | `{"stop": {...}, "mode": "any" \| "all", "conditions": [...]}`: a required stop plus 0–8 exit conditions. `any` is the default. |
+| `exit` | yes | `{"stop": {...}, "mode": "any" \| "all", "conditions": [...]}`: a required stop plus 0–8 exit conditions. `any` is the default. Optional `"partial": {"pct": P, "mode": "any" \| "all", "conditions": [...]}` (0 < P < 100, 1–8 exit conditions): sells P% of the position once, see "How a spec trades". |
 | `sizing` | yes | `{"type": "fixed_usd", "usd": N}`: each buy spends `N` USD (or less, if the bucket or wallet has less). `{"type": "pct_of_bucket", "pct": P}` (0 < P ≤ 100): each buy spends P% of what the bucket may spend at that moment (its remaining budget, capped by the wallet). |
 | `budget_usd` | yes | The bucket's spending cap. Realized losses reduce it; profits don't raise it. |
 | `max_loss_usd` | yes | Realized loss that retires the bucket (no more buys; a leftover position is sold). At most `budget_usd`. |
@@ -62,7 +62,7 @@ Specs live next to the examples in [`examples/`](examples/). Start from
 | `ttl_days` | one of | Days of validity, counted from the first tick the spec runs (1–365). Preferred: it never goes stale. |
 | `expires_at` | one of | A fixed expiry with a timezone (e.g. `"2026-10-15T00:00:00Z"`). Exactly one of `ttl_days` / `expires_at`. |
 | `supersedes` | no | The 12-character id of the spec this one replaces (for your own bookkeeping). |
-| `market` | no | Leave it out for spot. A perpetual future: `{"kind": "perp", "venue": "jupiter", "direction": "long" \| "short", "leverage": L}` (1.1–250, capped by the policy). See "Perps" below. Real mode needs `perps_enabled` in the owner's `[real]` policy. |
+| `market` | no | Leave it out for spot. A perpetual future: `{"kind": "perp", "venue": "jupiter", "direction": "long" \| "short", "leverage": L}` (1.1–250, capped by the policy), optionally with `"add_collateral": {"within_pct": W, "usd": U, "max_times": N}`. See "Perps" below. Real mode needs `perps_enabled` in the owner's `[real]` policy. |
 
 Numbers may be JSON numbers or strings (`"0.15"` keeps exact decimals).
 Percentages are in percent: `"pct": 2` means 2%.
@@ -83,8 +83,8 @@ nothing to spend until it comes back.
 With `market`, the spec holds a leveraged position on Jupiter Perps instead
 of buying the token. `symbol` is `BASE-QUOTE` with a USDC quote:
 `SOL-USDC` trades the SOL market with USDC as collateral. Every buy
-**opens** the position and every sell **closes** all of it; a `short` gains
-when the price falls.
+**opens** the position and every sell **closes** all of it (or, with
+`exit.partial`, a part of it); a `short` gains when the price falls.
 
 - `sizing` and `budget_usd` count **collateral**; the position's size (its
   exposure) is collateral x `leverage`, and that is what the policy's
@@ -98,11 +98,24 @@ when the price falls.
   at 3x).
 - Costs: 0.06% of the size to open and again to close, a small price-impact
   fee, an hourly borrow fee on the size (in paper, Jupiter's live rate when
-  the position opens, ~0.17 bps of the size an hour for SOL in Oct 2026), and
+  the position opens, from the custody it borrows: SOL for a long, USDC for
+  a short; ~0.02-0.2 bps of the size an hour in Oct 2026), and
   the network fee of each leg. If
   the collateral left falls to 0.2% of the size, the position is
   **liquidated**: the whole collateral is lost and counts toward
   `max_loss_usd`.
+- The venue holds its own stop for every open position (at the spec's stop or
+  half the distance to liquidation, whichever is closer). It fires even when
+  `connect` is down; the sweep books what came back. Paper and the backtest
+  fire it too, and each placement pays one network fee.
+- `add_collateral` (optional): when the price comes within `within_pct`%
+  (0–50) of the liquidation price, the trade-runner adds `usd` of collateral
+  (inside the bucket's budget, which already counts the position), at most
+  `max_times` (1–10, default 1) times per position. The size stays; the
+  liquidation price moves away. Borrow fees move the liquidation price
+  toward the entry over time, which is what this is for: with a stop at
+  most half way to liquidation, a price move alone hits the stop first, so a
+  useful `within_pct` is wider than the stop's distance from it.
 - The trade-runner refuses it unless the mode's policy has
   `perps_enabled` (on in paper, off in real), `leverage <= max_leverage`
   (3) and the base in `allowed_perp_markets` (`SOL`).
@@ -120,7 +133,11 @@ On every price tick:
 1. **With a position:** the **stop** is checked first and always wins (it is
    OR'd with the exit conditions, so `exit.mode: all` can never disable it).
    Then the exit conditions, combined by `exit.mode`. A sell closes the whole
-   position. Exits never wait for the warm-up.
+   position. If neither fired, `exit.partial` (when set) sells `pct`% of the
+   position, once per position (one that already had a partial sell, even
+   before a restart, doesn't reduce again; a full exit that filled short
+   doesn't count); the rest stays under the same stop and
+   exits. Exits never wait for the warm-up.
 2. **Without a position:** it may buy only when all of these hold:
    - the indicators are **warm**: `timeframe` bars equal to the spec's warm-up
      (below);

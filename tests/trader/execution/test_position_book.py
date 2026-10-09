@@ -87,11 +87,12 @@ def test_restored_reopens_the_entry_and_keeps_totals():
         net_quote=Decimal("-3"),
         costs_sol=Decimal("0.01"),
         incomplete=1,
-        entry=entry,
+        entry=Position(entry, partial_sells=1),
     )
 
     assert book.position is not None
     assert book.position.entry_order == entry
+    assert book.position.partial_sells == 1  # as contagens do restore (A20)
     assert book.summary() == (
         "PNL líquido -3.000000 USDC (~$-3.0000); bruto -2.000000, "
         "custos 0.010000000 SOL [!] 1 trade(s) incompleto(s)"
@@ -128,3 +129,32 @@ class TestFailedTxFees:
         book.charge(FailedTxFee(("sig",), 5_000, None))
         assert book.realized_usd == Decimal("0")
         assert book.failed_fee_sol == Decimal("0.000005")
+
+
+@pytest.mark.parametrize(("requested", "partial"), [("0.4", 1), ("1", 0)])
+def test_only_a_sell_that_asked_for_a_part_counts_as_partial(requested, partial):
+    # A20: uma saída inteira que preencheu menos não dispara a regra parcial
+    book = PositionBook("USDC")
+    book.open(_buy())
+    sell = replace(
+        _order(OrderSide.SELL, "0.4", "110", quote_amount="44"),
+        requested_quantity=Decimal(requested),
+    )
+
+    book.reduce(sell)
+
+    assert book.position is not None
+    assert book.position.partial_sells == partial
+
+
+def test_a_position_carries_its_leg_counts_over_the_wire():
+    from trader.shared.trading_service.wire import position_from_dict, position_to_dict
+
+    position = Position(_buy(), partial_sells=1, top_ups=2)
+    back = position_from_dict(position_to_dict(position))
+    assert back is not None and (back.partial_sells, back.top_ups) == (1, 2)
+    old = position_to_dict(Position(_buy()))
+    assert old is not None
+    del old["partial_sells"], old["top_ups"]  # um `serve` de antes da A20
+    again = position_from_dict(old)
+    assert again is not None and again.partial_sells == again.top_ups == 0

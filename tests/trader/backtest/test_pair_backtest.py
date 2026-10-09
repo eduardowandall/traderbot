@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from factories import StubStrategy, make_spec
 
 from trader.backtest import Backtester, Tick, TickRecorder, load_ticks
@@ -59,9 +60,13 @@ async def test_jup_sol_pays_in_sol_and_measures_in_usd():
     buy, sell = result.trades
     assert buy.quantity == Decimal(100)
     assert buy.price == Decimal(1)  # USD por JUP: 0.005 SOL x 200
-    assert result.final_equity == Decimal(126)
-    assert result.realized_pnl == Decimal(26)  # 126 USD - 100 USD
-    assert result.return_pct == Decimal(26)
+    # A19: a conta do JUP custa o rent a 200 e o devolve (menos a taxa do
+    # fechamento) a 210, no fim, sem posição
+    assert result.rent_usd == Decimal("0.00203928") * 200
+    assert result.rent_refund_usd == Decimal("0.00203428") * 210
+    rent = result.rent_refund_usd - result.rent_usd
+    assert result.final_equity == Decimal(126) + rent
+    assert result.realized_pnl == pytest.approx(Decimal(26) + rent)
 
 
 async def test_the_network_fee_is_paid_in_usd_on_a_sol_quote():
@@ -80,8 +85,11 @@ async def test_the_network_fee_is_paid_in_usd_on_a_sol_quote():
     # taxas de 2 USD saem do patrimônio e do PnL realizado
     buy, sell = result.trades
     assert buy.quantity == Decimal(100)
-    assert result.final_equity == Decimal(100) - 2 * fee
-    assert sell.realized_pnl == -2 * fee
+    # e o rent da conta do JUP (A19), que volta menos a taxa do fechamento
+    close_fee = Decimal("0.000005") * 200
+    assert result.final_equity == Decimal(100) - 2 * fee - close_fee
+    rent = result.rent_usd
+    assert sell.realized_pnl == pytest.approx(-2 * fee - rent)
 
 
 class TwoSeries:
@@ -124,3 +132,62 @@ def test_recorded_ticks_keep_the_quote_usd_column(tmp_path):
     first, second = load_ticks(path)
     assert (first.price, first.quote_usd) == (Decimal("0.005"), Decimal("200"))
     assert second.quote_usd is None
+
+
+class BuyOnly(BuyFirstSellThird):
+    def on_market_refresh(self, price, balance, current_position, quote_usd=None):
+        self.tick += 1
+        if self.tick == 1:
+            return OrderSignal(OrderSide.BUY, balance / price)
+        return None
+
+
+async def test_a_replay_that_ends_holding_the_token_keeps_its_account():
+    # A19: o rent foi pago; sem fim flat, a conta (e o rent) ficam, como ao vivo
+    result = await Backtester(
+        BuyOnly(),
+        "JUP-SOL",
+        _ticks([("0.005", "200"), ("0.005", "200")]),
+        initial_balance=Decimal(100),
+        fee_bps=Decimal(0),
+        slippage_bps=Decimal(0),
+        budget_usd=Decimal(100),
+    ).run()
+
+    assert result.open_position
+    assert result.rent_usd == Decimal("0.00203928") * 200
+    assert result.rent_refund_usd == 0
+    assert result.final_equity == Decimal(100) - result.rent_usd
+
+
+async def test_the_summary_shows_the_rent_paid_and_refunded():
+    from trader.api.cli.output import backtest_summary
+    from trader.backtest.spec import result_to_dict
+
+    result = await Backtester(
+        BuyFirstSellThird(),
+        "JUP-SOL",
+        _ticks([("0.005", "200"), ("0.0055", "200"), ("0.006", "210")]),
+        initial_balance=Decimal(100),
+        fee_bps=Decimal(0),
+        slippage_bps=Decimal(0),
+        budget_usd=Decimal(100),
+    ).run()
+    summary = {
+        "name": "t",
+        "spec_id": "x",
+        "timeframe": "1_MINUTE",
+        "bars": 3,
+        "warmup_bars": 0,
+        "fee_bps": 0,
+        "slippage_bps": 0,
+        "network_fee_usd": 0,
+        **result_to_dict(result),
+    }
+
+    text = backtest_summary(summary)
+
+    assert "rent da conta do token: 0.4079 USD pago, 0.4272 USD de volta" in text
+    # o reembolso também entra no custo da ida e volta, como ao vivo
+    costs = result.round_trip_costs
+    assert costs.count == 1

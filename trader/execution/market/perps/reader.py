@@ -85,6 +85,8 @@ class CustodyState:
     jump_rate: JumpRate
     oracle: Pubkey  # o feed agregado da Doves (`dovesAgOracle`)
     pyth_oracle: Pubkey  # o da Pyth (`oracle.oracleAccount`): o gatilho pede os dois
+    # o empréstimo acumulado por USD de tamanho (x `RATE_POWER`), A12
+    cumulative_interest: int = 0
 
     @property
     def utilization(self) -> Decimal:
@@ -112,6 +114,18 @@ class VenuePosition:
     size_usd: Decimal
     collateral_usd: Decimal
     opened_at: datetime
+    # o acumulado da custody quando a posição mudou pela última vez (A12)
+    interest_snapshot: int = 0
+
+    def borrow_usd(self, custody: CustodyState) -> Decimal:
+        """O empréstimo devido desde a última mudança (a Jupiter o tira do
+        colateral no fechamento): tamanho x (acumulado - o da posição).
+
+        `custody`: a do colateral da posição (USDC num vendido), onde o
+        empréstimo corre.
+        """
+        accrued = custody.cumulative_interest - self.interest_snapshot
+        return self.size_usd * Decimal(max(accrued, 0)) / RATE_POWER
 
 
 def custody_of(mint: str) -> Pubkey:
@@ -290,8 +304,38 @@ class JupiterPerpsReader:
             meta, "preTokenBalances", owner, mint
         )
 
-    async def borrow_bps_hour(self, mint: str) -> Decimal:
-        return (await self.custody(mint)).borrow_bps_hour
+    async def transaction_costs(
+        self, signature: str, watched: list[Pubkey]
+    ) -> tuple[int, int] | None:
+        """(taxa, rent das contas `watched` que a transação criou), do `meta`.
+
+        Uma conta criada tinha 0 lamports antes e algo depois (A12: a conta
+        da posição que um pedido nosso cria, mesmo se o keeper o recusar).
+        None: a transação ainda não está disponível.
+        """
+        options = {
+            "encoding": "json",
+            "commitment": "confirmed",
+            "maxSupportedTransactionVersion": 0,
+        }
+        tx = await self._rpc("getTransaction", [signature, options])
+        if tx is None:
+            return None
+        meta = tx.get("meta") or {}
+        loaded = meta.get("loadedAddresses") or {}
+        keys = [
+            *tx["transaction"]["message"]["accountKeys"],
+            *loaded.get("writable", []),
+            *loaded.get("readonly", []),
+        ]
+        wanted = {str(a) for a in watched}
+        pre, post = meta.get("preBalances") or [], meta.get("postBalances") or []
+        rent = sum(
+            after
+            for key, before, after in zip(keys, pre, post, strict=False)
+            if key in wanted and before == 0 and after > 0
+        )
+        return int(meta.get("fee") or 0), rent
 
     async def oracle_price(self, mint: str) -> OraclePrice:
         """O preço que a Jupiter usa: o feed agregado da Doves da custody."""
@@ -329,6 +373,7 @@ def custody_state(raw: dict, mint: str) -> CustodyState:
         ),
         oracle=raw["dovesAgOracle"],
         pyth_oracle=raw["oracle"]["oracleAccount"],
+        cumulative_interest=raw["fundingRateState"]["cumulativeInterestRate"],
     )
 
 
@@ -351,6 +396,7 @@ def venue_position(address: Pubkey, raw: dict) -> VenuePosition:
         size_usd=Decimal(raw["sizeUsd"]) / USD_SCALE,
         collateral_usd=Decimal(raw["collateralUsd"]) / USD_SCALE,
         opened_at=datetime.fromtimestamp(raw["openTime"], UTC),
+        interest_snapshot=raw["cumulativeInterestSnapshot"],
     )
 
 

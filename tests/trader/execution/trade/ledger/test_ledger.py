@@ -267,3 +267,23 @@ class TestRepeatedDenials:
         denied = [r for r in ledger.list_intents() if r.status == IntentStatus.DENIED]
         assert len(denied) == 2
         assert all(r.repeat_count == 0 for r in denied)
+
+
+def test_a_perp_send_round_trips_through_the_send_log():
+    # A12: o envio gravado traz o pedido da perp de volta, tipado
+    from factories import make_intent, open_ledger
+
+    from trader.execution.models.intent import (
+        PerpSend,
+        PerpSendKind,
+        PolicyDecision,
+        SentTx,
+    )
+
+    ledger = open_ledger()
+    intent = make_intent()
+    ledger.record_intent(intent, PolicyDecision(True))
+    send = PerpSend(PerpSendKind.CLOSE, "request", "position", before="30")
+    sent = SentTx("sig", intent.spend_mint, intent.receive_mint, 1, 0, 9, perp=send)
+    ledger.record_send(intent.intent_id, sent)
+    assert ledger.sends_of(intent.intent_id) == [sent]

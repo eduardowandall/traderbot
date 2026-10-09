@@ -5,10 +5,13 @@ carteira, mercado, colateral e lado; o colateral sai do lado). A alavancagem
 não entra: o venue guarda tamanho e colateral, não a alavancagem pedida.
 
 - `missing_on_venue`: o ledger tem a posição aberta e o venue não (liquidada,
-  ou fechada fora do bot): o serviço registra `perp_mismatch` e para as
-  entradas nesse mercado (ligado na A11b).
+  ou fechada fora do bot);
 - `unknown_to_ledger`: o venue tem uma posição que nenhum bucket abriu (aberta
-  à mão, ou um envio sem desfecho): o dono confere.
+  à mão, ou um envio sem desfecho).
+
+O serviço confere uma vez, na primeira abertura, numa leitura só do venue
+(A12): cada diferença é um evento `perp_mismatch` e bloqueia as compras de
+perp nesse mercado e lado no processo; o dono confere.
 """
 
 from collections.abc import Iterable
@@ -31,15 +34,18 @@ class PerpMismatch:
     kind: MismatchKind
 
 
-def _keys(terms: Iterable[PerpTerms]) -> set[tuple[str, Direction]]:
-    return {(t.market_mint, t.direction) for t in terms}
+Market = tuple[str, Direction]  # (mercado, lado)
+
+
+def market_of(terms: PerpTerms) -> Market:
+    return terms.market_mint, terms.direction
 
 
 def reconcile_perps(
-    ledger_open: Iterable[PerpTerms], venue_open: Iterable[PerpTerms]
+    ledger_open: Iterable[Market], venue_open: Iterable[Market]
 ) -> list[PerpMismatch]:
     """O que o ledger e o venue discordam, em ordem estável."""
-    ledger, venue = _keys(ledger_open), _keys(venue_open)
+    ledger, venue = set(ledger_open), set(venue_open)
     found = [(k, MismatchKind.MISSING_ON_VENUE) for k in ledger - venue]
     found += [(k, MismatchKind.UNKNOWN_TO_LEDGER) for k in venue - ledger]
     return [PerpMismatch(m, d, kind) for (m, d), kind in sorted(found)]

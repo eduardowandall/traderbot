@@ -87,3 +87,52 @@ def test_the_trade_runner_checks_the_market_against_its_policy(
 ):
     errors = validate(_perp(**overrides).terms(), limits, NOW)
     assert any(message in e.msg for e in errors), errors
+
+
+# --- A12 ----------------------------------------------------------------------
+
+PARTIAL = {"pct": 50, "conditions": [{"type": "take_profit", "pct": 2}]}
+TOP_UP = {"within_pct": 10, "usd": 2, "max_times": 2}
+
+
+def test_the_new_blocks_stay_out_of_the_id_until_used():
+    # A12: `exit.partial` e `market.add_collateral` vazios não mudam os ids
+    plain = _perp()
+    assert "partial" not in plain.canonical_json()
+    assert "add_collateral" not in plain.canonical_json()
+    partial = _perp(exit=PERP_EXIT | {"partial": PARTIAL})
+    topped = _perp(market=SHORT3 | {"add_collateral": TOP_UP})
+    assert len({plain.spec_id(), partial.spec_id(), topped.spec_id()}) == 3
+
+
+def test_add_collateral_reaches_the_trade_runner_as_a_top_up():
+    from trader.execution.models.perp import (
+        perp_terms_for,
+        terms_from_json,
+        terms_to_json,
+    )
+
+    terms = _perp(market=SHORT3 | {"add_collateral": TOP_UP}).terms()
+    assert SpecTerms.model_validate(terms.model_dump()) == terms  # pelo fio
+    perp = perp_terms_for(terms.symbol, terms.market, terms.stop_pct)
+    assert perp is not None and perp.top_up is not None
+    assert (perp.top_up.within_pct, perp.top_up.usd, perp.top_up.max_times) == (
+        10,
+        2,
+        2,
+    )
+    assert terms_from_json(terms_to_json(perp)) == perp  # no ledger
+    plain = perp_terms_for(terms.symbol, _perp().market, terms.stop_pct)
+    assert plain is not None and "top_up" not in (terms_to_json(plain) or "")
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"pct": 100, "conditions": [{"type": "take_profit", "pct": 2}]},
+        {"pct": 50, "conditions": []},
+    ],
+)
+def test_a_partial_exit_sells_a_real_part_on_some_condition(partial):
+    with pytest.raises(ValidationError):
+        _perp(exit=PERP_EXIT | {"partial": partial})

@@ -11,9 +11,10 @@ métodos de depois da execução nunca levantam: `fetch_costs` degrada para
 custos desconhecidos, `fetch_failed_fees` conta a taxa base, `send_outcome`
 devolve PENDING.
 
-`PerpVenue` (A8) é o local das perps: abre e fecha uma posição por mercado e
-lado, e diz quais o venue liquidou. Os dois têm os métodos de depois da
-execução (`PostTrade`), que é o que `fills.py` usa.
+`PerpVenue` (A8) é o local das perps: abre e fecha (ou reduz, A12) uma
+posição por mercado e lado, põe colateral, guarda o stop dela e diz quais o
+venue fechou sozinho. Os dois têm os métodos de depois da execução
+(`PostTrade`), que é o que `fills.py` usa.
 """
 
 from collections.abc import Callable, Sequence
@@ -28,6 +29,7 @@ from trader.execution.models.intent import SentTx, TxOutcome
 from trader.execution.models.perp import PerpTerms
 from trader.execution.models.rent import RentRefund
 from trader.shared.models.costs import TradeCosts
+from trader.shared.models.direction import Direction
 from trader.shared.models.perp import PerpFill
 
 # o SOL que fica na carteira para as taxas, on-chain e em paper
@@ -90,51 +92,98 @@ class Liquidation:
         return self.result.perp is None or self.result.perp.liquidated
 
 
+@dataclass(frozen=True)
+class PerpSweep:
+    """Uma leitura das posições abertas (A20): as que o venue fechou sozinho
+    e as que seguem, como estão agora (a liquidação de agora)."""
+
+    exits: list[Liquidation]
+    held: dict[PerpTerms, PerpFill]
+
+
 class PerpVenue(PostTrade, Protocol):
+    """O local das perps (A8): uma posição por mercado e lado na carteira.
+
+    Toda ação que envia algo recebe a `key` da intenção (o pedido sai dela,
+    D8) e devolve um `ExecutionResult` para o gateway, inclusive as ordens que
+    ficam no venue (o stop: `venue_order` é o endereço dele, A12).
+    """
+
     async def open_perp(
         self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
     ) -> ExecutionResult:
-        """Posta `collateral` (UI do token de cotação) e abre a posição.
-
-        `key`: a chave de idempotência da intenção (o pedido sai dela, D8).
-        """
+        """Posta `collateral` (UI do token de cotação) e abre a posição."""
         ...
 
     async def close_perp(
-        self, collateral_mint: str, terms: PerpTerms, key: str
+        self,
+        collateral_mint: str,
+        terms: PerpTerms,
+        key: str,
+        fraction: Decimal = Decimal(1),
     ) -> ExecutionResult:
-        """Fecha a posição inteira; o colateral que sobrou volta à carteira."""
+        """Fecha a posição (ou `fraction` dela, A12); o colateral volta."""
+        ...
+
+    async def add_collateral(
+        self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
+    ) -> ExecutionResult:
+        """Colateral a mais na posição aberta (A12): o `perp` do resultado é a
+        posição inteira depois (colateral e liquidação novos)."""
+        ...
+
+    async def check_fresh(self, terms: PerpTerms) -> None:
+        """Levanta se o preço do venue para `terms` está parado: nenhuma
+        entrada com ele (A20: antes de a intenção existir)."""
         ...
 
     async def place_stop(
-        self,
-        terms: PerpTerms,
-        fill: PerpFill,
-        key: str,
-        announce: Callable[[SentTx], None],
-    ) -> str | None:
-        """A ordem de stop no venue (D7); o endereço dela, ou None se o venue
-        não guarda stops (o paper: o stop da spec basta)."""
+        self, terms: PerpTerms, fill: PerpFill, key: str
+    ) -> ExecutionResult:
+        """A ordem de stop no venue (D7); `venue_order` é o endereço dela, ou
+        None se o venue não precisa de envio (o paper guarda o nível)."""
         ...
 
-    async def stop_left(self, terms: PerpTerms) -> str | None:
-        """Depois de fechar: a ordem de stop que ficou no venue, se ficou."""
+    async def stop_left(self, terms: PerpTerms, order: str) -> bool:
+        """Depois de fechar: a ordem de stop `order` continua no venue?"""
         ...
 
-    async def liquidations(self, open_: Sequence[PerpTerms]) -> list[Liquidation]:
-        """Das posições `open_`, as que o venue liquidou (ao preço de agora).
+    async def cancel_stop(
+        self, terms: PerpTerms, order: str, key: str
+    ) -> ExecutionResult:
+        """Cancela a ordem de stop `order` que sobrou (A12)."""
+        ...
 
-        Só informa: a posição continua até `acknowledge`, depois que quem
-        pergunta registrou a liquidação.
+    async def sweep(self, open_: Sequence[PerpTerms]) -> PerpSweep:
+        """As posições `open_` numa leitura só: as que o venue fechou sozinho
+        (liquidação ou o stop dele), ao preço de agora, e as outras.
+
+        Só informa: uma saída continua até `acknowledge`, depois que quem
+        pergunta a registrou.
         """
         ...
 
     async def acknowledge(self, terms: PerpTerms) -> None:
-        """A liquidação de `terms` está registrada: o venue pode esquecê-la."""
+        """A saída de `terms` está registrada: o venue pode esquecê-la."""
         ...
 
     async def has_position(self, terms: PerpTerms) -> bool:
         """O venue já tem uma posição neste mercado e lado (uma por carteira)?"""
+        ...
+
+    async def open_markets(self) -> list[tuple[str, Direction]]:
+        """(mercado, lado) de cada posição aberta no venue, numa leitura só
+        (a conferência contra o ledger, D10)."""
+        ...
+
+    async def resolve_send(
+        self, sent: SentTx, terms: PerpTerms
+    ) -> ExecutionResult | None:
+        """O resultado de um envio que entrou na rede (A12, a resolução A3).
+
+        None: o keeper ainda não decidiu. `SwapRejectedError`: recusado
+        (nada mudou na posição).
+        """
         ...
 
     async def aclose(self) -> None: ...

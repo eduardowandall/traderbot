@@ -3430,3 +3430,360 @@ empty position. No schema change: can run any time after A7.
     check for `reader.lamports`).
   - **Before the long run:** restart `serve real` and `connect` (the wire
     gained the `SpecConnectedError` kind).
+
+#### A12. Perps: hardening — L (done 2026-10-09)
+
+Oracle staleness (entries denied on a stale venue
+oracle); partial closes; adding collateral; shared perp state reads through
+the price hub. From the A11b `/simplify` review (left out of A11b, which
+waits for the owner's run):
+- the venue stop as its own gateway intent (key `{key}:stop`): idempotency,
+  `intent_sent` and the resolver for free, instead of the `announce`
+  callback on `PerpVenue.place_stop` and the `perp_stop_sent` event;
+- `stop_left` reads the stop address from the ledger's `perp_stop_placed`
+  (the venue's in-memory `_stops` is lost on a restart), and cancelling it
+  from the bot;
+- the A11a `reconcile_perps` (unused) run once at the first open in one
+  batched read, replacing the per-bucket `_check_venue_position`;
+- a typed perp payload on `SentTx` instead of addresses in the mint fields
+  (needed by the perp resolver);
+- compute budgeting inside `OnChainExecutor.send_instructions` (one
+  simulation per send; the rent close would get it too);
+- one mode branch in `wiring` that builds the spot provider and the perp
+  venue together;
+- paper venue stops that fire in the sweep, so paper runs the D7 path;
+- one reading of a signature's status (owner, 2026-10-08, from A16b):
+  `AsyncRPCClient.check_signature_is_confirmed` (the wait after a send)
+  and `OnChainExecutor._status_outcome` (the resolver) each turn a status
+  into confirmed/failed/pending; one `TxOutcome` mapping for both, with
+  the confirmation tests (`test_swap_confirmation.py`) moved onto it;
+- the position account's rent when the first open is rejected (from the
+  A11c review): our request transaction creates the account even when the
+  keeper then drops the request, so the rent is paid on a REJECTED intent
+  and later opens book 0. Book it from the request transaction itself
+  (its `meta` shows the new account), not from the open that fills.
+- **Scope (owner, 2026-10-09):** everything above in one item, the A3
+  resolver for perp intents included; partial closes and adding
+  collateral come in, so §8.1's "changing collateral of an open
+  position" leaves the out-of-scope list. Size: **L**.
+- **Design (2026-10-09).** Ledger schema, wire ops and the ids of
+  `docs/examples/` don't change (new spec fields are left out of
+  `canonical_json` when unset; new intent sides are values in the
+  existing `side` column; new payload fields are optional).
+  - **Two new intent sides.** `STOP` (a venue order placed or cancelled,
+    no money moves) and `ADD` (collateral added to an open perp).
+    `legs_since_last_buy` reads `BUY`, `SELL` and `ADD`: an `ADD` grows
+    the entry's `quote_amount` and collateral (`positions.py`), so PnL
+    stays "back - posted". The policy gives `STOP` the send rules only
+    (real mode, unresolved, breaker) and `ADD` the budget rules like a
+    buy; trade counts and the daily notional count `BUY` and `ADD`.
+  - **Venue stop as an intent (`{key}:stop`, side `STOP`).** `PerpAccount`
+    places it through `execute_trade` (idempotency, policy, `intent_sent`
+    written first, the resolver), so the `announce` callback and
+    `perp_stop_sent` go; the stop fee is booked like any leg's
+    (`fetch_costs`, the leg's `fee_lamports`; `perp_stop_fee` stays
+    readable in old ledgers). `PerpVenue.place_stop(terms, fill, key)`
+    returns the result with the request address. Failing still closes
+    the position (D7). `perp_stop_placed` keeps the address.
+  - **Leftover stop.** `stop_left(terms, address)` takes the address of
+    the bucket's last `perp_stop_placed` from the ledger
+    (`Ledger.last_stop_request`), so a restart doesn't lose it; one still
+    there after the wait is cancelled at once by a `{key}:cancel` intent
+    (side `STOP`, `closePositionRequest2`, added to the vendored IDL; the
+    live suite simulates it). `perp_stop_left` is written only if the
+    cancel fails (the owner cancels in the UI).
+  - **Typed `SentTx.perp`** (`PerpSend`: `kind` open/close/stop/cancel/add,
+    `request`, `position`, and for paper the `fill`): the mint fields go
+    back to mints; `sends_of` rebuilds it (old payloads have none).
+  - **Perp resolver.** `IntentResolver` gets the mode's `PerpVenue`. For a
+    perp intent the sends are checked as for swaps (`Venue.send_outcome`:
+    the signature on chain, or the paper wallet's `applied` log); a LANDED
+    send asks `PerpVenue.resolve_send(sent, terms)`: real reads the
+    request and position accounts (request still there: pending; gone and
+    the position changed as asked: executed, the fill from the position or
+    the keeper's payout; gone and unchanged: rejected, the request's fee
+    and rent booked); paper rebuilds the result from the logged fill.
+    `STOP` intents resolve to EXECUTED/FAILED with no fill.
+  - **Compute budget inside `send_instructions`.** Sign at the 200k limit,
+    run the one balance simulation (it returns `unitsConsumed`), then
+    re-sign locally with `units x 1.3` (floor 100k) and the unit price
+    from the caller's `ComputeBudget` (recent fee accounts and a floor; the
+    rent close passes none: no priority). The perps venue stops simulating
+    on its own reader.
+  - **Rent and fee of a request from its transaction.** `fetch_costs` (fill)
+    and `fetch_failed_fees` (rejected: the `SwapRejectedError` carries the
+    landed request's signature) read the request transaction once: its fee
+    plus the rent of a position account it created (`meta` pre balance 0,
+    post > 0, at one of the wallet's position PDAs). Replaces the lamports
+    read after the fill.
+  - **One mode branch in `wiring`**: `_venues(mode)` builds the spot
+    provider and the perp venue together.
+  - **Shared perp reads (`PerpsFeed`, `market/perps/feed.py`).** One per
+    `serve`, the perps counterpart of the hub: the custody (borrow rate)
+    cached 60 s and the Doves price cached 1 s, shared by the paper borrow
+    rates and the real venue. **Stale oracle:** a real open whose Doves
+    price is older than 30 s (`MAX_ORACLE_AGE`) is refused before
+    anything is sent (`StalePriceError`; paper already refuses a stale hub
+    price).
+  - **Paper venue stops.** `SimulatedPerpsVenue.place_stop` keeps the level
+    in the position's record; `liquidations()` (the sweep, and every tick
+    in a backtest) reports a crossed stop as a venue exit at that price,
+    paid back on `acknowledge` (the pending exit is held until then).
+  - **Batched reconcile.** At the first open, `PerpVenue.open_markets()`
+    (real: every market and side PDA in one `getMultipleAccounts`; paper:
+    the wallet's `perps`) against every ledger bucket's open perp, through
+    `reconcile_perps`: each mismatch is a `perp_mismatch` event; one the
+    venue has and the ledger doesn't blocks perp buys in that market and
+    side for the process (one the ledger has and the venue doesn't is
+    booked by the sweep as a venue exit when its bucket opens). Replaces
+    `_check_venue_position`.
+  - **Partial closes.** Spec: `exit.partial = {"pct": 50, "mode": "any",
+    "conditions": [...]}` (spot and perp), fired at most once per
+    position, after the stop and the full exit had their turn; it sells
+    `pct`% of the entry. `PerpAccount.sell` honours a smaller quantity:
+    real sends `createDecreasePositionMarketRequest` with `sizeUsdDelta`
+    and `collateralUsdDelta` at that fraction (`entirePosition` false);
+    paper scales the position record. The book's partial settle already
+    handles the rest. The venue stop (whole position) stays.
+  - **Adding collateral.** Spec: `market.add_collateral = {"within_pct": 5,
+    "usd": 2, "max_times": 1}`: when the price is within `within_pct`% of
+    the liquidation price, `serve`'s sweep (and the backtest each tick)
+    adds `usd` of collateral, at most `max_times` per position, inside the
+    bucket's budget (`ADD` intent, policy budget rules). Real: an increase
+    request with `sizeUsdDelta` 0; paper: the record's collateral grows
+    and its liquidation price moves. `TradeService.check_liquidations`
+    becomes `check_perps` (exits, then top-ups).
+  - **Tests:** each step's unit tests (fakes for the RPC/reader), the perp
+    resolver for open/close/stop in real (fake reader) and paper, partial
+    and top-up through `PerpAccount` and the backtest, the policy for the
+    new sides, `canonical_json` unchanged for every example; live: the
+    cancel, the partial close and the top-up requests simulated on
+    mainnet.
+- **Built (2026-10-09).** As designed, with these differences:
+  - the community IDL's `closePositionRequest` no longer exists on chain
+    (Anchor error 101 in the simulation): the program's own on-chain IDL
+    (at its `anchor:idl` address) has `closePositionRequest2` (no
+    arguments; also the mint, system and ATA programs), now vendored and
+    simulated in the live suite;
+  - `reconcile.py` moved to `trader/execution/models/` (the service may
+    not import the venue layer), keyed by (market, side);
+  - `stop_level` lives in `execution/models/perp.py` (both venues use it)
+    and falls back to half the distance to liquidation without a spec
+    stop; a paper stop is placed and pays one network fee like a real
+    one (the backtest charges it too);
+  - `Order.reduced` (default false, out of old JSON) marks an entry that
+    had a partial sell: the strategy fires `exit.partial` once per
+    position, restarts included;
+  - a perp sell's `quantity` now matters: less than the position (beyond
+    the 1% dust rule) is a partial close;
+  - `add_collateral` fires only before the venue stop: the stop sits at
+    most half way to liquidation, so `within_pct` must be wider than
+    that distance (the docs say so); borrow drift is what it is for.
+  Tests: 948 (`test_perps_venue.py` rewritten; new tests in
+  `test_perp_buckets.py`, `test_paper_perps.py`, `test_perps_feed.py`,
+  `test_send_instructions.py`, `test_resolve.py`, `test_policy.py`,
+  `test_perp_spec.py`, `test_spec_strategy.py`, `test_perp_backtest.py`);
+  live perps 8 (3 new), all passing on 2026-10-09.
+- **Reviews (2026-10-09).**
+  - **`/code-review`** found, all fixed:
+    - a resolved real close was booked with size 0 (the whole payout as
+      profit): the close's send now logs the size it takes;
+    - a resolved top-up or partial close could book a keeper rejection as
+      filled: `PerpSend.before` holds the size or collateral before the send,
+      and one `_done` check serves the keeper wait and the resolver;
+    - the real `held()` ignored the borrow the position owes, so a top-up
+      could never fire on borrow drift: it is size x (the collateral
+      custody's cumulative rate - the position's snapshot) / 1e9 (USDC for a
+      short; a live check reads it);
+    - the resolver wrote `perp_stop_placed` for a cancel and never booked a
+      resolved stop's fee;
+    - `top_up` read the venue before the cheap checks.
+    Skipped: paper `acknowledge` pays back a pending exit even if the bucket
+    booked nothing (needs an inconsistent restore).
+  - **`/simplify`:**
+    - `with_collateral` (with the venue's close fee) covers paper's top-up and
+      `held`;
+    - `PerpTerms.top_up` is the spec's `AddCollateral`;
+    - one `record_venue_order` (`gateway/fills.py`) for the account and the
+      resolver;
+    - one `_payout` for venue exits and resolved closes;
+    - `PerpSend.fraction` is gone;
+    - open and top-up gather their independent reads;
+    - the cost read retries while the RPC indexes the transaction (12 s);
+    - the top-up cap is read only when collateral goes in;
+    - also: `TRADE_SIDES`, `Ledger.open_perp_markets`, the feed's `_cached`
+      and the hub's `MAX_AGE_SECONDS`, one compile for `resign` and
+      `sign_instructions`, and the reader's unused `borrow_bps_hour` removed.
+    Left as debt (backlog): the altitude review's deeper changes.
+  - **Tests:** 957, the CI gate green; live perps 9, green (open, close,
+    stop, partial close, top-up and cancel simulated on mainnet, and the
+    owed borrow); a paper `/smoke` of a spot spec and of a perp spec with a
+    partial exit and `add_collateral` clean.
+  - **Before the next real run:** restart `serve real` and `connect`
+    together (the wire's `Order` gained `reduced`, the terms' `market`
+    gained `add_collateral`).
+
+#### A18. Borrow rate of a short — S (done 2026-10-09)
+
+Paper (`SimulatedPerpsVenue`'s
+borrow rate) and the real entry fill (`JupiterPerpsVenue.open_perp`) read
+the market custody's rate (SOL) for every perp, but a short borrows from
+the collateral custody (USDC); `collateral_mint(terms)` already picks the
+right one and `held()` uses it. Both read `collateral_mint(terms)`'s
+custody through `PerpsFeed`. Tests: a paper short and long pick different
+custodies; live: the USDC custody's `borrow_bps_hour` is sane. Paper and
+backtest borrow costs of shorts change (the backtest's `--borrow-bps-hour`
+stays one number for either side).
+- **Design (2026-10-09).** `collateral_mint(terms)`
+  (`market/perps/reader.py`) is the custody a position borrows from: the
+  market's own token for a long, USDC for a short (Jupiter's long swaps
+  its USDC into SOL collateral). `SimulatedPerpsVenue.open_perp` asks
+  `_borrow_rate(collateral_mint(terms))` (the 5-minute cache is per
+  custody, so a long and a short each keep their own) and
+  `JupiterPerpsVenue.open_perp` reads `feed.borrow_bps_hour` of the same
+  mint for the entry fill's `borrow_bps_hour`. The replay is unchanged
+  (no live rates: `--borrow-bps-hour`). No schema, wire or spec change.
+- **Built (2026-10-09).** As designed. In both venues the helper is
+  imported as `borrowed_from` (`open_perp`'s `collateral_mint` parameter
+  would shadow it). Tests: 959 (a paper short and long ask different
+  custodies; the real entry records the USDC custody's rate); live: the USDC
+  custody decodes with a sane borrow rate. A paper `/smoke` of a 3x short
+  was clean and opened at 0.020 bps/h (the USDC custody's live rate that
+  day).
+
+#### A19. Token account rent in replays — S (done 2026-10-09)
+
+Live, the first buy of a token
+pays its account's rent (2,039,280 lamports) and the sweep refunds it when
+the bucket retires flat (A15); `ReplayExecutor` passes
+`account_rent_lamports=0`. The replay charges it like paper does (the first
+buy of a token the replay wallet has no account for) and, when the replay
+ends with no open position, books the refund as the sweep would at expiry.
+The summary and `--json` show both (`rent_usd`, `rent_refund_usd`), and
+`round_trip_costs` nets them as live (`live_vs_backtest.py` gets the same
+view). Tests: a spot round trip pays the rent once and gets it back when
+flat at the end; a perp pays none (no token account).
+- **Design (2026-10-09).** The replay wallet holds no SOL, so the rent is
+  a leg cost like the network fee (A14), not a SOL debit:
+  - `ReplayExecutor.execute` asks the wallet whether the output needs an
+    account (`needs_account`, before the swap opens it) and, if so, puts
+    `DEFAULT_ACCOUNT_RENT_LAMPORTS` in the leg's `rent_lamports`; the
+    ledger and the book carry it into the round trip's net PnL as live,
+    and `fees_usd` (which the replay equity subtracts) adds its USD at the
+    tick's SOL price. SOL and the quote token never pay (native, funded).
+  - At the end of the replay, a flat bucket is retired and closed through
+    the live path: `TradeService.retire` then `close_token_account`
+    (`RentRefunds`: the payer from the ledger, `rent_refund_sent` and
+    `rent_refund` events, the book restored). `ReplayExecutor` overrides
+    `close_token_account` to refund that rent less the base fee (5,000
+    lamports) and takes the net off `fees_usd`. A bucket still holding the
+    token (or dust) keeps it, as live.
+  - `BacktestResult` gains `rent_usd` (paid) and `rent_refund_usd`; the
+    summary prints them when non-zero, `--json` has them, and
+    `round_trip_costs` nets them through the same events as live.
+  - Also: `RentRefunds.resolve` rebuilds the logged send with
+    `SentTx.from_payload` (A12 added `SentTx.perp`, so a pending refund
+    logged before A12 would have raised `KeyError`).
+  No schema, wire or spec change.
+- **Built (2026-10-09).** As designed, with two details:
+  - the close doesn't touch the replay wallet (a SOL-quote pair would have
+    counted the refund twice: the wallet's SOL and `fees_usd`), and
+    `ReplayExecutor.fetch_fee` gives the close the base fee
+    (`replay-close-` signatures);
+  - the end-of-replay retire and close log at ERROR only (the service's and
+    the rent's loggers), so a backtest's output stays quiet.
+
+  The two JUP-SOL replay tests now include the rent (paid at 200 USD/SOL,
+  back at 210 less the fee). Tests: 962 (a replay that ends holding the
+  token keeps its account; a perp pays no rent; the summary line; a
+  `rent_refund_sent` logged before A12 resolves). `backtest` of
+  `spec-jup-sol-expr.json`: 0.2264 USD paid, 0.2229 USD back. Spot and
+  perp paper `/smoke`s clean.
+
+#### A20. Perps cleanup from the A12 reviews — M (done 2026-10-09)
+
+No behaviour change, no
+schema or wire change:
+- the live keeper wait polls `resolve_send` until it isn't None, so "did
+  the keeper execute" and the fill have one path (the resolver's), and the
+  venue's `_wait`/`_done` pair goes;
+- what each intent side means (spends, moves the position, counts as a
+  trade, its policy rules) is declared once on `IntentSide`, and
+  `POSITION_SIDES`/`SPENDING_SIDES`/`TRADE_SIDES`, `_rules_for` and the SQL
+  `IN` lists derive from it;
+- a stop placement and its cancel are told apart by the intent, not the
+  send log or the key suffix: a `TradeIntent.venue_action`
+  (`place_stop`/`cancel_stop`, stored in `perp_json`, absent on old rows);
+- "a partial exit already fired" and "top-ups so far" come from one leg
+  history of the open position (`Position.legs`, rebuilt by
+  `open_entry`), replacing `Order.reduced` (the wire field goes: restart
+  `serve` and `connect` together) and the ledger count in `top_up`;
+- the stale-oracle refusal moves above the intent
+  (`PerpVenue.fresh_price`, checked by `PerpAccount.buy` like the hub's
+  `StalePriceError`), so a stale tick leaves no REJECTED row;
+- one position read per sweep: `liquidations()` returns what it read and
+  `top_up_perps` uses it, instead of `held()` per bucket.
+- **Design (2026-10-09).**
+  - **One keeper check.** `JupiterPerpsVenue` gets `_outcome(sent, terms,
+    before)`: a venue order (stop, cancel) is done once it landed;
+    otherwise one read of the request and the position decides: changed as
+    the send asked (`_done`, checked first): the fill; request still there:
+    None (wait); request gone and unchanged: rejected, with the send's
+    signature (its fee and rent are the bucket's). The live send polls it
+    (`_wait`, 60 s, then UNCONFIRMED) and `resolve_send` calls it once. The
+    fill has one builder; only a close's payout has two sources: live,
+    the wallet's USDC before and after (`before` carries that balance and
+    the position read before the send, for the fee split); resolved, the
+    keeper's payout on the position (`last_payout`), fees unknown.
+  - **Intent sides declared once.** `IntentSide` gets properties (`spends`,
+    `moves_position`, `is_trade`); `POSITION_SIDES`, `SPENDING_SIDES`,
+    `TRADE_SIDES` and the policy's `_rules_for` derive from them (an order
+    on the venue: the send rules only).
+  - **Placing and cancelling a stop are two sides**: `STOP` and a new
+    `CANCEL` (instead of the planned `venue_action` field: a side needs no
+    storage and the policy, SQL and resolver already branch on it). The
+    account picks the side; the resolver writes `perp_stop_placed` for
+    `STOP` only, without reading the send log; the key suffix decides
+    nothing.
+  - **Leg counts on the position.** `Position` gains `partial_sells` and
+    `top_ups` (since the entry): `PositionBook.reduce` counts a sell that
+    asked for less than the position (its `requested_quantity` under the
+    1% dust rule, so a full exit that fills short is not one),
+    `PositionBook.add` counts a top-up, and the restore rebuilds both from
+    the legs (`positions.open_position`; a sell intent with
+    `closes_position` false counts). `AccountState.open_position` carries
+    them (`open_entry` stays, derived). The wire's position gains both
+    (missing: 0). `Order.reduced` goes; `exit.partial` reads
+    `partial_sells`, `add_collateral` reads `top_ups`.
+  - **Stale oracle above the intent.** `PerpVenue.check_fresh(terms)`:
+    real reads `PerpsFeed.fresh_price` (`StaleOracleError`, a
+    `SwapRejectedError`: a rejection reply, no ledger row); paper has
+    nothing to do (the hub's `StalePriceError` already stops the buy at its
+    USD snapshot, before the intent). `PerpAccount.buy` calls it first;
+    `open_perp` keeps its own check for a price gone stale in between.
+  - **One venue read per sweep.** `PerpVenue.sweep(open_) -> PerpSweep`
+    (`exits`: the positions the venue closed; `held`: the others as
+    `PerpFill`s with the liquidation of now) replaces `liquidations` and
+    `held`. `TradeService.check_perps` takes the lock once, books the exits,
+    then tops up from `held` (`PerpAccount.top_up(price, held, limit)`).
+  - Restart `serve` and `connect` together (the wire's `Order.reduced`
+    goes, the position's counts come). No schema change.
+- **Built (2026-10-09).** As designed, in five steps with the suite green
+  after each:
+  - `IntentSide.spends`/`moves_position`/`is_trade`, the tuples and
+    `_rules_for` from them;
+  - the `CANCEL` side (the account passes the side; the resolver drops the
+    send it no longer needs);
+  - `Position.partial_sells`/`top_ups` (`book.rest_of` and
+    `asked_for_part` hold the rule, `positions.open_position` rebuilds
+    them; `PositionBook.restored` takes the position);
+  - `PerpVenue.sweep`/`PerpSweep` and `check_fresh` (`check_liquidations`,
+    `top_up_perps`, `liquidations` and `held` are gone);
+  - `JupiterPerpsVenue._outcome` (with `_fill`, `_close_fill` and
+    `_Before`), polled by `_wait` and called once by `resolve_send`; `_send`
+    returns the logged `SentTx`.
+
+  Tests: 966 (a full exit that fills short isn't a partial; the counts over
+  the wire and from an old `serve`; a stale oracle leaves no intent; the
+  sweep's owed borrow). Paper `/smoke`s of a spot spec and of a perp spec
+  with a partial exit: clean.

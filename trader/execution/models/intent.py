@@ -19,8 +19,37 @@ from trader.shared.models.mints import SOLANA_MINTS, Mint
 
 
 class IntentSide(StrEnum):
+    """O que uma intenção faz; o que cada lado significa fica aqui (A20)."""
+
     BUY = auto()  # abre/aumenta posição
     SELL = auto()  # fecha posição (saída: não sofre limites de orçamento)
+    # a ordem de stop de uma perp colocada no venue (A12), e o cancelamento
+    # de uma que sobrou (A20): nada é trocado, só as travas de envio valem
+    STOP = auto()
+    CANCEL = auto()
+    # colateral a mais numa perp aberta (A12): gasta como uma compra, mas a
+    # posição é a mesma (a entrada cresce)
+    ADD = auto()
+
+    @property
+    def spends(self) -> bool:
+        """Gasta do orçamento: os limites da política e a contagem de trades."""
+        return self in (IntentSide.BUY, IntentSide.ADD)
+
+    @property
+    def moves_position(self) -> bool:
+        """Move o dinheiro de uma posição (o resto: ordens no venue)."""
+        return self not in (IntentSide.STOP, IntentSide.CANCEL)
+
+    @property
+    def is_trade(self) -> bool:
+        """Abre ou fecha (a comparação com o replay, a ida e volta)."""
+        return self in (IntentSide.BUY, IntentSide.SELL)
+
+
+POSITION_SIDES = tuple(side for side in IntentSide if side.moves_position)
+SPENDING_SIDES = tuple(side for side in IntentSide if side.spends)
+TRADE_SIDES = tuple(side for side in IntentSide if side.is_trade)
 
 
 class IntentStatus(StrEnum):
@@ -74,7 +103,7 @@ class TradeIntent:
     def pair(self) -> tuple[Mint, Mint]:
         """(token de cotação, token negociado), pelo lado da intenção."""
         spend, receive = SOLANA_MINTS[self.spend_mint], SOLANA_MINTS[self.receive_mint]
-        if self.side == IntentSide.BUY:
+        if self.side in SPENDING_SIDES:
             return spend, receive
         return receive, spend
 
@@ -122,12 +151,38 @@ class IntentRecord:
     repeat_count: int = 0
 
 
+class PerpSendKind(StrEnum):
+    OPEN = auto()
+    CLOSE = auto()
+    STOP = auto()  # a ordem de stop no venue (D7)
+    CANCEL = auto()  # cancelar a ordem de stop que sobrou
+    ADD = auto()  # colateral a mais
+
+
+@dataclass(frozen=True)
+class PerpSend:
+    """O que um envio de perp pediu ao venue (A12), para resolvê-lo depois.
+
+    Real: o pedido (`PositionRequest`) e a posição, endereços que o keeper
+    muda, e `before`: o tamanho (fechar) ou o colateral (pôr mais) da
+    posição antes do envio, em USD, para saber se o keeper executou. Paper:
+    o fill já calculado (`perp_to_dict`), aplicado na hora.
+    """
+
+    kind: PerpSendKind
+    request: str | None = None
+    position: str | None = None
+    fill: dict | None = None
+    before: str | None = None
+
+
 @dataclass(frozen=True)
 class SentTx:
     """Uma transação de swap prestes a ser enviada (A3).
 
     Gravada no ledger (`intent_sent`) **antes** do envio: depois de um
     processo morto no meio, é o que permite conferir na rede se ela entrou.
+    Uma perp (A12) leva também o `perp`; os mints são os do bucket.
     """
 
     signature: str
@@ -139,6 +194,15 @@ class SentTx:
     last_valid_block_height: int | None = None
     # paper: quando foi aplicada (epoch), para saber se saiu do registro
     sent_at: float | None = None
+    perp: PerpSend | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> SentTx:
+        """O envio gravado (`intent_sent`); os de antes da A12 não têm `perp`."""
+        perp = payload.get("perp")
+        if perp is not None:
+            perp = PerpSend(**{**perp, "kind": PerpSendKind(perp["kind"])})
+        return cls(**{**payload, "perp": perp})
 
     def to_result(self) -> ExecutionResult:
         """O resultado do swap, se este envio entrou (valores da quote)."""

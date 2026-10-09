@@ -81,11 +81,11 @@ async def test_liquidation_takes_the_whole_collateral(tmp_path):
     opened = (await venue.open_perp(USDC, SHORT3, Decimal(10), "k")).perp
     assert opened is not None and opened.liquidation_price is not None
     oracle.set(opened.liquidation_price - Decimal("0.01"))
-    assert await venue.liquidations([SHORT3]) == []
+    assert (await venue.sweep([SHORT3])).exits == []
 
     oracle.set(opened.liquidation_price + Decimal("0.01"))
-    assert await venue.liquidations([LONG3]) == []  # só as posições pedidas
-    [liquidation] = await venue.liquidations([SHORT3])
+    assert (await venue.sweep([LONG3])).exits == []  # só as posições pedidas
+    [liquidation] = (await venue.sweep([SHORT3])).exits
 
     assert liquidation.terms == SHORT3
     assert liquidation.result.perp and liquidation.result.perp.liquidated
@@ -145,10 +145,12 @@ class Rates:
     def __init__(self, *rates: Decimal | None):
         self.rates = list(rates)
         self.reads = 0
+        self.mints: list[str] = []
         self.closed = False
 
     async def borrow_bps_hour(self, mint: str) -> Decimal:
         self.reads += 1
+        self.mints.append(mint)
         rate = self.rates.pop(0)
         if rate is None:
             raise RuntimeError("RPC falhou")
@@ -191,3 +193,103 @@ async def test_a_failed_read_keeps_the_last_good_rate_or_the_default(tmp_path):
     assert await _rate(venue) == Decimal("0.17")
     clock[0] += timedelta(minutes=10)
     assert await _rate(venue) == Decimal("0.17")  # falhou: a última boa
+
+
+async def test_each_side_borrows_from_its_collateral_custody(tmp_path):
+    # A18: um vendido toma USDC emprestado; um comprado, o próprio SOL
+    rates = Rates(Decimal("0.6"), Decimal("0.2"))
+    venue, _ = _live_venue(tmp_path, rates)
+    short = (await venue.open_perp(USDC, SHORT3, Decimal(10), "s")).perp
+    long = (await venue.open_perp(USDC, LONG3, Decimal(10), "l")).perp
+    assert rates.mints == [USDC, SOL_MINT]
+    assert short is not None and short.borrow_bps_hour == Decimal("0.6")
+    assert long is not None and long.borrow_bps_hour == Decimal("0.2")
+
+
+# --- A12: o stop do venue, partes, colateral, os envios gravados ---------------
+
+
+async def _short_with_stop(tmp_path):
+    venue, wallet, oracle, clock = _venue(tmp_path)
+    terms = PerpTerms(SOL_MINT, Direction.SHORT, Decimal(3), stop_pct=Decimal(5))
+    opened = await venue.open_perp(USDC, terms, Decimal(10), "k")
+    assert opened.perp is not None
+    placed = await venue.place_stop(terms, opened.perp, "k:stop")
+    return venue, wallet, oracle, terms, placed
+
+
+async def test_the_venue_stop_fires_in_the_sweep_and_pays_back(tmp_path):
+    venue, wallet, oracle, terms, placed = await _short_with_stop(tmp_path)
+    stop = Decimal(wallet.perps()[f"{SOL_MINT}:short"]["stop"])
+    assert placed.venue_order and stop == 105
+    # o envio do stop pagou a taxa de rede, como no real
+    assert wallet.balance(SOL_MINT) == Decimal(1) - 2 * Decimal("0.000005")
+
+    oracle.set("104")
+    assert (await venue.sweep([terms])).exits == []  # antes do stop: nada
+    oracle.set("106")
+    [exit_] = (await venue.sweep([terms])).exits
+    assert not exit_.liquidated and exit_.result.perp is not None
+    back = exit_.result.perp.collateral_usd
+    assert Decimal("8") < back < Decimal("8.3")  # -6% em 30 de tamanho
+
+    before = wallet.balance(USDC)
+    await venue.acknowledge(terms)
+    assert wallet.perps() == {}
+    assert wallet.balance(USDC) == before + back.quantize(Decimal("0.000001"))
+
+
+async def test_a_partial_close_keeps_the_rest_open(tmp_path):
+    venue, wallet, oracle, clock = _venue(tmp_path)
+    opened = (await venue.open_perp(USDC, SHORT3, Decimal(10), "k")).perp
+    assert opened is not None
+
+    half = await venue.close_perp(USDC, SHORT3, "c", Decimal("0.5"))
+
+    assert half.perp is not None and half.perp.size_usd == 15
+    assert SOLANA_MINTS[SOL_MINT].raw_to_ui(half.in_amount) == Decimal("0.15")
+    rest = perp_from_dict(wallet.perps()[f"{SOL_MINT}:short"]["fill"])
+    assert rest is not None and rest.size_usd == 15
+    assert rest.collateral_usd == opened.collateral_usd / 2
+    whole = await venue.close_perp(USDC, SHORT3, "c2")
+    assert whole.perp is not None and whole.perp.size_usd == 15
+    assert wallet.perps() == {}
+
+
+async def test_added_collateral_moves_the_liquidation_away(tmp_path):
+    venue, wallet, _, _ = _venue(tmp_path)
+    opened = (await venue.open_perp(USDC, SHORT3, Decimal(10), "k")).perp
+    assert opened is not None and opened.liquidation_price is not None
+    held = (await venue.sweep([SHORT3])).held.get(SHORT3)
+    assert held is not None and held.liquidation_price == opened.liquidation_price
+
+    added = await venue.add_collateral(USDC, SHORT3, Decimal(5), "a")
+
+    grown = added.perp
+    assert grown is not None and grown.size_usd == 30
+    assert grown.collateral_usd == opened.collateral_usd + 5
+    assert (
+        grown.liquidation_price and grown.liquidation_price > opened.liquidation_price
+    )
+    assert (added.in_amount, added.out_amount) == (5_000_000, 0)
+    assert wallet.balance(USDC) == 85
+    assert await venue.open_markets() == [(SOL_MINT, Direction.SHORT)]
+
+
+async def test_each_send_is_logged_with_its_fill_and_resolves_from_it(tmp_path):
+    from trader.execution.models.intent import PerpSendKind, send_hook
+
+    venue, _, _, _ = _venue(tmp_path)
+    logged = []
+    token = send_hook.set(logged.append)
+    try:
+        opened = await venue.open_perp(USDC, SHORT3, Decimal(10), "k")
+    finally:
+        send_hook.reset(token)
+
+    [sent] = logged
+    assert sent.signature == opened.signature and sent.perp is not None
+    assert sent.perp.kind == PerpSendKind.OPEN
+    again = await venue.resolve_send(sent, SHORT3)
+    assert again is not None and again.perp == opened.perp
+    assert (again.in_amount, again.out_amount) == (opened.in_amount, opened.out_amount)

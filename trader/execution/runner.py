@@ -259,7 +259,7 @@ class TradeRunner:
         steps = (
             ("Resolução de intenções", self.service.resolve_intents),
             ("Resolução de fechamentos de conta", self.service.resolve_rent_refunds),
-            ("Conferência de liquidações", self.service.check_liquidations),  # A8
+            ("Conferência das perps", self.service.check_perps),  # A8, A12
         )
         for label, step in steps:
             try:

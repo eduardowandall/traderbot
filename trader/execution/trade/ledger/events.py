@@ -36,6 +36,8 @@ SELL_SHORTFALL = "sell_shortfall"
 PERP_MISMATCH = "perp_mismatch"
 PERP_LIQUIDATED = "perp_liquidated"
 PERP_VENUE_EXIT = "perp_venue_exit"
+# não é mais gravado (A12: o stop é uma intenção, com `intent_sent`); os
+# ledgers de antes o têm
 PERP_STOP_SENT = "perp_stop_sent"
 PERP_STOP_PLACED = "perp_stop_placed"
 PERP_STOP_FAILED = "perp_stop_failed"
