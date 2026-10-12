@@ -1,8 +1,10 @@
 """`PerpAccount`: a conta de um bucket de perp (A8, um `BucketAccount`).
 
 O mesmo caminho do `SpotAccount` (intenção -> gateway -> ledger -> ordem ->
-livro), com o `PerpVenue` no lugar do swap: a compra posta o colateral e abre
-a posição, a venda fecha a posição inteira ou uma parte dela (A12). O
+livro: a `BaseAccount` das duas, A23), com o `PerpVenue` no lugar do swap;
+a conta não conhece o `Venue` spot, só a carteira. A compra posta o
+colateral e abre a posição, a venda fecha a posição inteira ou uma parte
+dela (A12). O
 colateral é o token de cotação, lido da carteira como no spot; a posição fica
 no venue, não na carteira, então não há conferência de saldo na venda.
 
@@ -21,18 +23,22 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
 from decimal import Decimal
 
+from solders.pubkey import Pubkey
+
 from trader.execution.models.book import DUST_FRACTION
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentSide, TradeIntent
 from trader.execution.models.perp import PerpTerms
-from trader.execution.models.venue import Liquidation, PerpVenue, Venue
-from trader.execution.trade.accounts.spot import SpotAccount
+from trader.execution.models.venue import Liquidation, PerpVenue, PostTrade
+from trader.execution.trade.accounts.base import BaseAccount
+from trader.execution.trade.accounts.wallet import WalletBalances
 from trader.execution.trade.gateway.fills import (
     Fill,
     execute_trade,
     record_fill_safely,
     record_venue_order,
 )
+from trader.execution.trade.gateway.gateway import TradeGateway
 from trader.execution.trade.gateway.orders import perp_order_from_fill
 from trader.execution.trade.ledger import events
 from trader.shared.models import Order, OrderSide
@@ -45,12 +51,27 @@ VENUE_EXIT = "venue_exit"
 ONE = Decimal(1)
 
 
-class PerpAccount(SpotAccount):
-    def __init__(self, venue: Venue, perps: PerpVenue, terms: PerpTerms, *args, **kw):
-        super().__init__(venue, *args, **kw)
+class PerpAccount(BaseAccount):
+    def __init__(
+        self,
+        perps: PerpVenue,
+        terms: PerpTerms,
+        input_mint: Pubkey,
+        output_mint: Pubkey,
+        gateway: TradeGateway,
+        wallet: WalletBalances,
+        # a trava do venue para este mercado e lado (o `PerpDesk`); None: nenhuma
+        check_buy: Callable[[PerpTerms], None] | None = None,
+        **kw,
+    ):
+        super().__init__(input_mint, output_mint, gateway, wallet, **kw)
         self.perps = perps
         self.terms = terms
-        self.post_trade = perps
+        self._check_buy = check_buy
+
+    @property
+    def post_trade(self) -> PostTrade:
+        return self.perps
 
     def _to_order(
         self,
@@ -93,6 +114,8 @@ class PerpAccount(SpotAccount):
         O venue tem uma posição por mercado e lado na carteira: ocupada por
         outro bucket, a compra é recusada antes de virar intenção.
         """
+        if self._check_buy is not None:
+            self._check_buy(self.terms)  # antes de ler a carteira
         collateral = min(quantity * price, await self._buy_limit(limit))
         # antes da intenção: um oráculo parado não deixa linha no ledger (A20)
         await self.perps.check_fresh(self.terms)
@@ -329,7 +352,7 @@ class PerpAccount(SpotAccount):
         posição já usa conta), e a política vê o valor posto.
         """
         self._open_entry()
-        spendable = self._spendable_input(await self.wallet.fresh(self.input_mint))
+        spendable = await self._wallet_room()
         room = spendable if limit is None else min(spendable, limit - self.committed())
         collateral = min(collateral, room)
         if collateral <= 0:

@@ -33,7 +33,7 @@ it before the code. Track progress in §5, record decisions in §9.
 ## 2. Where we are
 
 **Overall: about 94%** (the average of goals 1, 3, 4 and 5; goal 2 is deferred
-and goal 6 is scored on its own so a new goal doesn't hide progress). 957
+and goal 6 is scored on its own so a new goal doesn't hide progress). 969
 tests. The first real run (A6, 2026-10-06/07) is done: 5 JUP-SOL round
 trips on a ~5 USD wallet, nothing UNCONFIRMED or failed, costs at or below
 the backtest's, and the token account's rent refunded at retirement.
@@ -281,6 +281,9 @@ before the code (`/phase`).
   backtest, the shifted value matches the indicator on the shorter series,
   `docs/specs.md` rows.
 
+### A23. Decoupling pass (owner, 2026-10-12)
+- **A23. What §8.4 still finds — M.** Done 2026-10-12 (in `history.md`).
+
 ### Backlog (numbered when scheduled)
 - A service entrypoint (systemd, Docker or a Windows service): kept here by
   the owner on 2026-10-09.
@@ -317,6 +320,7 @@ before the code (`/phase`).
 | A20 Perps cleanup from the A12 reviews | done | 2026-10-09; in `history.md` |
 | A21 One round trip per `connect` tick | open | |
 | A22 Crossovers in specs | open | |
+| A23 Decoupling pass | done | 2026-10-12; in `history.md` (C3's names wait for a schema bump) |
 
 ## 6. Known issues and limitations
 
@@ -458,20 +462,21 @@ decision (`trader/strategy/bot/config.py`, `decision.py`), the gateway flow
 protocol (`trader/execution/trade/venues/jupiter/executor.py`), the layer map,
 and the process split.
 
-| # | Coupling | Where | Kind | Effort |
-|---|---|---|---|---|
-| C1 | Execution imports the concrete `AsyncJupiterProvider` | `trade/gateway/account.py`, `balances.py`, `fills.py`, `trade/trading_service/service.py`, `wiring.py` | Accidental | S |
-| C2 | `AsyncAccount` mixes wallet, bucket limits, intents, fills and the book, all spot | `trade/gateway/account.py` | Accidental | M |
-| C3 | Intent, result and order are swap-shaped (`spend_mint`/`receive_mint`, `SwapResult`, `Order.input_mint`); the ledger and the policy read them | `execution/models/intent.py`, `shared/models/order.py`, `trade/ledger/store.py`, `intents.py`, `trade/policy/policy.py` | Mostly accidental | M |
-| C4 | Long-only math in positions, stops, targets and `peak` | `shared/models/position.py`, `strategy/spec/conditions.py`, `strategy.py` | Inherent, small with a direction | S-M |
-| C5 | A bucket's money is the wallet balance of the input mint; reconcile compares wallet balances | `trade/trading_service/service.py` | Inherent for reconcile | M |
-| C6 | Paper and replays simulate a wallet of tokens | `trade/venues/paper/`, `trader/backtest/replay.py` | Inherent: needs a margin engine | M |
-| C7 | Spec has no direction or leverage; a new field with a default changes every spec id | `strategy/spec/models.py` | Accidental for the id | S |
+| # | Coupling | Where | Kind | Effort | Status (review 2026-10-12) |
+|---|---|---|---|---|---|
+| C1 | Execution imports the concrete `AsyncJupiterProvider` | `trade/gateway/account.py`, `balances.py`, `fills.py`, `trade/trading_service/service.py`, `wiring.py` | Accidental | S | **Gone** (A7): only `wiring` and the backtest build venues; `test_architecture.py` enforces it |
+| C2 | `AsyncAccount` mixes wallet, bucket limits, intents, fills and the book, all spot | `trade/gateway/account.py` | Accidental | M | **Gone:** split behind `BucketAccount` (A7); `PerpAccount` subclassed `SpotAccount` and the service type-checked it until **A23** (`BaseAccount`, `PerpDesk`) |
+| C3 | Intent, result and order are swap-shaped (`spend_mint`/`receive_mint`, `SwapResult`, `Order.input_mint`); the ledger and the policy read them | `execution/models/intent.py`, `shared/models/order.py`, `trade/ledger/store.py`, `intents.py`, `trade/policy/policy.py` | Mostly accidental | M | **Holds, by choice:** `SwapResult` is `ExecutionResult` and a perp rides it with `perp` (A8); the names are ledger columns and wire fields, so a rename waits for a schema bump |
+| C4 | Long-only math in positions, stops, targets and `peak` | `shared/models/position.py`, `strategy/spec/conditions.py`, `strategy.py` | Inherent, small with a direction | S-M | **Gone** (A7): `Direction` |
+| C5 | A bucket's money is the wallet balance of the input mint; reconcile compares wallet balances | `trade/trading_service/service.py` | Inherent for reconcile | M | **Holds, inherent** (collateral is a wallet balance too); perps reconcile on the venue (A12). The wallet has its own seam since **A23** (`Wallet`) |
+| C6 | Paper and replays simulate a wallet of tokens | `trade/venues/paper/`, `trader/backtest/replay.py` | Inherent: needs a margin engine | M | **Done** (A8, A9): `SimulatedPerpsVenue`, `ReplayPerpsVenue` |
+| C7 | Spec has no direction or leverage; a new field with a default changes every spec id | `strategy/spec/models.py` | Accidental for the id | S | **Gone** (A7, A8): pinned ids, `market` out of `canonical_json` when spot |
 
 Total: roughly the size of the old B3 + B2 + B5 together. **After A7:** C1
 is gone (execution sees only `Venue`), C2 is split behind `BucketAccount`,
 C4 has its direction, C7 has pinned ids; C3, C5, C6 and the `market` field
-are A8's.
+are A8's. **Review 2026-10-12:** what was left was done in A23; C3's names stay
+until a schema bump.
 
 ### 8.5 Decisions (D1–D11)
 - **D1. Venue:** Jupiter Perps, SOL first, then ETH and wBTC.

@@ -5,6 +5,9 @@ protocolo; quem monta (`wiring`, o backtest) escolhe o local: hoje o
 `SpotVenue` (`trader/execution/trade/venues/spot.py`), que embrulha o
 provider da Jupiter, real ou paper. Perps são um `PerpVenue` (abaixo).
 
+A carteira é o `Wallet` (A23): o `Venue` spot é um `Wallet` com o swap,
+porque os tokens dele ficam na carteira.
+
 `open` gasta `spend` do input comprando o output; `close` vende `quantity`
 do output de volta para o input (os mints são sempre os do bucket). Os
 métodos de depois da execução nunca levantam: `fetch_costs` degrada para
@@ -50,7 +53,14 @@ class PostTrade(Protocol):
     async def fetch_failed_fees(self, signatures: Sequence[str]) -> int: ...
 
 
-class Venue(PostTrade, Protocol):
+class Wallet(Protocol):
+    """A carteira do modo (A23): saldos, a reserva de SOL e as contas de token.
+
+    O que os buckets leem (`WalletBalances`) e o rent de volta
+    (`RentRefunds`) usam; uma conta de perp só precisa disto e do
+    `PerpVenue`, nunca do swap.
+    """
+
     @property
     def native_fee_reserve(self) -> Decimal:
         """SOL que fica na carteira para as taxas (0 no backtest)."""
@@ -62,6 +72,14 @@ class Venue(PostTrade, Protocol):
         """Um token lido pela conta dele, não pelo índice do dono (A15)."""
         ...
 
+    async def close_token_account(
+        self, mint: str, announce: Callable[[SentTx], None]
+    ) -> RentRefund | None: ...
+
+
+class Venue(Wallet, PostTrade, Protocol):
+    """O swap: no spot o local é a própria carteira (os tokens ficam nela)."""
+
     async def open(
         self, input_mint: Pubkey, output_mint: Pubkey, spend: Decimal
     ) -> ExecutionResult: ...
@@ -71,10 +89,6 @@ class Venue(PostTrade, Protocol):
     ) -> ExecutionResult: ...
 
     async def send_outcome(self, sent: SentTx) -> TxOutcome: ...
-
-    async def close_token_account(
-        self, mint: str, announce: Callable[[SentTx], None]
-    ) -> RentRefund | None: ...
 
     async def aclose(self) -> None: ...
 

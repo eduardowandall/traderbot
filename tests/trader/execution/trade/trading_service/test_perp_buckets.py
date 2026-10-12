@@ -20,7 +20,7 @@ from trader.execution.models.intent import (
     announce_send,
 )
 from trader.execution.models.perp import PerpTerms
-from trader.execution.models.venue import Liquidation
+from trader.execution.models.venue import Liquidation, PerpVenue
 from trader.execution.trade.gateway import TradeGateway
 from trader.execution.trade.ledger import Ledger
 from trader.execution.trade.policy import Policy
@@ -59,13 +59,13 @@ class Paper:
         )
         self.ledgers: list[Ledger] = []
 
-    def service(self, perps=True) -> TradeService:
+    def service(self, perps: bool | PerpVenue = True) -> TradeService:
         """Um serviço novo sobre o mesmo ledger e a mesma carteira (reinício)."""
         wallet = SimulatedWallet(self.wallet_path)
         ledger = Ledger(self.tmp_path / "ledger.sqlite3")
         self.ledgers.append(ledger)
-        venue = None
-        if perps:
+        venue = perps if not isinstance(perps, bool) else None
+        if perps is True:
             venue = SimulatedPerpsVenue(wallet, self.oracle, clock=self.now)
         return TradeService(
             SpotVenue(paper_provider(wallet, jupiter_client=object())),
@@ -266,9 +266,8 @@ class StopFails(SimulatedPerpsVenue):
 
 
 async def test_a_failed_venue_stop_closes_the_position(paper):
-    service = paper.service()
     wallet = SimulatedWallet(paper.wallet_path)
-    service.perps = StopFails(wallet, paper.oracle, clock=paper.now)
+    service = paper.service(StopFails(wallet, paper.oracle, clock=paper.now))
     await _open(service)
 
     reply = await service.submit_order("short", _order(OrderSide.BUY, "100"))
@@ -314,8 +313,7 @@ class StopSent(SimulatedPerpsVenue):
 async def test_the_venue_stop_fee_is_a_cost_of_the_bucket(paper):
     # A11c F2: o envio do stop pagou taxa; ela entra no PnL, no orçamento e
     # nos relatórios, e um restore chega ao mesmo PnL
-    service = paper.service()
-    service.perps = StopSent(SimulatedWallet(paper.wallet_path), paper.oracle)
+    service = paper.service(StopSent(SimulatedWallet(paper.wallet_path), paper.oracle))
     await _open(service)
 
     reply = await service.submit_order("short", _order(OrderSide.BUY, "100"))
@@ -464,10 +462,9 @@ class StopStays(SimulatedPerpsVenue):
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_a_leftover_venue_stop_is_cancelled_by_the_bot(paper, fails):
-    service = paper.service()
     venue = StopStays(SimulatedWallet(paper.wallet_path), paper.oracle, clock=paper.now)
     venue.cancel_error = RuntimeError("cancel recusado") if fails else None
-    service.perps = venue
+    service = paper.service(venue)
     await _open(service)
     await service.submit_order("short", _order(OrderSide.BUY, "100"))
 
@@ -524,7 +521,9 @@ class StaleOracle(SimulatedPerpsVenue):
 async def test_a_stale_oracle_refuses_the_buy_before_any_intent(paper):
     # A20: a recusa vem antes da intenção: nenhuma linha no ledger a cada tick
     service = paper.service()
-    service.perps = StaleOracle(SimulatedWallet(paper.wallet_path), paper.oracle)
+    service = paper.service(
+        StaleOracle(SimulatedWallet(paper.wallet_path), paper.oracle)
+    )
     await _open(service)
 
     reply = await service.submit_order("short", _order(OrderSide.BUY, "100"))

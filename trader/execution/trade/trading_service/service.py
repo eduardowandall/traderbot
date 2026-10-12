@@ -1,9 +1,9 @@
 """`TradeService`: executa ordens de estratégias, cada uma no seu bucket.
 
-Camada de execução. Um bucket é uma conta lógica (`BucketAccount`; hoje o
-`SpotAccount`) com
-`account_id = "<modo>:<nome>"` (o ledger já separa posição e PnL por conta)
-e, opcionalmente, um orçamento em USD:
+Camada de execução. Um bucket é uma conta lógica (`BucketAccount`: o
+`SpotAccount` ou o `PerpAccount`) com `account_id = "<modo>:<nome>"` (o
+ledger já separa posição e PnL por conta) e, opcionalmente, um orçamento em
+USD:
 
     disponível = min(saldo gastável, max(0, orçamento + min(0, PnL realizado)))
 
@@ -24,6 +24,7 @@ fechou sozinho (liquidação, o stop dele) e registra cada uma no bucket dela;
 depois põe colateral nas que chegaram perto da liquidação
 (`market.add_collateral`, A12). Na primeira abertura de um bucket de perp, as
 posições do venue são conferidas contra as do ledger numa leitura só (A12).
+O que pergunta ao `PerpVenue` fica no `PerpDesk` (`perps.py`, A23).
 
 O modo (real/paper) é só do serviço: quem pede ordens nunca o conhece.
 """
@@ -42,15 +43,8 @@ from trader.execution.market.prices import PriceOracle, usd_snapshot
 from trader.execution.models.bucket import BucketAccount
 from trader.execution.models.errors import SwapRejectedError
 from trader.execution.models.perp import PerpTerms
-from trader.execution.models.reconcile import (
-    Market,
-    MismatchKind,
-    market_of,
-    reconcile_perps,
-)
 from trader.execution.models.rent import RentRefund
-from trader.execution.models.venue import Liquidation, PerpVenue, Venue
-from trader.execution.trade.accounts.perp import PerpAccount
+from trader.execution.models.venue import PerpVenue, Venue
 from trader.execution.trade.accounts.spot import SpotAccount, WalletShortfallError
 from trader.execution.trade.accounts.wallet import WalletBalances
 from trader.execution.trade.gateway import (
@@ -60,6 +54,7 @@ from trader.execution.trade.gateway import (
 )
 from trader.execution.trade.gateway.resolve import IntentResolver
 from trader.execution.trade.ledger import events
+from trader.execution.trade.trading_service.perps import PerpDesk
 from trader.execution.trade.trading_service.rent import RentRefunds
 from trader.shared.models import Order, OrderSide
 from trader.shared.models.perp import PerpFill
@@ -93,8 +88,6 @@ class _Bucket:
     closing: bool = False
     # já tentou fechar a conta do token (A15): uma vez por processo
     rent_checked: bool = False
-    # um bucket de perp (A8): o mercado, o lado e a alavancagem
-    perp: PerpTerms | None = None
 
 
 def remaining_budget(budget_usd: Decimal, realized_usd: Decimal) -> Decimal:
@@ -117,7 +110,6 @@ class TradeService:
         perps: PerpVenue | None = None,
     ):
         self.venue = venue
-        self.perps = perps
         self.notifier = notifier or NotificationService()
         self.prices = prices
         # no backtest, `TradeGateway.in_memory()`
@@ -133,9 +125,12 @@ class TradeService:
         # (conta, entrada) cuja venda a carteira não cobriu: um aviso só
         self._shortfalls: set[tuple[str, str]] = set()
         self._resolver = IntentResolver(gateway, venue, prices, perps)
-        # (mercado, lado) que o venue tem e o ledger não: compras recusadas
-        self._blocked_perps: set[Market] = set()
-        self._perps_reconciled = False
+        # o lado de perps (A23): conferência, travas, saídas do venue
+        self._perps = (
+            None
+            if perps is None
+            else PerpDesk(perps, gateway, self.notifier, self._prefix)
+        )
 
     def account_id(self, name: str) -> str:
         return self._prefix + name
@@ -163,13 +158,10 @@ class TradeService:
         """
         if name in self._buckets:
             raise ValueError(f"bucket {name} já está aberto")
-        account = self._account(name, input_mint, output_mint, source, perp)
-        bucket = _Bucket(account, budget_usd, max_loss_usd=max_loss_usd, perp=perp)
+        account = await self._account(name, input_mint, output_mint, source, perp)
+        bucket = _Bucket(account, budget_usd, max_loss_usd=max_loss_usd)
         self.gateway.open_account(account.account_id)  # antes do restore (ttl)
         account.restore_from_ledger()
-        if perp is not None and not self._perps_reconciled:
-            await self._reconcile_perps()
-            self._perps_reconciled = True
         if not self._reconciled:
             await self._reconcile_wallet()
             self._reconciled = True
@@ -177,154 +169,55 @@ class TradeService:
         self._buckets[name] = bucket
         self._check_max_loss(name, bucket)  # já restaurado além do limite?
 
-    def _account(
+    async def _account(
         self,
         name: str,
         input_mint: str,
         output_mint: str,
         source: str,
         perp: PerpTerms | None,
-    ) -> SpotAccount:
+    ) -> BucketAccount:
+        """A conta do bucket: spot, ou a de perp que o `PerpDesk` monta."""
         args = (Pubkey.from_string(input_mint), Pubkey.from_string(output_mint))
         kwargs = {
-            "gateway": self.gateway,
             "account_id": self.account_id(name),
             "source": source,
             "clock": self.clock,
             "prices": self.prices,
-            "wallet": self.wallet,
         }
         if perp is None:
-            return SpotAccount(self.venue, *args, **kwargs)
-        if self.perps is None:
+            return SpotAccount(
+                self.venue, *args, self.gateway, wallet=self.wallet, **kwargs
+            )
+        if self._perps is None:
             raise ValueError(f"bucket {name}: perps não disponíveis neste modo")
-        return PerpAccount(self.venue, self.perps, perp, *args, **kwargs)
-
-    async def _reconcile_perps(self) -> None:
-        """As perps do venue contra as do ledger, numa leitura só (D10, A12).
-
-        Uma posição que o venue tem e nenhum bucket abriu (aberta à mão, um
-        envio sem desfecho) recusa as compras de perp nesse mercado e lado no
-        processo; uma que o ledger tem e o venue não é registrada pela
-        varredura como uma saída do venue quando o bucket dela abre. As duas
-        viram um `perp_mismatch` para o dono conferir.
-        """
-        assert self.perps is not None  # só com um bucket de perp
-        ledger = self.gateway.ledger.open_perp_markets(self._prefix)
-        venue = await self.perps.open_markets()
-        for found in reconcile_perps(ledger, venue):
-            market = (found.market_mint, found.direction)
-            if found.kind == MismatchKind.UNKNOWN_TO_LEDGER:
-                self._blocked_perps.add(market)
-            logger.error(
-                f"Perp {found.direction} de {found.market_mint}: {found.kind}; "
-                "o dono confere a posição na Jupiter"
-            )
-            self.gateway.add_event(
-                events.PERP_MISMATCH,
-                {
-                    "market": found.market_mint,
-                    "direction": str(found.direction),
-                    "kind": str(found.kind),
-                },
-            )
+        return await self._perps.open_account(name, perp, *args, self.wallet, **kwargs)
 
     async def check_perps(self) -> dict[str, Order]:
         """A varredura das perps (A8, A12, A20), numa leitura do venue sob o
         lock de ordens: registra as saídas que o venue fez, depois põe
-        colateral nas que seguem e chegaram perto da liquidação.
-
-        Cada saída entra no ledger antes de o venue esquecer a posição
-        (`acknowledge`): uma gravação que falha deixa a posição lá, e a
-        próxima varredura tenta de novo. Devolve a ordem de saída de cada
-        bucket fechado.
+        colateral nas que seguem e chegaram perto da liquidação (só num
+        bucket ativo). Devolve a ordem de saída de cada bucket fechado.
         """
-        if self.perps is None:
+        if self._perps is None:
             return {}
         async with self._lock:
-            by_terms = {t: name for name, t in self._open_perps().items()}
-            if not by_terms:
-                return {}
-            swept = await self.perps.sweep(list(by_terms))
-            booked = await self._book_exits(swept.exits, by_terms)
-            for terms, held in swept.held.items():
-                await self._top_up(by_terms[terms], held)
+            booked, held = await self._perps.sweep(self._buckets)
+            for name in booked:
+                self._check_max_loss(name, self._buckets[name])
+            for name, fill in held.items():
+                await self._top_up(self._perps, name, fill)
         return booked
 
-    async def _book_exits(
-        self, exits: list[Liquidation], by_terms: dict[PerpTerms, str]
-    ) -> dict[str, Order]:
-        assert self.perps is not None
-        booked = {}
-        for liq in exits:
-            name = by_terms[liq.terms]
-            order = await self._book(name, liq)
-            await self.perps.acknowledge(liq.terms)
-            if order is not None:
-                booked[name] = order
-        return booked
-
-    async def _top_up(self, name: str, held: PerpFill) -> None:
-        """Colateral a mais (`market.add_collateral`), só num bucket ativo; uma
-        falha não para os outros (a próxima varredura tenta de novo)."""
+    async def _top_up(self, desk: PerpDesk, name: str, held: PerpFill) -> None:
         bucket = self._buckets[name]
-        account = bucket.account
-        assert isinstance(account, PerpAccount)
-        if account.terms.top_up is None or bucket.status != BucketStatus.ACTIVE:
-            return
-        price = await self.quote_usd(account.terms.market_mint)
-        if price is None:
+        if bucket.status != BucketStatus.ACTIVE:
             return
 
         async def cap() -> Decimal | None:
             return (await self._quote_cap(bucket))[0]
 
-        try:
-            await account.top_up(price, held, cap)
-        except Exception as ex:
-            logger.error(f"Colateral a mais em {name} falhou: {ex}")
-
-    def _open_perps(self) -> dict[str, PerpTerms]:
-        """Os buckets de perp com posição aberta -> os termos de cada um."""
-        return {
-            name: bucket.perp
-            for name, bucket in self._buckets.items()
-            if bucket.perp is not None and bucket.account.book.position is not None
-        }
-
-    async def _book(self, name: str, liq: Liquidation) -> Order | None:
-        bucket = self._buckets[name]
-        account = bucket.account
-        assert isinstance(account, PerpAccount)
-        order = await account.book_liquidation(liq)
-        if order is None:
-            return None
-        self._liquidated(name, account, order, liq.liquidated)
-        self._check_max_loss(name, bucket)
-        return order
-
-    def _liquidated(
-        self, name: str, account: PerpAccount, order: Order, liquidated: bool
-    ) -> None:
-        """Uma saída que o venue fez: liquidação (nada voltou) ou o stop dele."""
-        price = order.price  # o do oráculo (`perp_order_from_fill`)
-        what = (
-            "perp liquidada; o colateral foi perdido"
-            if liquidated
-            else f"o stop do venue fechou a perp, {order.quote_amount} USDC de volta"
-        )
-        logger.error(f"Bucket {name}: {what} (a {price})")
-        self.gateway.add_event(
-            events.PERP_LIQUIDATED if liquidated else events.PERP_VENUE_EXIT,
-            {
-                "account": account.account_id,
-                "market": account.terms.market_mint,
-                "direction": str(account.terms.direction),
-                "price": price,
-                "returned": order.quote_amount,
-            },
-        )
-        self.notifier.send_message(f"[!] {account.account_id}: {what} (a {price})")
+        await desk.top_up(name, held, self.quote_usd, cap)
 
     async def resolve_intents(self) -> None:
         """Resolve intenções sem desfecho (A3) e restaura os buckets delas.
@@ -531,12 +424,6 @@ class TradeService:
             )
         if request.side == OrderSide.SELL:
             return await self._sell(account, request)
-        perp = bucket.perp
-        if perp is not None and market_of(perp) in self._blocked_perps:
-            raise ValueError(
-                f"compras da perp {perp.direction} bloqueadas: o venue tem uma "
-                "posição que o ledger não conhece (perp_mismatch)"
-            )
         cap, _ = await self._quote_cap(bucket)
         return await account.buy(
             request.price,
@@ -649,8 +536,8 @@ class TradeService:
 
     async def aclose(self) -> None:
         await self.venue.aclose()
-        if self.perps is not None:
-            await self.perps.aclose()
+        if self._perps is not None:
+            await self._perps.aclose()
 
 
 def _retired_flat(bucket: _Bucket) -> bool:

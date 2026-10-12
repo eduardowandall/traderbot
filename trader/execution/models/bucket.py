@@ -1,9 +1,9 @@
 """`BucketAccount`: o que o `TradeService` usa da conta de um bucket (A7, D4).
 
-Hoje só o `SpotAccount` (`trader/execution/trade/accounts/spot.py`): um
-par, uma posição por vez, tokens na carteira. A conta de perps (A8) guarda
-colateral e uma posição no venue. BUY e SELL seguem querendo dizer entrar e
-sair (D2).
+Duas contas, sobre a mesma `BaseAccount` (`trader/execution/trade/accounts/`,
+A23): o `SpotAccount` (um par, uma posição por vez, tokens na carteira) e o
+`PerpAccount` (A8: colateral e uma posição no venue). BUY e SELL seguem
+querendo dizer entrar e sair (D2).
 """
 
 from datetime import datetime

@@ -3787,3 +3787,65 @@ schema or wire change:
   the wire and from an old `serve`; a stale oracle leaves no intent; the
   sweep's owed borrow). Paper `/smoke`s of a spot spec and of a perp spec
   with a partial exit: clean.
+
+#### A23. Decoupling pass — M (done 2026-10-12)
+- **Why.** A review of §8.4 against the code
+  (its status column now says what holds). Left after A7–A20: the perp
+  account is a subclass of the spot one (it carries the spot `Venue` only
+  to read the wallet), the wallet is reached through the spot `Venue`, and
+  `TradeService` holds the perp sweep inline (reconcile, venue exits,
+  top-ups, `assert isinstance(account, PerpAccount)` twice). No change in
+  behaviour, the ledger, the wire or the spec ids; the suite stays green
+  after each step.
+1. **A `Wallet` seam** (`execution/models/venue.py`): `native_fee_reserve`,
+   `balances`, `token_balance`, `close_token_account`. `Venue` is a
+   `Wallet` plus the swap (`open`/`close`, `send_outcome`, `PostTrade`):
+   on spot the venue *is* the wallet, so `SpotVenue` keeps both.
+   `WalletBalances` takes a `Wallet` (`RentRefunds` keeps the `Venue`: it
+   asks the chain about its send); the SOL fee reserve rule moves to
+   `WalletBalances.spendable`.
+2. **One base for the two accounts** (`trade/accounts/base.py`,
+   `BaseAccount`): the book, the restore, wallet reads, intents, the
+   execution into an `Order` and failed fees. `SpotAccount` adds the swap
+   and the wallet check of a sell; `PerpAccount` derives from the base,
+   not from `SpotAccount`, and takes no spot `Venue` (only the
+   `WalletBalances` and its `PerpVenue`).
+3. **The perp side of the service in its own module**
+   (`trade/trading_service/perps.py`, `PerpDesk`, like `rent.py`): the
+   reconcile at the first perp open, the buy block on a mismatch, booking
+   a venue exit (event, Telegram, `acknowledge`) and the top-up. The
+   bucket keeps its `PerpAccount` typed, so the service needs no
+   `isinstance`. `TradeService` keeps the lock, the statuses and
+   `max_loss`.
+- **Not here:** C3's swap-shaped names (`spend_mint`/`receive_mint` in
+  the ledger columns, `Order.input_mint`/`output_mint` on the wire): a
+  rename is a schema bump and a wire change, so it waits for a soak and
+  the owner (§3).
+- **Tests:** the existing suite unchanged in behaviour; the architecture
+  map gains the new modules; a test that `PerpAccount` is not a
+  `SpotAccount` and that the accounts' modules don't import
+  `trade/venues`.
+- **Built (2026-10-12).** As designed, in three steps with the suite green
+  after each: `Wallet` under `Venue` and `WalletBalances.spendable`;
+  `accounts/base.py` (`BaseAccount`) under `SpotAccount` and
+  `PerpAccount` (`PerpAccount(perps, terms, input_mint, output_mint,
+  gateway, wallet, check_buy=...)`); `trading_service/perps.py`
+  (`PerpDesk`). `test_perp_buckets.py` passes its venue fakes to
+  `Paper.service(...)` instead of setting `service.perps`. §8.4 has a
+  status column. Tests: 969 (three new in `test_venue_seams.py`).
+- **Simplified after a review (2026-10-12).** `PerpDesk` builds and keeps
+  the perp accounts (`open_account`, which reconciles once), so `_Bucket`
+  has no second `perp` field and the service never branches on perp in
+  `_execute`: the desk's market block is handed to the account and
+  checked first in `PerpAccount.buy`, next to `check_fresh` and
+  `has_position`. `PerpDesk.sweep(names)` runs the whole venue read and the
+  exit booking and returns the exits and the held positions; the service
+  checks `max_loss` and calls `PerpDesk.top_up` for its active buckets.
+  `post_trade` is an abstract property (each account keeps its venue once),
+  `BaseAccount._wallet_room` is the one fresh wallet read of `_buy_limit`
+  and `add_collateral`, and `WalletBalances.source` is the `Wallet`.
+  Unchanged on purpose: the venue-exit event is written with
+  `gateway.add_event` (a failed write must leave the exit for the next
+  sweep, not be swallowed like `PerpAccount._event`). One small shift: the
+  perp reconcile now runs when the account is built, before
+  `bucket_opened`, so an RPC failure there leaves no `bucket_opened`.

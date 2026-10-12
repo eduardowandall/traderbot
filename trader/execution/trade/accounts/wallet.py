@@ -19,7 +19,7 @@ from functools import partial
 
 from solders.pubkey import Pubkey
 
-from trader.execution.models.venue import MintBalance, Venue
+from trader.execution.models.venue import MintBalance, Wallet
 from trader.shared.logging_config import error_text
 from trader.shared.models.mints import SOL_MINT
 
@@ -31,10 +31,10 @@ BALANCE_CACHE_TTL = timedelta(minutes=3)
 class WalletBalances:
     def __init__(
         self,
-        venue: Venue,
+        source: Wallet,
         clock: Callable[[], datetime] = partial(datetime.now, UTC),
     ):
-        self.venue = venue
+        self.source = source
         self.clock = clock
         self._balances: list[MintBalance] | None = None
         self._read_at: datetime | None = None
@@ -65,14 +65,24 @@ class WalletBalances:
             raise listed
         return _larger(mint, listed, direct)
 
+    def spendable(self, mint: Pubkey | str, balance: Decimal) -> Decimal:
+        """O que de `balance` pode ser gasto; o SOL deixa a reserva de taxas.
+
+        A reserva é da carteira (`Wallet.native_fee_reserve`): 0.02 SOL
+        on-chain e em paper, zero no backtest (sem taxas de rede).
+        """
+        if str(mint) == SOL_MINT:
+            balance -= self.source.native_fee_reserve
+        return max(balance, Decimal("0"))
+
     async def _direct(self, mint: Pubkey | str) -> Decimal:
-        return await self.venue.token_balance(mint)
+        return await self.source.token_balance(mint)
 
     async def _all(self) -> list[MintBalance]:
         if not self._stale():
             return self._balances or []
         generation = self._generation
-        balances = await self.venue.balances()
+        balances = await self.source.balances()
         if generation == self._generation:
             self._balances, self._read_at = balances, self.clock()
         return balances

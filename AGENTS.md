@@ -177,7 +177,13 @@ command to run in a terminal. The rules are tested in
   `trade/trading_service` take a `Venue` (`trader/execution/models/venue.py`;
   today `SpotVenue` around the Jupiter provider, built in `wiring`/the
   backtest) and accounts are `BucketAccount`s (`trade/accounts/`: `SpotAccount`,
-  `PerpAccount`); they never import `trade/venues` (tested).
+  `PerpAccount`); they never import `trade/venues` (tested). A23: a `Venue`
+  is a `Wallet` (balances, fee reserve, token accounts; what
+  `WalletBalances` reads) plus the swap; both accounts derive from
+  `BaseAccount` (`accounts/base.py`), and `PerpAccount` takes only the
+  `WalletBalances` and its `PerpVenue`, never the spot `Venue`; the
+  service's perp side is `PerpDesk` (`trading_service/perps.py`: it builds
+  and keeps the perp accounts, reconciles, sweeps and tops up).
   Tests reach the mock provider with `spot_provider(...)` (`tests/factories.py`).
   The ids of `docs/examples/` are pinned (`test_example_ids.py`): a new spec
   field with a default must stay out of `canonical_json`.
