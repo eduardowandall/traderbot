@@ -5,7 +5,9 @@ simulada, serviço de trading — não deve depender do módulo que executa swap
 
 Os erros que encerram as tentativas de um swap levam `failed_signatures`: as
 transações que a rede confirmou como falhas antes disso. A taxa delas foi
-paga, e `execute_trade` a registra como custo do bucket.
+paga, e `execute_trade` a registra como custo do bucket. Um envio único que
+falhou na rede (os pedidos da perp, sem re-tentativas) leva a dele em
+`TransactionFailedOnChainError.signature` (A24).
 """
 
 
@@ -20,8 +22,17 @@ class SwapAttemptsError(Exception):
 
 
 def failed_signatures_of(ex: BaseException) -> tuple[str, ...]:
-    """As transações falhas que um erro de swap carrega (nenhuma em outros)."""
-    return ex.failed_signatures if isinstance(ex, SwapAttemptsError) else ()
+    """As transações falhas que um erro carrega: as tentativas de um swap, ou
+    a transação de um envio único que a rede recusou (A24); nenhuma em outros.
+
+    O provider spot nunca deixa um `TransactionFailedOnChainError` sair (ele o
+    anota nas tentativas): nada é contado duas vezes.
+    """
+    if isinstance(ex, SwapAttemptsError):
+        return ex.failed_signatures
+    if isinstance(ex, TransactionFailedOnChainError) and ex.signature:
+        return (ex.signature,)
+    return ()
 
 
 class SwapRejectedError(SwapAttemptsError):

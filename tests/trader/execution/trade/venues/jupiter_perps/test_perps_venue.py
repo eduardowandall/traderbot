@@ -25,7 +25,12 @@ from trader.execution.market.perps.reader import (
     OraclePrice,
     VenuePosition,
 )
-from trader.execution.models.errors import SwapRejectedError, TransactionSubmittedError
+from trader.execution.models.errors import (
+    SwapRejectedError,
+    TransactionFailedOnChainError,
+    TransactionSubmittedError,
+    failed_signatures_of,
+)
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import PerpSendKind, SentTx, send_hook
 from trader.execution.models.perp import PerpTerms, stop_level
@@ -146,6 +151,7 @@ class Reader:
 class Executor:
     pubkey: Pubkey
     sends: list
+    failed: bool = False  # a rede confirma o envio como falho (A24)
 
     async def send_instructions(
         self, instructions, sent, announce, mint, spend, extra, budget
@@ -155,6 +161,10 @@ class Executor:
         )
         announce(sent(signed))
         self.sends.append((instructions, mint, spend, extra, budget))
+        if self.failed:
+            raise TransactionFailedOnChainError(
+                "custom program error: 0xbc4", signature=signed.signature
+            )
         return signed
 
 
@@ -364,6 +374,53 @@ async def test_a_stop_the_keeper_clears_after_the_close_is_not_left():
     venue, _ = _venue(reader)
     reader.stop_account = b"still there for a moment"
     assert await venue.stop_left(SHORT, str(Pubkey.new_unique())) is False
+
+
+class Lingering(Reader):
+    """A ordem de stop continua lá por `reads` leituras (None: sempre)."""
+
+    def __init__(self, reads: int | None):
+        super().__init__()
+        self.reads, self.seen = reads, 0
+
+    async def accounts(self, addresses):
+        self.seen += 1
+        there = self.reads is None or self.seen <= self.reads
+        return [b"stop request" if there else None]
+
+
+@pytest.mark.parametrize(("reads", "left", "waited"), [(3, False, 6), (None, True, 30)])
+async def test_the_keeper_gets_time_to_clear_the_stop(reads, left, waited):
+    # A24 (G2): no run 2 o keeper apagou a ordem depois dos 2 s de antes, e
+    # o cancelamento falhou; a espera acaba assim que ela some
+    venue, _ = _venue(Lingering(reads))
+    slept: list[float] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    venue.sleep = sleep
+    assert await venue.stop_left(LONG, str(Pubkey.new_unique())) is left
+    assert sum(slept) == waited
+
+
+async def test_after_a_failed_cancel_the_stop_is_read_once():
+    reader = Lingering(None)
+    venue, _ = _venue(reader)
+    assert await venue.stop_left(LONG, str(Pubkey.new_unique()), wait=False) is True
+    assert reader.seen == 1
+
+
+async def test_a_send_that_fails_on_chain_carries_its_signature(sends):
+    # A24 (G1): o pedido não é re-tentado; a taxa dele vai para o bucket
+    venue, executor = _venue(Reader())
+    executor.failed = True
+    with pytest.raises(TransactionFailedOnChainError) as ex:
+        await venue.cancel_stop(LONG, str(Pubkey.new_unique()), "k:cancel")
+    failed = failed_signatures_of(ex.value)
+    assert failed == ("sig-0",) and sends[0].signature == "sig-0"
+    # uma transação que falhou não cria conta: só a taxa
+    assert await venue.fetch_failed_fees(failed) == 10_000
 
 
 async def test_costs_come_from_the_request_transaction(sends):

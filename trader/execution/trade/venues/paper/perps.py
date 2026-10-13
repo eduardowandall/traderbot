@@ -235,7 +235,7 @@ class SimulatedPerpsVenue:
         self.wallet.apply_perp(held, amended, moves, signature, amend=True)
         return result
 
-    async def stop_left(self, terms: PerpTerms, order: str) -> bool:
+    async def stop_left(self, terms: PerpTerms, order: str, wait: bool = True) -> bool:
         return False  # o stop do paper vive no registro: some com a posição
 
     async def cancel_stop(

@@ -209,8 +209,11 @@ command to run in a terminal. The rules are tested in
   (they're already in them). USD values for pairs without a stable or SOL come
   from a Price API snapshot taken **before** the trade. Attempts that failed
   on-chain carry their signatures out of the provider (`failed_signatures` on
-  the result or the error); `execute_trade` books their fee on both paths
-  (`failed_tx_fee` event + `PositionBook.charge`) and never raises doing it.
+  the result or the error), and a single send that failed (a perp request,
+  stop or cancel: no retries) carries its own on the
+  `TransactionFailedOnChainError` (`failed_signatures_of`, A24);
+  `execute_trade` books their fee on both paths (`failed_tx_fee` event +
+  `PositionBook.charge`) and never raises doing it.
   Paper fills 10 bps below the quote (`SimulatedExecutor.slippage_bps`).
 - **Priority fee (B9)** is one owner setting, `max_priority_fee_lamports` in
   `policy.toml` (default 100,000): real sends it to Jupiter as the
@@ -333,8 +336,11 @@ command to run in a terminal. The rules are tested in
   `perps_enabled` in `[real]`. Custody and Doves price reads go through one
   cached `PerpsFeed` (`market/perps/feed.py`); an open refuses a Doves price
   older than 30 s. The venue stop is its own intent (`{key}:stop`); one left
-  after a close is cancelled (`{key}:cancel`; `perp_stop_left` only if that
-  fails). Venue exits (its stop fired, a liquidation) are booked from the
+  after a close is cancelled (`{key}:cancel`). The keeper removes it itself
+  after a close, so `stop_left` reads it every 2 s for up to 30 s before
+  calling it left, and a cancel that fails re-reads it once (`wait=False`):
+  gone is no leftover (A24); `perp_stop_left` only if it is still there.
+  Venue exits (its stop fired, a liquidation) are booked from the
   keeper's USDC payout in the sweep. Costs outside the collateral (A11c,
   A12): a request's fee and the rent of a position account it created come
   from its transaction's `meta`, filled or rejected (Jupiter keeps the

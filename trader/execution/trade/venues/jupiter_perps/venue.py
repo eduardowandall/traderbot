@@ -87,8 +87,9 @@ logger = logging.getLogger(__name__)
 KEEPER_TIMEOUT_SECONDS = 60  # D8
 KEEPER_POLL_SECONDS = 2
 # depois de fechar, o keeper apaga a ordem de stop em segundos (no run 1,
-# 1 s; A11c F3); a conferência roda sob o lock de ordens: curta
-STOP_CLEANUP_SECONDS = 2
+# 1 s, A11c F3; no run 2, duas vezes depois dos 2 s de antes, A24). Roda sob
+# o lock de ordens, como a espera do keeper: acaba assim que a ordem some
+STOP_CLEANUP_SECONDS = 30
 # a transação confirmada chega ao índice do RPC em segundos (como o
 # `get_confirmed_transaction` dos swaps, que espera ~11 s)
 COSTS_READ_SECONDS = 12
@@ -278,14 +279,19 @@ class JupiterPerpsVenue:
         sent = await self._send(terms, request, 0, send)
         return _order_result(sent.signature, terms, str(request.request))
 
-    async def stop_left(self, terms: PerpTerms, order: str) -> bool:
-        """A ordem de stop `order` continua no venue depois de fechar?"""
+    async def stop_left(self, terms: PerpTerms, order: str, wait: bool = True) -> bool:
+        """A ordem de stop `order` continua no venue depois de fechar?
+
+        O keeper a apaga logo depois do fechamento: com `wait`, só sobra se
+        continuar lá por `STOP_CLEANUP_SECONDS`, lida a cada
+        `KEEPER_POLL_SECONDS` (F3, A24); sem, uma leitura só.
+        """
         request = Pubkey.from_string(order)
-        # o keeper apaga a ordem logo depois do fechamento: só sobra se
-        # continuar lá depois de mais um pouco (F3)
-        if await self._gone(request):
-            return False
-        await self.sleep(STOP_CLEANUP_SECONDS)
+        polls = STOP_CLEANUP_SECONDS // KEEPER_POLL_SECONDS if wait else 0
+        for _ in range(polls):
+            if await self._gone(request):
+                return False
+            await self.sleep(KEEPER_POLL_SECONDS)
         return not await self._gone(request)
 
     async def cancel_stop(

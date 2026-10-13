@@ -86,7 +86,7 @@ the ledger or the policy.
 | 4 | `service.py:457` `_place` → `:471` `_execute` | Dispatches on side: `account.buy(..., limit=<cap in the quote token>)`. Any exception becomes an `OrderReply` (denied / rejected / error), logged once. | Nothing from execution crosses into the strategy side as an exception. |
 | 5 | `trader/execution/trade/accounts/spot.py:108` `buy` → `base.py:240` `_buy_limit` | One balance read; checks no open position, the minimum, the SOL fee reserve and the bucket cap; computes `spend = quantity * price` once (capped). | Budget and wallet limits in one place. |
 | 6 | `spot.py:240` `_usd_snapshot`, `:243` `_intent` | USD snapshot of both sides and SOL from the process's price oracle (the hub; stablecoins are 1), **before** the trade; builds the `TradeIntent` (spend amount, USD notional, idempotency key). | After EXECUTED nothing may fail, so no fetch happens later. |
-| 7 | `trader/execution/trade/gateway/fills.py:59` `execute_trade` | The one pipeline for every trade: `gateway.submit`, then costs. Whether the swap filled or not, attempts the chain confirmed as failed get their fee read and booked (`failed_tx_fee` event, `PositionBook.charge`), never raising. | Enforces the order "EXECUTED first, costs second"; a failed transaction still cost the bucket its fee. |
+| 7 | `trader/execution/trade/gateway/fills.py:59` `execute_trade` | The one pipeline for every trade: `gateway.submit`, then costs. Whether the swap filled or not, attempts the chain confirmed as failed get their fee read and booked (`failed_tx_fee` event, `PositionBook.charge`), never raising: the provider's `failed_signatures`, or the signature of a single send's `TransactionFailedOnChainError` (a perp request, A24; `failed_signatures_of`). | Enforces the order "EXECUTED first, costs second"; a failed transaction still cost the bucket its fee. |
 | 8 | `trader/execution/trade/gateway/gateway.py:190` `submit` → `:214` `_authorize` → `trader/execution/trade/ledger/ledger.py:38` `authorize` | In one `BEGIN IMMEDIATE` transaction: idempotency lookup, `policy_state()` (daily notional, trades/hour, loss, breaker since this process started, unresolved intents), `policy.evaluate` (`policy/policy.py:353`, pure), insert the intent as EXECUTING or DENIED. | Two processes can never pass the same limit or reuse a key. |
 | 9 | `gateway.py:230` `_execute` → `SpotVenue.open` (`venues/spot.py`) → `venues/jupiter/provider.py:141` `buy` → `:181` `swap_with_details` → `_attempts` → `_do_swap` | Raw amount from the intent's spend; quote, price-impact cap, the quote's value against the Price API (≤ 2% below; on in real and paper), up to 3 attempts with rising slippage and a 60s deadline. Signatures of attempts that failed on-chain leave on the result or the final error (`failed_signatures`). | Retries are safe only before broadcast. |
 | 10 | `trader/execution/trade/venues/paper/executor.py:79` `SimulatedExecutor.execute` → `paper/wallet.py:175` `apply_swap` | The output is the quote's minus `slippage_bps` (10), never below its `otherAmountThreshold`. Under a file lock: re-read, debit input + fee (base + the policy's priority-fee cap) + first-time rent, credit output, write atomically. Returns an `ExecutionResult` with the simulated costs. | Paper behaves like the chain (fees, rent, slippage) across processes. |
@@ -373,9 +373,13 @@ accounts, 60 s): executed fills from the position (open, add) or the USDC
 that came back (close); dropped is REJECTED; no answer is UNCONFIRMED, which
 the resolver later settles through `resolve_send` (A12). The live wait and
 `resolve_send` share one check (`_outcome`, A20). An open refuses a
-Doves price older than 30 s. `PerpAccount` places the venue stop after each
-recorded open and sells at once if it can't, and cancels one left after a
-close; the sweep books exits the venue made (its stop, a liquidation) from
+Doves price older than 30 s. A request that fails on chain ends FAILED and
+its fee is a `failed_tx_fee` (A24). `PerpAccount` places the venue stop
+after each recorded open and sells at once if it can't, and cancels one
+left after a close: the keeper removes it itself within seconds, so
+`stop_left` reads it every 2 s for up to 30 s first, and a cancel that fails
+re-reads it once; only a stop still there is `perp_stop_left` (A24). The
+sweep books exits the venue made (its stop, a liquidation) from
 the keeper's payout. At the first perp open, `reconcile_perps`
 (`execution/models/reconcile.py`) checks the venue's positions against the
 ledger's in one read.

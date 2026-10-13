@@ -12,6 +12,7 @@ from decimal import Decimal
 import pytest
 from factories import PerpOracle, events_of
 
+from trader.execution.models.errors import TransactionFailedOnChainError
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import (
     IntentSide,
@@ -450,14 +451,19 @@ class StopStays(SimulatedPerpsVenue):
     """Um venue em que o stop sobra depois de fechar (o real, sem o keeper)."""
 
     cancel_error: Exception | None = None
+    # a releitura depois de um cancelamento que falhou (A24): ainda lá?
+    left_after_cancel = True
 
-    async def stop_left(self, terms, order):
-        return True
+    async def stop_left(self, terms, order, wait=True):
+        return True if wait else self.left_after_cancel
 
     async def cancel_stop(self, terms, order, key):
         if self.cancel_error is not None:
             raise self.cancel_error
         return ExecutionResult("cancel-sig", USDC, SOL_MINT, 0, 0, venue_order=order)
+
+    async def fetch_failed_fees(self, signatures):
+        return 10_000 * len(signatures)  # um cancelamento recusado no run 2
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -476,6 +482,32 @@ async def test_a_leftover_venue_stop_is_cancelled_by_the_bot(paper, fails):
     assert sides.count(IntentSide.STOP) == sides.count(IntentSide.CANCEL) == 1
     left = events_of(ledger, "perp_stop_left")
     assert bool(left) is fails  # só quando o cancelamento falha, o dono cancela
+
+
+@pytest.mark.parametrize("still_there", [False, True])
+async def test_a_cancel_that_fails_on_chain_books_its_fee(paper, still_there):
+    # A24 (G1, G2): o keeper apagou a ordem entre a conferência e o envio, e
+    # o cancelamento falhou na rede (Anchor 3012). A taxa dele é do bucket, e
+    # só uma ordem que continua lá é sobra
+    venue = StopStays(SimulatedWallet(paper.wallet_path), paper.oracle, clock=paper.now)
+    venue.cancel_error = TransactionFailedOnChainError(
+        "custom program error: 0xbc4", signature="cancel-sig"
+    )
+    venue.left_after_cancel = still_there
+    service = paper.service(venue)
+    await _open(service)
+    await service.submit_order("short", _order(OrderSide.BUY, "100"))
+
+    assert (await service.submit_order("short", _sell("100"))).filled
+
+    ledger = paper.ledgers[-1]
+    [fee] = events_of(ledger, "failed_tx_fee")
+    assert (fee["signatures"], fee["fee_lamports"]) == (["cancel-sig"], 10_000)
+    [cancel] = [r for r in ledger.list_intents() if r.intent.side == IntentSide.CANCEL]
+    assert cancel.status == IntentStatus.FAILED
+    book = service._buckets["short"].account.book
+    assert book.failed_fee_sol == Decimal("0.00001")  # 0.001 USD a 100
+    assert bool(events_of(ledger, "perp_stop_left")) is still_there
 
 
 async def test_a_perp_open_killed_mid_send_is_resolved_from_its_logged_send(

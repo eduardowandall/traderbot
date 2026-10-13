@@ -16,6 +16,7 @@ from trader.execution.market.jupiter.quote import JupiterQuoteResponse
 from trader.execution.models.errors import (
     SwapFailedError,
     TransactionFailedOnChainError,
+    failed_signatures_of,
 )
 from trader.execution.models.execution import ExecutionResult
 from trader.execution.models.intent import IntentStatus, TxOutcome
@@ -136,6 +137,14 @@ class TestProvider:
     async def test_an_unreadable_fee_counts_as_the_base_fee(self):
         provider = _provider(FlakyExecutor(failures=0, fee=None))
         assert await provider.fetch_failed_fees(["a", "b"]) == 2 * BASE_FEE_LAMPORTS
+
+
+def test_a_single_send_that_failed_on_chain_carries_its_signature():
+    # A24: um pedido da perp não re-tenta; o erro do executor sai direto
+    failed = TransactionFailedOnChainError("custom program error: 0xbc4", "sig")
+    assert failed_signatures_of(failed) == ("sig",)
+    assert failed_signatures_of(TransactionFailedOnChainError("sem assinatura")) == ()
+    assert failed_signatures_of(RuntimeError("rpc caiu")) == ()
 
 
 class TestBooking:

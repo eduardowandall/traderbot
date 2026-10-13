@@ -3849,3 +3849,44 @@ schema or wire change:
   sweep, not be swallowed like `PerpAccount._event`). One small shift: the
   perp reconcile now runs when the account is built, before
   `bucket_opened`, so an RPC failure there leaves no `bucket_opened`.
+
+#### A24. Perp send fixes from the overnight long — S (done 2026-10-13)
+- **Why** (G1, G2 of A11b's run 2, the long, in `plan.md`). Reconciled
+  against the chain, the wallet spent 1,875,146 lamports of SOL and the
+  ledger booked 1,855,146 (rent 1,747,520 + fees 107,626); the USDC PnL
+  matched exactly. The 20,000 missing lamports are two stop cancels that
+  failed on chain (Anchor 3012: the keeper had already closed the stop
+  request), which also logged two false ERRORs and wrote `perp_stop_left`.
+1. **A perp send that fails on chain books its fee.**
+   `OnChainExecutor.send_instructions` raises
+   `TransactionFailedOnChainError` with the signature, but
+   `failed_signatures_of` only read `SwapAttemptsError`s (the spot provider
+   folds its attempts into one), so `execute_trade` booked nothing for a
+   perp request, stop or cancel that failed. It now also takes the
+   `signature` of a bare `TransactionFailedOnChainError` (one send, no
+   retries: the perp venue's). The intent stays FAILED; the fee is a
+   `failed_tx_fee` event and comes off the bucket (`PositionBook.charge`),
+   read by `JupiterPerpsVenue.fetch_failed_fees` (a failed transaction
+   creates no account: the fee only). The spot provider never lets that
+   error out, so nothing is booked twice.
+2. **The stop cancel waits for the keeper.** After a whole close,
+   `stop_left` read the stop request, waited 2 s and read again; twice the
+   keeper closed it (refunding its rent) after the second read. Now it
+   reads every `KEEPER_POLL_SECONDS` (2 s) for up to `STOP_CLEANUP_SECONDS`
+   (30) and returns as soon as the request is gone (the whole 30 s only for
+   a stop really left, under the order lock like the keeper wait). A cancel
+   that fails re-reads the request once (`PerpVenue.stop_left(..., wait=
+   False)`): gone means the keeper took it (a warning, no
+   `perp_stop_left`); still there, or unreadable, is the ERROR and the
+   event, as before.
+- **Built (2026-10-13).** As designed: `failed_signatures_of`
+  (`execution/models/errors.py`); `PerpVenue.stop_left` takes `wait`
+  (`JupiterPerpsVenue` polls, the paper venue ignores it);
+  `PerpAccount._cancel_failed`/`_still_left`. No schema, wire or spec-id
+  change. Tests: 7 new (976): a perp cancel that fails on chain books
+  `failed_tx_fee` and charges the bucket, with `perp_stop_left` only when
+  the request stays (`test_perp_buckets.py`); the venue's failed send
+  carries its signature and costs the fee only, `stop_left` waits for a
+  keeper that clears the request after 6 s and gives up after 30 s, one
+  read with `wait=False` (`test_perps_venue.py`); `failed_signatures_of` on
+  the bare error (`test_failed_tx_fees.py`).

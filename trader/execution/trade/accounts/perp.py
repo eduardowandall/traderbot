@@ -16,7 +16,8 @@ intenção `ADD` que faz a entrada crescer (`PositionBook.add`).
 A ordem de stop no venue (D7) é uma intenção própria (`{chave}:stop`, lado
 `STOP`, A12): passa pelo gateway como um trade (idempotência, o envio gravado
 antes, a resolução), sem mover dinheiro. A que sobra depois de fechar é
-cancelada do mesmo jeito (`{chave}:cancel`).
+cancelada do mesmo jeito (`{chave}:cancel`); uma que o keeper apagou antes
+do cancelamento chegar não é sobra (A24).
 """
 
 from collections.abc import Awaitable, Callable
@@ -294,11 +295,31 @@ class PerpAccount(BaseAccount):
                 sol_usd,
             )
         except Exception as ex:
-            self.logger.error(
-                f"{self.account_id}: a ordem de stop {order} ficou na Jupiter e "
-                f"não foi cancelada ({ex}): cancele-a lá"
+            await self._cancel_failed(order, ex)
+
+    async def _cancel_failed(self, order: str, ex: Exception) -> None:
+        """O cancelamento falhou (a taxa dele já é do bucket, A24). Se a ordem
+        sumiu, o venue a apagou entre a conferência e o envio (o keeper; o
+        cancelamento falha com Anchor 3012): nada sobrou."""
+        if not await self._still_left(order):
+            self.logger.warning(
+                f"{self.account_id}: o cancelamento da ordem de stop {order} "
+                f"falhou ({ex}), mas ela já saiu da Jupiter"
             )
-            self._event(events.PERP_STOP_LEFT, {"request": order})
+            return
+        self.logger.error(
+            f"{self.account_id}: a ordem de stop {order} ficou na Jupiter e "
+            f"não foi cancelada ({ex}): cancele-a lá"
+        )
+        self._event(events.PERP_STOP_LEFT, {"request": order})
+
+    async def _still_left(self, order: str) -> bool:
+        """Uma leitura da ordem; sem ela, conta como sobrando (o dono confere)."""
+        try:
+            return await self.perps.stop_left(self.terms, order, wait=False)
+        except Exception as ex:
+            self.logger.warning(f"Ordem de stop {order} não relida: {ex}")
+            return True
 
     def _open_entry(self) -> Order:
         position = self.book.position

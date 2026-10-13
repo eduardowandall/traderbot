@@ -158,8 +158,13 @@ class PerpVenue(PostTrade, Protocol):
         None se o venue não precisa de envio (o paper guarda o nível)."""
         ...
 
-    async def stop_left(self, terms: PerpTerms, order: str) -> bool:
-        """Depois de fechar: a ordem de stop `order` continua no venue?"""
+    async def stop_left(self, terms: PerpTerms, order: str, wait: bool = True) -> bool:
+        """Depois de fechar: a ordem de stop `order` continua no venue?
+
+        `wait`: dá ao venue o tempo de apagá-la sozinho (o keeper da
+        Jupiter, A24); False: uma leitura só (depois de um cancelamento que
+        falhou).
+        """
         ...
 
     async def cancel_stop(
