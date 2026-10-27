@@ -1,24 +1,29 @@
 """`RemoteTradeClient`: o `TradeClient` de um strategy-runner (camada strategy-side).
 
 Fala com o trade-runner (`main.py serve`) por JSON em linhas sobre TCP local
-(`docs/plan.md` §3.3). Não tem chave, ledger nem modo. O `hello` leva só os
+(`docs/architecture.md` §9). Não tem chave, ledger nem modo. O `hello` leva só os
 termos da spec (`SpecTerms`); a spec inteira fica neste processo. Toda ordem sai com
 chave de idempotência: se a conexão cai, o cliente reconecta (espera
 crescente), manda `hello` de novo e reenvia o pedido com a mesma chave, então
 uma ordem executa no máximo uma vez (o reenvio de uma que já executou volta
 recusado, e o próximo `bucket()` mostra a posição).
 
-Os dados de mercado também vêm do trade-runner: `price` (o hub dele) e
-`candles` (o aquecimento); o strategy-runner não fala com a Jupiter.
+Os dados de mercado também vêm do trade-runner: `tick` (os preços do hub
+dele e o bucket numa resposta, A21; `RemoteTicks`), `price` e `candles` (o
+aquecimento); o strategy-runner não fala com a Jupiter.
 """
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 
+from trader.shared.market.feed import TICK_SECONDS, Pacer
+from trader.shared.market.pair import pair_price
+from trader.shared.models import SOLANA_MINTS
 from trader.shared.models.public_data import Interval, TickerData
 from trader.shared.spec.terms import SpecTerms
 from trader.shared.trading_service.protocol import (
@@ -34,6 +39,7 @@ from trader.shared.trading_service.wire import (
     candles_from_list,
     decode,
     encode,
+    prices_from_dict,
     reply_from_dict,
     request_to_dict,
     snapshot_from_dict,
@@ -91,6 +97,16 @@ class RemoteTradeClient:
             request = replace(request, idempotency_key=uuid.uuid4().hex)
         answer = await self._call({"op": "submit", "request": request_to_dict(request)})
         return reply_from_dict(answer["reply"])
+
+    async def tick(self, mints: list[str]) -> tuple[dict[str, Decimal], BucketSnapshot]:
+        """Os preços USD dos mints (do hub) e o bucket, numa ida e volta (A21).
+
+        Um preço velho lá recusa o tick todo: `PriceUnavailableError`.
+        """
+        answer = await self._call({"op": "tick", "mints": mints})
+        return prices_from_dict(answer["prices"]), snapshot_from_dict(
+            answer["snapshot"]
+        )
 
     async def price(self, mint: str) -> Decimal:
         """O preço USD do mint pelo hub do trade-runner (um feed para todos).
@@ -196,6 +212,69 @@ class RemoteTradeClient:
             int(info["port"]),
             info["token"],
         )
+
+
+async def stop_specs(connection: dict, terms: SpecTerms | None) -> list[dict]:
+    """A parada manual (A33): um op `stop`, sem `hello`, pela spec ou todas.
+
+    Devolve um item por bucket (`bucket`, `spec`, `outcome` e, numa venda
+    recusada, `reasons`). Sem reconexão: parar de novo é seguro.
+    """
+    message: dict = {"op": "stop", "token": connection["token"]}
+    if terms is None:
+        message["all"] = True
+    else:
+        message["terms"] = terms.model_dump(mode="json")
+    reader, writer = await asyncio.open_connection(
+        connection["host"], int(connection["port"]), limit=LINE_LIMIT
+    )
+    try:
+        writer.write(encode(message))
+        await writer.drain()
+        line = await reader.readline()
+    finally:
+        writer.close()
+    if not line:
+        raise TradeServiceError("o trade-runner fechou a conexão")
+    answer = decode(line)
+    if answer.get("ok"):
+        return answer["stopped"]
+    if answer.get("kind") == "HelloError" and "hello" in str(answer.get("error")):
+        # um `serve` de antes da A33 não conhece o op e pede o `hello`
+        raise TradeServiceError(
+            "o serve rodando é de uma versão sem `stop`: reinicie o serve "
+            "(as posições ficam no ledger) e rode o `stop` de novo"
+        )
+    raise TradeServiceError(answer.get("error") or "parada recusada")
+
+
+class RemoteTicks:
+    """O `TickSource` de um `connect` (A21): um op `tick` por tick, no ritmo
+    do `Pacer` (um por segundo).
+
+    Num par sem stablecoin pede também o USD da cotação e divide aqui, como
+    `PairMarketData`: o preço da estratégia é sempre no token de cotação.
+    """
+
+    def __init__(
+        self,
+        trader: RemoteTradeClient,
+        symbol: str,
+        interval: float = TICK_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+    ):
+        self.trader = trader
+        _, quote = SOLANA_MINTS.get_pair(symbol)
+        self.quote = None if quote.is_usd_stable else quote.mint
+        self.pacer = Pacer(interval, monotonic)
+
+    async def tick(self, mint: str) -> tuple[Decimal, BucketSnapshot]:
+        await self.pacer.wait()
+        if self.quote is None:
+            prices, snapshot = await self.trader.tick([mint])
+            return prices[mint], snapshot
+        prices, snapshot = await self.trader.tick([mint, self.quote])
+        return pair_price(prices[mint], prices[self.quote], self.quote), snapshot
 
 
 class RemoteCandles:

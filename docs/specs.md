@@ -4,7 +4,7 @@ Every strategy is a JSON file, written by hand or by an agent from this
 guide. There is no command to create, submit or register one: you write the
 file, backtest it, run it in paper, and iterate. This page is the contract; the
 code that enforces it is `trader/strategy/spec/models.py` (format) and
-`validate.py` (limits), and `tests/test_spec_docs.py` fails if a field or
+`trader/shared/spec/validate.py` (limits), and `tests/test_spec_docs.py` fails if a field or
 condition type is missing here.
 
 Specs live next to the examples in [`examples/`](examples/). Start from
@@ -100,16 +100,42 @@ of buying the token. `symbol` is `BASE-QUOTE` with a USDC quote:
   fee, an hourly borrow fee on the size (in paper, Jupiter's live rate when
   the position opens, from the custody it borrows: SOL for a long, USDC for
   a short; ~0.02-0.2 bps of the size an hour in Oct 2026), and
-  the network fee of each leg. If
+  the network fee of each leg. The first open of a market and side also
+  pays the rent of the position's account (1,747,520 lamports, ~0.0017
+  SOL): Jupiter never closes it and reuses it, so later opens pay none and
+  nothing comes back. Real, paper and the backtest all charge it once; the
+  cost per round trip leaves it out and shows it apart
+  (`account_rent_usd`, A25). If
   the collateral left falls to 0.2% of the size, the position is
   **liquidated**: the whole collateral is lost and counts toward
   `max_loss_usd`.
+- **Reading a perp's PnL (A31).** `bruto` is collateral back - posted, so
+  it is already after the venue's fees and the borrow; the bucket's summary
+  opens it as `bruto X (preço P, taxas perp -F, empréstimo -B)`, with
+  `P - F - B = X` (the open's fee and both closes of a partial count once),
+  and the network costs stay in `custos ... SOL`. `connect`'s SELL line says
+  the same for that close (`fechamento: ...`). The open position's line
+  shows `preço` (the move on the size) and `colateral` (the mark-to-market,
+  after the open fee, the fee of closing now and the borrow so far, as a %
+  of the collateral posted): at 150x, 0.5% of price is ~75% of the
+  collateral before fees, and the fees (0.12% of the size) are ~18% of it.
+  An exit the venue made by itself (its stop, a liquidation) is booked from
+  the payout with no split: its fees stay in `preço`.
 - The venue holds its own stop for every open position (at the spec's stop or
   half the distance to liquidation, whichever is closer). It fires even when
   `connect` is down; the sweep books what came back. Paper and the backtest
   fire it too, and each placement pays one network fee.
+- **SOL to keep.** The collateral is USDC, but each Jupiter request locks
+  3,723,640 lamports (~0.0037 SOL) of rent until the keeper runs, the venue
+  stop locks the same while the position is open, and the close request
+  locks another next to it. A buy is refused before it reaches the ledger
+  unless the wallet holds the fee reserve (0.02 SOL) + two of those locks
+  + the position account's rent (first open of a market and side only) +
+  three sends at the priority-fee cap: **~0.0295 SOL** for the first open,
+  ~0.0278 after it (with the default 100,000-lamport cap). Keep ~0.03 SOL
+  next to the USDC; paper checks the same, the backtest doesn't (A26).
 - `add_collateral` (optional): when the price comes within `within_pct`%
-  (0–50) of the liquidation price, the trade-runner adds `usd` of collateral
+  (0 < W ≤ 50) of the liquidation price, the trade-runner adds `usd` of collateral
   (inside the bucket's budget, which already counts the position), at most
   `max_times` (1–10, default 1) times per position. The size stays; the
   liquidation price moves away. Borrow fees move the liquidation price
@@ -124,7 +150,9 @@ of buying the token. `symbol` is `BASE-QUOTE` with a USDC quote:
   path (a gap past it liquidates before the stop), and the summary shows the
   perp fees, the borrow paid and the liquidations. `--borrow-bps-hour N`
   sets the borrow rate (default 1); `--fee-bps`/`--slippage-bps` don't apply
-  to a perp. Examples: `spec-sol-perp-long.json`, `spec-sol-perp-short.json`.
+  to a perp. Examples: `spec-sol-perp-long.json`, `spec-sol-perp-short.json`,
+  and `spec-sol-perp-reversion.json` (a 2x long on a 4.5% stretch under the
+  24 h mean, backtested over four months; its rationale has the numbers).
 
 ## How a spec trades
 
@@ -152,7 +180,8 @@ On every price tick:
 
 **Warm-up.** At startup the bot seeds the indicators from candles. The spec
 needs as many bars as its slowest condition: the `window` for SMA/WMA and
-highs/lows, 5x the window for EMA, 10x the period + 1 for RSI, capped at 900
+highs/lows, the `window` + 1 for volatility, 5x the window for EMA, 10x the
+period + 1 for RSI, capped at 900
 bars. Candles only exist for bars with trades: a bar without one repeats the
 previous close, so a thinly traded token is warm at once. A gap in the live
 price feed longer than 5 bars restarts the series, and the spec warms up again
@@ -180,10 +209,12 @@ take `"ma": "sma" | "ema" | "wma"` (default `sma`).
 | `price_above_ma` | `ma`, `window`, `pct` (default 0) | price > MA(window) + pct% |
 | `fast_ma_above_slow` | `ma`, `fast`, `slow` (fast < slow) | MA(fast) > MA(slow) |
 | `fast_ma_below_slow` | `ma`, `fast`, `slow` (fast < slow) | MA(fast) < MA(slow) |
+| `ma_crosses_above` | `ma`, `fast`, `slow` (fast < slow) | MA(fast) > MA(slow) now, and MA(fast) ≤ MA(slow) one closed bar ago: the tick of the cross |
+| `ma_crosses_below` | `ma`, `fast`, `slow` (fast < slow) | MA(fast) < MA(slow) now, and MA(fast) ≥ MA(slow) one closed bar ago |
 | `dip_from_high` | `window`, `pct` | price ≤ highest close of `window` bars − pct% |
 | `rebound_from_low` | `window`, `pct` | price ≥ lowest close of `window` bars + pct% |
-| `price_below` | `value` (USD) | price < value |
-| `price_above` | `value` (USD) | price > value |
+| `price_below` | `value` (in the quote token, > 0) | price < value |
+| `price_above` | `value` (in the quote token, > 0) | price > value |
 | `volatility_below` | `window`, `pct` | std. dev. of the last `window` bar returns < pct% |
 | `random_chance` | `pct` (1–100, integer) | a random draw hits, `pct`% of the draws; one draw **per tick**, not per unit of time: live, one tick per second for any token (the hub's pace); a candle backtest, 4 to 25 ticks per bar (for tests; `--seed` makes it repeatable) |
 | `expr` | `expr` (text, max 200 chars) | the expression holds; see below |
@@ -197,7 +228,10 @@ spec error with its position), never run as code.
 - **Values:** numbers, `price`, `entry_price`, `peak` (the highest price since
   entry), `last_exit_price`, and the indicators `sma(n)`, `ema(n)`, `wma(n)`,
   `rsi(n)`, `high(n)`, `low(n)` (highest/lowest close), `volatility(n)` (in %),
-  with `n` an integer number of bars (2–500).
+  with `n` an integer number of bars (2–500). A second integer reads the
+  indicator that many closed bars ago (0–50): `ema(9, 1)` is the EMA at the
+  last closed bar, `ema(9, 0)` is `ema(9)` (the bar still forming, which ends
+  at the current price).
 - **Operators:** `+ - * /`, unary `-`, one comparison per pair of values
   (`< <= > >=`), `and`, `or`, `not`, parentheses. `and` binds tighter than
   `or`.
@@ -207,17 +241,21 @@ spec error with its position), never run as code.
   and only a true expression fires. So `not rsi(14) < 30` does **not** fire
   while the RSI is warming up.
 - **Warm-up** counts the indicators inside, like the blocks (EMA 5x, RSI 10x
-  + 1). Spaces and redundant parentheses don't change the spec id.
+  + 1, plus the bars back). Spaces and redundant parentheses don't change the
+  spec id.
 
 Examples: `(sma(5) - sma(20)) / sma(20) > 0.01` (5-bar average 1% above the
 20-bar one); `price >= entry_price * 1.03 and rsi(14) > 70` (an exit);
-`price < low(50) * 1.01 or rsi(7) < 20` (an entry).
+`price < low(50) * 1.01 or rsi(7) < 20` (an entry); `ema(9) > ema(21) and
+ema(9, 1) <= ema(21, 1)` (the fast EMA crossing above the slow one: what
+`ma_crosses_above` says); `rsi(14) > rsi(14, 3)` (the RSI rising over three
+bars).
 
 ### Entry-only conditions
 
 | `type` | Parameters | True when |
 |---|---|---|
-| `below_last_exit` | `pct` (default 0) | price ≤ the last exit price − pct%. False before the first exit. |
+| `below_last_exit` | `pct` (required) | price ≤ the last exit price − pct%. False before the first exit. |
 | `no_last_exit` | — | the bucket has never exited. Pair it with `below_last_exit` under `entry.mode: any` to make the first buy explicit. |
 
 ### Exit-only conditions
@@ -271,6 +309,6 @@ The trade-runner (`serve`) refuses a spec that breaks any of these when its
    `real_trading_enabled = true` in `policy.toml`.
 
 Most new ideas fit in an `expr`. A building block that doesn't exist yet (a
-new indicator, a crossover) is a code change: a model in `models.py`, its union
+new indicator, a new pattern) is a code change: a model in `models.py`, its union
 there, and a predicate in `conditions.PREDICATES` — then a row in this page
 (and, for an indicator, a function in `expr.py`).

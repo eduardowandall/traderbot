@@ -67,7 +67,11 @@ class Paper:
         self.ledgers.append(ledger)
         venue = perps if not isinstance(perps, bool) else None
         if perps is True:
-            venue = SimulatedPerpsVenue(wallet, self.oracle, clock=self.now)
+            # sem o rent da conta da posição: os testes dele são do A25
+            # (test_perp_position_rent.py)
+            venue = SimulatedPerpsVenue(
+                wallet, self.oracle, clock=self.now, position_rent_lamports=0
+            )
         return TradeService(
             SpotVenue(paper_provider(wallet, jupiter_client=object())),
             TradeGateway(ledger, self.policy, False),
@@ -335,8 +339,17 @@ async def test_the_venue_stop_fee_is_a_cost_of_the_bucket(paper):
     assert live == -Decimal(fee["fee_usd"])  # nada fechado: só a taxa do stop
     totals = paper.ledgers[-1].pnl_totals(account.account_id)
     assert totals.net_usd == live and totals.fee_lamports >= 10_000
+    # A30: no PnL nativo também (run 3 mostrava só as pernas)
+    book = account.book
+    assert book.costs_sol == Decimal("0.00001")
+    assert book.net_quote == live and book.incomplete == 0
+    assert (totals.costs_sol, totals.net_quote) == (book.costs_sol, book.net_quote)
     account.restore_from_ledger()
     assert account.book.realized_usd == live
+    assert (account.book.costs_sol, account.book.net_quote) == (
+        book.costs_sol,
+        book.net_quote,
+    )
 
 
 # --- A12 ----------------------------------------------------------------------
@@ -566,3 +579,68 @@ async def test_a_stale_oracle_refuses_the_buy_before_any_intent(paper):
         "SELECT COUNT(*) FROM intents WHERE account = ?", (account,)
     ).fetchone()[0]
     assert rows == 0
+
+
+async def test_a_round_trip_splits_price_fees_and_borrow_after_a_restart(paper):
+    # A31: o bruto (colateral devolvido - postado) já vem depois das taxas do
+    # venue e do empréstimo; o livro e o ledger o abrem nas três partes
+    service = paper.service()
+    await _open(service)
+    entry = (await service.submit_order("short", _order(OrderSide.BUY, "100"))).order
+    paper.clock[0] += timedelta(hours=2)
+    paper.oracle.set("95")
+    exit_ = (await service.submit_order("short", _sell("95"))).order
+    assert entry and entry.perp and exit_ and exit_.perp and exit_.quote_amount
+    book = service._buckets["short"].account.book
+
+    fees = entry.perp.fees_usd + exit_.perp.fees_usd
+    assert exit_.perp.borrow_usd > 0
+    assert book.perp_fees_quote == fees
+    assert book.perp_borrow_quote == exit_.perp.borrow_usd
+    # 5% a favor do vendido em 30 de tamanho, exato: as partes somam o bruto
+    assert book.price_quote == Decimal("1.5")
+    assert book.gross_quote == exit_.quote_amount - 10
+    assert (
+        f"preço +1.500000, taxas perp {-fees:+.6f}, "
+        f"empréstimo {-exit_.perp.borrow_usd:+.6f}"
+    ) in book.summary()
+
+    restarted = paper.service()
+    await _open(restarted)
+    again = restarted._buckets["short"].account.book
+    assert (again.perp_closes, again.perp_fees_quote, again.perp_borrow_quote) == (
+        1,
+        book.perp_fees_quote,
+        book.perp_borrow_quote,
+    )
+    assert again.summary() == book.summary()
+
+
+async def test_a_top_up_and_a_partial_close_count_each_fee_once(paper):
+    service = paper.service()
+    terms = _topping()
+    await _open(service, terms)
+    entry = (await service.submit_order("short", _order(OrderSide.BUY, "100"))).order
+    assert entry and entry.perp
+    account = service._buckets["short"].account
+    paper.oracle.set("110")
+    await service.check_perps()  # +2 de colateral: o fill repete o da entrada
+    assert account.book.position.entry_order.quote_amount == 12
+    size = account.book.position.entry_order.quantity
+
+    paper.oracle.set("105")
+    first = (await service.submit_order("short", _sell("105", str(size / 2)))).order
+    rest = (await service.submit_order("short", _sell("105"))).order
+    assert first and first.perp and rest and rest.perp
+    book = account.book
+
+    closes = first.perp.fees_usd + rest.perp.fees_usd
+    assert book.perp_fees_quote == pytest.approx(entry.perp.fees_usd + closes)
+    # 5% contra o vendido em 30 de tamanho
+    assert book.price_quote == pytest.approx(Decimal("-1.5"))
+    restarted = paper.service()
+    await _open(restarted, terms)
+    again = restarted._buckets["short"].account.book
+    assert again.perp_closes == 2
+    assert again.perp_fees_quote == pytest.approx(book.perp_fees_quote)
+    assert again.price_quote == pytest.approx(book.price_quote)

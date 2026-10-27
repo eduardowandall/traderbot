@@ -27,6 +27,11 @@ def data_dir() -> Path:
     return _resolve(os.getenv("TRADER_DATA_DIR") or ".data")
 
 
+def candles_dir() -> Path:
+    """O cache de candles passados do backtest (A34), em `data_dir()`."""
+    return data_dir() / "candles"
+
+
 def connection_path(mode: str) -> Path:
     """O arquivo de conexão do trade-runner do modo (`serve` escreve, `connect` lê)."""
     return data_dir() / f"trader-{mode}.json"

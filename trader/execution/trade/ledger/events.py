@@ -28,6 +28,8 @@ POSITION_LEFTOVER = "position_leftover"
 # buckets
 BUCKET_OPENED = "bucket_opened"
 BUCKET_RETIRED = "bucket_retired"
+# parado pelo dono (`main.py stop`, A33): vale também depois de reiniciar
+BUCKET_STOPPED = "bucket_stopped"
 BUCKET_MAX_LOSS = "bucket_max_loss"
 RECONCILE_MISMATCH = "reconcile_mismatch"
 SELL_SHORTFALL = "sell_shortfall"

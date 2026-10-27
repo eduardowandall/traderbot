@@ -86,7 +86,8 @@ def _ledger(mode: str, limit: int) -> dict:
             "unresolved": list(ledger.policy_state().unresolved_intent_ids),
             "positions": positions,
             "pnl": pnl,
-            # tudo que cada ida e volta custou (B9), em USD e bps
+            # tudo que cada ida e volta custou (B9), em USD e bps; o rent da
+            # conta de uma posição perp à parte, `account_rent_usd` (A25)
             "round_trip_costs": {
                 a: ledger.round_trip_costs(a).as_dict() for a in accounts
             },

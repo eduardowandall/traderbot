@@ -6,7 +6,7 @@ import pytest
 
 from trader.execution.models.book import PositionBook
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
-from trader.shared.models.costs import FailedTxFee, TradeCosts
+from trader.shared.models.costs import FailedTxFee, TradeCosts, outside_cost_quote
 from trader.shared.models.position import Position
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
@@ -66,7 +66,7 @@ def test_orders_without_native_amounts_count_as_incomplete():
     assert closed.pnl is None
     assert book.realized_usd == Decimal("10")  # preço x quantidade
     assert book.incomplete == 1
-    assert "[!] 1 trade(s) incompleto(s)" in book.summary()
+    assert "[!] 1 incompleto(s)" in book.summary()
 
 
 def test_one_position_at_a_time():
@@ -95,7 +95,7 @@ def test_restored_reopens_the_entry_and_keeps_totals():
     assert book.position.partial_sells == 1  # as contagens do restore (A20)
     assert book.summary() == (
         "PNL líquido -3.000000 USDC (~$-3.0000); bruto -2.000000, "
-        "custos 0.010000000 SOL [!] 1 trade(s) incompleto(s)"
+        "custos 0.010000000 SOL [!] 1 incompleto(s)"
     )
 
 
@@ -116,19 +116,37 @@ class TestMarkToMarket:
 
 
 class TestFailedTxFees:
-    def test_charge_reduces_realized_usd_and_shows_in_summary(self):
+    def test_charge_reduces_the_pnl_and_shows_in_summary(self):
         book = PositionBook("USDC")
-        book.charge(FailedTxFee(("sig",), 15_000, Decimal("0.003")))
+        book.charge(FailedTxFee(("sig",), 15_000, Decimal("0.003")), Decimal("0.003"))
 
         assert book.realized_usd == Decimal("-0.003")
         assert book.failed_fee_sol == Decimal("0.000015")
-        assert "tx falhas 0.000015000 SOL" in book.summary()
+        # A30: no PnL nativo também, não só ao lado
+        assert book.costs_sol == Decimal("0.000015")
+        assert book.net_quote == Decimal("-0.003")
+        assert "custos 0.000015000 SOL (inclui tx falhas 0.000015000)" in (
+            book.summary()
+        )
 
-    def test_a_fee_without_usd_only_counts_in_sol(self):
+    def test_a_fee_without_a_quote_value_is_incomplete(self):
         book = PositionBook("USDC")
-        book.charge(FailedTxFee(("sig",), 5_000, None))
+        book.charge(FailedTxFee(("sig",), 5_000, None), None)
         assert book.realized_usd == Decimal("0")
-        assert book.failed_fee_sol == Decimal("0.000005")
+        assert book.costs_sol == Decimal("0.000005")
+        assert book.net_quote == Decimal("0")
+        assert book.incomplete == 1
+
+
+def test_a_cost_outside_the_legs_counts_in_every_figure():
+    # A30: a taxa do stop do venue (run 3: o livro mostrava só as pernas)
+    book = PositionBook("USDC")
+    book.charge_outside(Decimal("0.00001"), Decimal("0.00107"), Decimal("0.00107"))
+
+    assert book.costs_sol == Decimal("0.00001")
+    assert book.net_quote == Decimal("-0.00107")
+    assert book.realized_usd == Decimal("-0.00107")
+    assert book.incomplete == 0
 
 
 @pytest.mark.parametrize(("requested", "partial"), [("0.4", 1), ("1", 0)])
@@ -158,3 +176,13 @@ def test_a_position_carries_its_leg_counts_over_the_wire():
     del old["partial_sells"], old["top_ups"]  # um `serve` de antes da A20
     again = position_from_dict(old)
     assert again is not None and again.partial_sells == again.top_ups == 0
+
+
+@pytest.mark.parametrize(
+    ("quote", "expected"),
+    [("SOL", Decimal("0.00001")), ("USDC", Decimal("0.00107")), ("JUP", None)],
+)
+def test_an_outside_cost_in_the_quote_token(quote, expected):
+    # A30: exato em SOL e num estável; outra cotação não converte
+    mint = SOLANA_MINTS.get_by_symbol(quote)
+    assert outside_cost_quote(mint, Decimal("0.00001"), Decimal("0.00107")) == expected

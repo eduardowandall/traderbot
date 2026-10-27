@@ -21,7 +21,7 @@ do cancelamento chegar não é sobra (A24).
 """
 
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, replace
+from dataclasses import replace
 from decimal import Decimal
 
 from solders.pubkey import Pubkey
@@ -32,6 +32,7 @@ from trader.execution.models.intent import IntentSide, TradeIntent
 from trader.execution.models.perp import PerpTerms
 from trader.execution.models.venue import Liquidation, PerpVenue, PostTrade
 from trader.execution.trade.accounts.base import BaseAccount
+from trader.execution.trade.accounts.spot import WalletShortfallError
 from trader.execution.trade.accounts.wallet import WalletBalances
 from trader.execution.trade.gateway.fills import (
     Fill,
@@ -43,6 +44,7 @@ from trader.execution.trade.gateway.gateway import TradeGateway
 from trader.execution.trade.gateway.orders import perp_order_from_fill
 from trader.execution.trade.ledger import events
 from trader.shared.models import Order, OrderSide
+from trader.shared.models.costs import LAMPORTS_PER_SOL
 from trader.shared.models.mints import SOL_MINT
 from trader.shared.models.perp import PerpFill
 
@@ -50,6 +52,18 @@ LIQUIDATION = "liquidation"
 # o venue fechou sozinho e algo voltou (a ordem de stop dele disparou)
 VENUE_EXIT = "venue_exit"
 ONE = Decimal(1)
+
+
+class SolRoomError(WalletShortfallError):
+    """Uma abertura de perp sem o SOL que os pedidos dela travam (A26)."""
+
+    def __init__(self, needed: Decimal, available: Decimal):
+        super().__init__(SOL_MINT, needed, available, entry_id="")
+        self.args = (
+            f"perp não aberta: a carteira tem {available:.9f} SOL e a abertura "
+            f"precisa de {needed:.9f} (a reserva de taxas, duas travas de pedido "
+            "da Jupiter, o rent da conta da posição se ela é nova e três envios)",
+        )
 
 
 class PerpAccount(BaseAccount):
@@ -125,6 +139,7 @@ class PerpAccount(BaseAccount):
                 f"a perp {self.terms.direction} deste mercado já está aberta por "
                 "outro bucket (uma posição por mercado e lado)"
             )
+        await self._check_sol_room()
         usd = await self._usd_snapshot()
         intent = self._intent(
             IntentSide.BUY,
@@ -145,11 +160,26 @@ class PerpAccount(BaseAccount):
             price,
             usd,
         )
-        self.logger.info(f"PERP ABERTA: {asdict(order)}", extra=asdict(order))
+        self._log_fill("PERP ABERTA", order)
         record_fill_safely(self.gateway, intent.intent_id, order)
         self.book.open(order)
         await self._place_stop(order, key, usd.get(SOL_MINT))
         return order
+
+    async def _check_sol_room(self) -> None:
+        """Recusa a abertura sem o SOL que os pedidos dela travam (A26, G4).
+
+        A abertura gasta o token de cotação, então o saldo gastável não olha o
+        SOL: sem ele, a posição abriria e o stop ou o fechamento falhariam na
+        rede. Lido agora, antes da intenção (nenhuma linha no ledger).
+        """
+        needed = await self.perps.open_sol_lamports(self.terms)
+        if needed is None:
+            return
+        want = self.wallet.source.native_fee_reserve + needed / LAMPORTS_PER_SOL
+        sol = await self.wallet.fresh(SOL_MINT)
+        if sol < want:
+            raise SolRoomError(want, sol)
 
     # --- a ordem de stop no venue (D7) ------------------------------------------
 
@@ -206,7 +236,7 @@ class PerpAccount(BaseAccount):
         )
         placed = fill.result.venue_order if side == IntentSide.STOP else None
         usd = record_venue_order(self.gateway, intent, fill, sol_usd, placed)
-        self.book.charge_cost(usd)
+        self._charge_outside(fill.costs.fee_lamports if fill.costs else 0, usd)
 
     async def _stop_failed(self, order: Order, key: str, ex: Exception) -> None:
         self.logger.error(f"{self.account_id}: o stop do venue falhou ({ex}); fechando")
@@ -269,7 +299,7 @@ class PerpAccount(BaseAccount):
             price,
             usd,
         )
-        self.logger.info(f"PERP FECHADA: {asdict(order)}", extra=asdict(order))
+        self._log_fill("PERP FECHADA", order)
         order = self._settle(intent.intent_id, order, may_keep_rest=not whole)
         if whole:
             await self._cancel_stop_left(key, usd.get(SOL_MINT))
@@ -397,7 +427,7 @@ class PerpAccount(BaseAccount):
             price,
             usd,
         )
-        self.logger.info(f"PERP COLATERAL: {asdict(order)}", extra=asdict(order))
+        self._log_fill("PERP COLATERAL", order)
         record_fill_safely(self.gateway, intent.intent_id, order)
         self.book.add(order)
         return order

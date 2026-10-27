@@ -17,6 +17,8 @@ feed dá o preço do token em USD e o fill dá cotação por token).
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from trader.shared.models.mints import SOL_MINT, Mint
+
 LAMPORTS_PER_SOL = Decimal(10**9)
 BASE_FEE_LAMPORTS = 5000  # por assinatura
 # teto padrão da priority fee por transação (0.0001 SOL); o dono muda em
@@ -86,6 +88,19 @@ def lamports_usd(lamports: int, sol_usd: Decimal | None) -> Decimal | None:
     return Decimal(lamports) / LAMPORTS_PER_SOL * sol_usd
 
 
+def outside_cost_quote(
+    quote: Mint, sol: Decimal, usd: Decimal | None
+) -> Decimal | None:
+    """Um custo fora das pernas (pago em SOL) no token de cotação (A30).
+
+    Exato numa cotação em SOL (os próprios SOL) ou num estável em USD (o USD
+    do custo); outra cotação, ou sem o USD, dá None (custo não convertido).
+    """
+    if quote.mint == SOL_MINT:
+        return sol
+    return usd if quote.is_usd_stable else None
+
+
 def priority_fee_lamports(fee: int, signatures: int = 1) -> int:
     """A prioridade de um `meta.fee`: o que passa da taxa base por assinatura."""
     return max(fee - BASE_FEE_LAMPORTS * signatures, 0)
@@ -148,6 +163,17 @@ class PnLResult:
     gross_usd: Decimal | None
     costs_usd: Decimal | None
     complete: bool  # custos reais conhecidos e convertidos
+    # numa perp (A31): o que o venue cobrou, já dentro de `gross_quote`
+    # (colateral devolvido - postado); None no spot
+    perp_fees_quote: Decimal | None = None
+    perp_borrow_quote: Decimal | None = None
+
+    @property
+    def price_quote(self) -> Decimal | None:
+        """Numa perp, o ganho do preço: o bruto antes das taxas e do empréstimo."""
+        if self.perp_fees_quote is None or self.perp_borrow_quote is None:
+            return None
+        return self.gross_quote + self.perp_fees_quote + self.perp_borrow_quote
 
     @property
     def net_quote(self) -> Decimal | None:
@@ -170,13 +196,33 @@ class PnLResult:
         flag = "" if self.complete else " [!] incompleto"
         return (
             f"PNL líquido {net_text}{usd_text}; bruto "
-            f"{self.gross_quote:+.6f} {self.quote_symbol}, custos "
-            f"{self.costs_sol:.9f} SOL{flag}"
+            f"{self.gross_quote:+.6f} {self.quote_symbol}{self.perp_split()}, "
+            f"custos {self.costs_sol:.9f} SOL{flag}"
         )
+
+    def perp_split(self) -> str:
+        """` (preço +x, taxas perp -y, empréstimo -z)` numa perp; vazio no spot."""
+        price = self.price_quote
+        if price is None:
+            return ""
+        fees, borrow = self.perp_fees_quote, self.perp_borrow_quote
+        assert fees is not None and borrow is not None
+        return perp_split_text(price, fees, borrow)
+
+
+def perp_split_text(price: Decimal, fees: Decimal, borrow: Decimal) -> str:
+    """As partes do bruto de uma perp (A31), que somam o bruto: o preço, as
+    taxas do venue (abertura e fechamento) e o empréstimo."""
+    return f" (preço {price:+.6f}, taxas perp {-fees:+.6f}, empréstimo {-borrow:+.6f})"
 
 
 def sol_text(lamports: int) -> str:
     return f"{Decimal(lamports) / LAMPORTS_PER_SOL:.9f}"
+
+
+def _nonzero(template: str, lamports: int) -> str:
+    """Uma parte dos custos, só se não é 0 (A32: `rent 0.000000000` era ruído)."""
+    return template.format(sol_text(lamports)) if lamports else ""
 
 
 def describe_costs(costs: TradeCosts | None, sol_usd: Decimal | None = None) -> str:
@@ -184,12 +230,10 @@ def describe_costs(costs: TradeCosts | None, sol_usd: Decimal | None = None) -> 
     if costs is None or not costs.known:
         return "custos: desconhecidos (valores da quote)"
     usd = f" (~${costs.native_cost_sol * sol_usd:.4f})" if sol_usd else ""
-    text = (
-        f"custos [{costs.source}]: taxa {sol_text(costs.fee_lamports)} SOL "
-        f"(priority {sol_text(costs.priority_fee_lamports)}), "
-        f"rent {sol_text(costs.rent_lamports)} SOL, "
-        f"outros {sol_text(costs.other_lamports)} SOL{usd}"
-    )
+    text = f"custos [{costs.source}]: taxa {sol_text(costs.fee_lamports)} SOL"
+    text += _nonzero(" (priority {})", costs.priority_fee_lamports)
+    text += _nonzero(", rent {} SOL", costs.rent_lamports)
+    text += _nonzero(", outros {} SOL", costs.other_lamports) + usd
     if costs.slippage_raw:
         text += f"; slippage {costs.slippage_raw} raw"
     return text
@@ -207,11 +251,16 @@ class RoundTripCosts:
     entrada - 1)) menos o PnL líquido realizado. Sobra spread, taxas de pool,
     slippage e taxas de rede (base + priority) num número só, igual no real,
     no paper e no backtest (todos gravam o preço do tick na intenção).
+
+    O rent da conta de uma posição perp fica à parte (A25): a Jupiter nunca a
+    fecha e a reusa nas aberturas seguintes do mesmo mercado e lado, então é
+    um depósito único, não um custo de cada ida e volta.
     """
 
     count: int = 0  # posições fechadas
     notional_usd: Decimal = Decimal("0")  # gasto na entrada das pernas somadas
     cost_usd: Decimal = Decimal("0")
+    account_rent_usd: Decimal = Decimal("0")  # contas de posição perp (A25)
 
     def add(self, cost_usd: Decimal, notional_usd: Decimal, closes: bool) -> None:
         self.cost_usd += cost_usd
@@ -222,6 +271,10 @@ class RoundTripCosts:
         """Um custo fora das pernas (o stop do venue, A11c); negativo, um
         reembolso (o rent devolvido, A15)."""
         self.cost_usd += usd
+
+    def deposit(self, usd: Decimal) -> None:
+        """O rent da conta de uma posição perp: fora do custo por ida e volta."""
+        self.account_rent_usd += usd
 
     @property
     def per_trip_usd(self) -> Decimal | None:
@@ -235,10 +288,13 @@ class RoundTripCosts:
     def describe(self) -> str:
         if self.per_trip_usd is None or self.bps is None:
             return "custo por ida e volta: sem idas e voltas fechadas"
-        return (
+        text = (
             f"custo por ida e volta ~${self.per_trip_usd:.4f} "
             f"({self.bps:.1f} bps) em {self.count}"
         )
+        if self.account_rent_usd:
+            text += f"; rent da conta da perp ~${self.account_rent_usd:.4f} à parte"
+        return text
 
     def as_dict(self) -> dict:
         return {
@@ -247,4 +303,5 @@ class RoundTripCosts:
             "cost_usd": self.cost_usd,
             "per_trip_usd": self.per_trip_usd,
             "bps": self.bps,
+            "account_rent_usd": self.account_rent_usd,
         }

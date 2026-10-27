@@ -23,10 +23,12 @@ IDS = {
     "spec-soak-revert.json": "e104dba8efcd",
     "spec-sol-dip.json": "8bb94a8356d2",
     "spec-sol-perp-long.json": "053f32754697",
+    "spec-sol-perp-reversion.json": "048bdec03437",
     "spec-sol-perp-short.json": "9ee89cd395a6",
     "spec-sol-short.json": "fd41130ea6d3",
     "spec-target-value.json": "132be7f10464",
     "spec-wma-composer.json": "5422d6605a9a",
+    "spec-wma-composer-perp.json": "62419bec0aa4",
 }
 
 

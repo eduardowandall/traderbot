@@ -4,7 +4,7 @@ This document explains the code by following **one paper buy** from the command
 line to the wallet and back, hop by hop. Read §3 first; the rest fills in what
 changes for sells, real mode and backtests, and where the state lives.
 
-Line numbers are as of 2026-09-30 and will drift; the function names are the
+Line numbers are as of 2026-10-12 and will drift; the function names are the
 stable handle. The roadmap and open issues are in [`plan.md`](plan.md); the
 finished stages are in [`history.md`](history.md).
 
@@ -33,7 +33,7 @@ The top folders of `trader/` follow the two processes:
 
 | Folder | Process | What |
 |---|---|---|
-| `trader/execution/` | the trade-runner (`serve`) | `market/`: everything that reads Jupiter (the client, candles, the `PriceHub`, the USD oracle), never moves funds; `trade/`: the key, wallet, ledger, policy, venues and the one path to a swap; `runner.py` is the `serve` server (it also answers `price` and `candles`), `wiring.py` builds it per mode |
+| `trader/execution/` | the trade-runner (`serve`) | `market/`: everything that reads Jupiter (the client, candles, the `PriceHub`, the USD oracle), never moves funds; `trade/`: the key, wallet, ledger, policy, venues and the one path to a swap; `runner.py` is the `serve` server (it also answers `tick`, `price` and `candles`), `wiring.py` builds it per mode |
 | `trader/strategy/` | the strategy-runner (`connect`) | the bot loop (`bot/`), the spec engine (`spec/`), the client of the trade-runner (`trading_service/`); `runner.py` builds one bot |
 | `trader/shared/` | both | models, the strategy's feed without network (`market/`: `MarketData`, `HubMarketData`, pairs), the spec's terms (`spec/`: `SpecTerms` and the policy checks over them, all the trade-runner sees of a spec, B13), the wire protocol (`trading_service/`), `paths.py`, Telegram |
 | `trader/api/cli/` | entry points | the Typer commands and the per-mode process lock |
@@ -51,10 +51,10 @@ the ledger or the policy.
 | app | commands and wiring | `main.py`, `trader/api/cli/` (`serve`, `connect`, `backtest`), `trader/execution/runner.py`, `trader/execution/wiring.py` (mode -> components), `trader/execution/notification/` (daily report), `trader/backtest/` |
 | strategy-side | the loop that knows no mode, key or ledger | `trader/strategy/bot/` (`loop.py`, `decision.py`, `config.py`), `trader/strategy/trading_service/` (`client.py`, `remote.py`), `trader/strategy/runner.py` |
 | strategy | specs: pure signals | `trader/strategy/spec/` (`models.py`, `expr.py`, `parse.py`, `strategy.py`, `conditions.py`) |
-| execution | buckets, their accounts, the one path to a swap; reaches a venue only through the `Venue` protocol (A7, tested) | `trader/execution/trade/trading_service/` (`service.py`: `TradeService`; `rent.py`: the rent refund, A15; `perps.py`: `PerpDesk`, the perp reconcile, buy block and venue exits, A23), `trader/execution/trade/accounts/` (`base.py`: `BaseAccount`, what both share, A23; `spot.py`: `SpotAccount`, `perp.py`: `PerpAccount`, both `BucketAccount`s on the base, neither a subclass of the other; `wallet.py`: `WalletBalances` over a `Wallet`), `trader/execution/trade/gateway/` (`gateway.py`, `fills.py`, `orders.py`, `resolve.py`) |
+| execution | buckets, their accounts, the one path to a swap; reaches a venue only through the `Venue` protocol (A7, tested) | `trader/execution/trade/trading_service/` (`service.py`: `TradeService`; `rent.py`: the rent refund, A15; `perps.py`: `PerpDesk`, which builds and keeps the perp accounts, reconciles them against the venue, hands them the buy block and sweeps the venue exits and top-ups, A23), `trader/execution/trade/accounts/` (`base.py`: `BaseAccount`, what both share, A23; `spot.py`: `SpotAccount`, `perp.py`: `PerpAccount`, both `BucketAccount`s on the base, neither a subclass of the other; `wallet.py`: `WalletBalances` over a `Wallet`), `trader/execution/trade/gateway/` (`gateway.py`, `fills.py`, `orders.py`, `resolve.py`) |
 | risk | limits and the audit log | `trader/execution/trade/policy/`, `trader/execution/trade/ledger/` (`events.py`: every event name; `positions.py`: an account's open entry from its legs) |
 | venue | moves funds | `trader/execution/trade/venues/spot.py` (`SpotVenue`: the `Venue` that wraps the provider), `trader/execution/trade/venues/jupiter/` (`provider.py`, `executor.py` + `rpc.py` real), `trader/execution/trade/venues/jupiter_perps/` (real perps), `trader/execution/trade/venues/paper/` (paper) |
-| market | read-only prices and candles (`hub.py`: one price feed for every bot; `pair.py`: the token in the quote token), and the Jupiter Perps state (A10) | `trader/execution/market/` (`candles.py`: `JupiterCandles`, `hub.py`, `prices.py`, `jupiter/`: `client.py`, `quote.py`, `candles.py`; `perps/`: `idl.py`, `reader.py`, `feed.py`), `trader/shared/market/` (`feed.py`, `pair.py`, no network) |
+| market | read-only prices and candles (`hub.py`: one price feed for every bot; `pair.py`: the token in the quote token), and the Jupiter Perps state (A10) | `trader/execution/market/` (`candles.py`: `JupiterCandles`, `history.py`: the chunked candle cache (A34), `hub.py`, `prices.py`, `jupiter/`: `client.py`, `quote.py`, `candles.py`; `perps/`: `idl.py`, `reader.py`, `feed.py`), `trader/shared/market/` (`feed.py`, `pair.py`, no network) |
 | core | plain data and protocols | `trader/shared/models/` (`direction.py`: long/short, D3), `trader/execution/models/` (`venue.py` `Wallet`, `Venue` (a `Wallet` plus the swap, A23), `PerpVenue` and `MintBalance`, `bucket.py` `BucketAccount`, `execution.py` `ExecutionResult`), `trader/shared/trading_service/` (`protocol.py`, `wire.py`), `trader/shared/notification/`, `trader/shared/spec/` (`terms.py`, `validate.py`), `trader/shared/indicators.py`, `trader/shared/paths.py`, `trader/shared/logging_config.py` |
 
 ## 3. One paper buy, hop by hop
@@ -70,34 +70,34 @@ the ledger or the policy.
 |---|---|---|---|
 | S1 | `main.py:11` `main` | Sets up logging, runs the Typer app; an escaping error is printed through `redacted_excepthook`. | Typer's own hook would print the Helius key. |
 | S2 | `trader/api/cli/runners.py` `serve` | Takes the mode's lock, builds the `PriceHub`, the service and a `TradeRunner`, writes `.data/trader-paper.json`. | One process per mode holds the wallet and the ledger. |
-| S3 | `trader/execution/wiring.py:119` `build_trade_service` | paper → `paper_provider(SimulatedWallet)`; real → `AsyncJupiterProvider.on_chain(key)`. Adds `TradeGateway.for_mode` (ledger + policy) and the USD price oracle (the hub). | The **only** place a mode turns into components. |
-| S4 | `trader/api/cli/runners.py` `connect` → `trader/strategy/runner.py` `strategy_bot` | Loads the spec, builds a `RemoteTradeClient` with `spec.terms()` and a `HubMarketData` over the `price` and `candles` ops, then `TradingBot(BotConfig(...))`. At `hello`, the trade-runner validates the terms against its policy (`TradeRunner._valid_terms`). | The bot only ever sees its bucket (`TradeClient`); a spec that could never trade is refused before it starts. |
-| S5 | `trader/strategy/bot/loop.py:161` `_startup` | `trader.open()` → `hello` → `TradeService.open_bucket` (`service.py:146`): marks `bucket_opened` once, rebuilds the position and PnL from the ledger (`BaseAccount.restore_from_ledger` → `TradeGateway.restore`, `gateway.py:121` → `Ledger.open_entry`, `ledger.py:63`), reconciles against the wallet. | A restart continues where it stopped. |
-| S6 | `loop.py:179` `_resume_strategy` | `strategy.resume(last_exit_at, opened_at, last_exit_price)`. | Cooldown, re-arm and `ttl_days` survive restarts. |
-| S7 | `loop.py:174` | Fetches `strategy.warmup()` candles (through the `candles` op) and seeds the indicators (`strategy.setup`). | Entries wait for converged indicators. |
+| S3 | `trader/execution/wiring.py:114` `build_trade_service` | paper → `paper_provider(SimulatedWallet)`; real → `AsyncJupiterProvider.on_chain(key)`. Adds `TradeGateway.for_mode` (ledger + policy) and the USD price oracle (the hub). | The **only** place a mode turns into components. |
+| S4 | `trader/api/cli/runners.py` `connect` → `trader/strategy/runner.py` `strategy_bot` | Loads the spec, builds a `RemoteTradeClient` with `spec.terms()`, a `RemoteTicks` over the `tick` op (A21) and a `HubMarketData` over the `candles` op (the warm-up), then `TradingBot(BotConfig(...))`. At `hello`, the trade-runner validates the terms against its policy (`TradeRunner._valid_terms`). | The bot only ever sees its bucket (`TradeClient`); a spec that could never trade is refused before it starts. |
+| S5 | `trader/strategy/bot/loop.py:162` `_startup` | `trader.open()` → `hello` → `TradeService.open_bucket` (`service.py:143`): marks `bucket_opened` once, rebuilds the position and PnL from the ledger (`BaseAccount.restore_from_ledger` → `TradeGateway.restore`, `gateway.py:128` → `Ledger.open_position`, `ledger.py:70`), reconciles against the wallet. | A restart continues where it stopped. |
+| S6 | `loop.py:180` `_resume_strategy` | `strategy.resume(last_exit_at, opened_at, last_exit_price)`. | Cooldown, re-arm and `ttl_days` survive restarts. |
+| S7 | `loop.py:172` | Fetches `strategy.warmup()` candles (through the `candles` op) and seeds the indicators (`strategy.setup`). | Entries wait for converged indicators. |
 
 ### Each tick
 
 | # | Where | What happens | Why it exists |
 |---|---|---|---|
-| 1 | `loop.py:187` `_tick` | Price from `MarketData.get_price`: a `HubMarketData` over the trade-runner's `PriceHub` (the `price` op) (`execution/market/hub.py`: one websocket for all mints, the Price API for quiet ones; never older than 30s, one price per second), in the **quote token**: for a non-stable quote the CLI gave the bot `market_for(...)`'s `PairMarketData`, which divides two USD feeds. Then `trader.bucket()` → `TradeService.get_bucket` (`service.py:407`): `available` = `min(spendable, budget cap / quote_usd)` in the quote token, the quote's USD price, position, PnL. | The strategy sizes against what the bucket may spend; money stays USD, prices stay in the pair's own unit. |
-| 2 | `loop.py:72` `process_market_data` → `trader/strategy/bot/decision.py:27` `order_for` | `SpecStrategy.on_market_refresh(price, available, position, quote_usd)` (`strategy/spec/strategy.py:99`) returns `OrderSignal(BUY, spend / price)` (`_entry`, `:183`; `spend` from `fixed_usd / quote_usd` or `pct_of_bucket`), wrapped as an `OrderRequest`. | The same decision code runs in the backtest. |
-| 3 | `RemoteTradeClient.submit` → `TradeRunner._submit` → `service.py:428` `submit_order` | Refuses buys on a retiring bucket, takes the order lock. | Buckets share one wallet; orders go one at a time. |
-| 4 | `service.py:457` `_place` → `:471` `_execute` | Dispatches on side: `account.buy(..., limit=<cap in the quote token>)`. Any exception becomes an `OrderReply` (denied / rejected / error), logged once. | Nothing from execution crosses into the strategy side as an exception. |
-| 5 | `trader/execution/trade/accounts/spot.py:108` `buy` → `base.py:240` `_buy_limit` | One balance read; checks no open position, the minimum, the SOL fee reserve and the bucket cap; computes `spend = quantity * price` once (capped). | Budget and wallet limits in one place. |
-| 6 | `spot.py:240` `_usd_snapshot`, `:243` `_intent` | USD snapshot of both sides and SOL from the process's price oracle (the hub; stablecoins are 1), **before** the trade; builds the `TradeIntent` (spend amount, USD notional, idempotency key). | After EXECUTED nothing may fail, so no fetch happens later. |
-| 7 | `trader/execution/trade/gateway/fills.py:59` `execute_trade` | The one pipeline for every trade: `gateway.submit`, then costs. Whether the swap filled or not, attempts the chain confirmed as failed get their fee read and booked (`failed_tx_fee` event, `PositionBook.charge`), never raising: the provider's `failed_signatures`, or the signature of a single send's `TransactionFailedOnChainError` (a perp request, A24; `failed_signatures_of`). | Enforces the order "EXECUTED first, costs second"; a failed transaction still cost the bucket its fee. |
-| 8 | `trader/execution/trade/gateway/gateway.py:190` `submit` → `:214` `_authorize` → `trader/execution/trade/ledger/ledger.py:38` `authorize` | In one `BEGIN IMMEDIATE` transaction: idempotency lookup, `policy_state()` (daily notional, trades/hour, loss, breaker since this process started, unresolved intents), `policy.evaluate` (`policy/policy.py:353`, pure), insert the intent as EXECUTING or DENIED. | Two processes can never pass the same limit or reuse a key. |
-| 9 | `gateway.py:230` `_execute` → `SpotVenue.open` (`venues/spot.py`) → `venues/jupiter/provider.py:141` `buy` → `:181` `swap_with_details` → `_attempts` → `_do_swap` | Raw amount from the intent's spend; quote, price-impact cap, the quote's value against the Price API (≤ 2% below; on in real and paper), up to 3 attempts with rising slippage and a 60s deadline. Signatures of attempts that failed on-chain leave on the result or the final error (`failed_signatures`). | Retries are safe only before broadcast. |
+| 1 | `loop.py` `_tick` → `_read_tick` | One round trip (A21): `RemoteTicks.tick` sends the `tick` op, which answers the USD prices from the trade-runner's `PriceHub` (`execution/market/hub.py`: one websocket for all mints, the Price API for quiet ones; never older than 30s) and `TradeService.get_bucket`; one tick per second (`Pacer`). The price is in the **quote token**: for a non-stable quote `RemoteTicks` asks the quote's USD too and divides (`pair_price`, as `PairMarketData`). A bot without `ticks` (tests) reads `MarketData.get_price` and `trader.bucket()` apart. `get_bucket` (`service.py`): `available` = `min(spendable, budget cap / quote_usd)` in the quote token, the quote's USD price, position, PnL. | The strategy sizes against what the bucket may spend; money stays USD, prices stay in the pair's own unit. |
+| 2 | `loop.py:73` `process_market_data` → `trader/strategy/bot/decision.py:27` `order_for` | `SpecStrategy.on_market_refresh(price, available, position, quote_usd)` (`strategy/spec/strategy.py:99`) returns `OrderSignal(BUY, spend / price)` (`_entry`, `:198`; `spend` from `fixed_usd / quote_usd` or `pct_of_bucket`), wrapped as an `OrderRequest`. | The same decision code runs in the backtest. |
+| 3 | `RemoteTradeClient.submit` → `TradeRunner._submit` → `service.py:375` `submit_order` | Refuses buys on a retiring bucket, takes the order lock. | Buckets share one wallet; orders go one at a time. |
+| 4 | `service.py:404` `_place` → `:418` `_execute` | Dispatches on side: `account.buy(..., limit=<cap in the quote token>)`. Any exception becomes an `OrderReply` (denied / rejected / error), logged once. | Nothing from execution crosses into the strategy side as an exception. |
+| 5 | `trader/execution/trade/accounts/spot.py:111` `buy` → `base.py:242` `_buy_limit` | One balance read; checks no open position, the minimum, the SOL fee reserve and the bucket cap; computes `spend = quantity * price` once (capped). | Budget and wallet limits in one place. |
+| 6 | `base.py:206` `_usd_snapshot`, `:209` `_intent` | USD snapshot of both sides and SOL from the process's price oracle (the hub; stablecoins are 1), **before** the trade; builds the `TradeIntent` (spend amount, USD notional, idempotency key). | After EXECUTED nothing may fail, so no fetch happens later. |
+| 7 | `trader/execution/trade/gateway/fills.py:63` `execute_trade` | The one pipeline for every trade: `gateway.submit`, then costs. Whether the swap filled or not, attempts the chain confirmed as failed get their fee read and booked (`failed_tx_fee` event, `PositionBook.charge`), never raising: the provider's `failed_signatures`, or the signature of a single send's `TransactionFailedOnChainError` (a perp request, A24; `failed_signatures_of`). | Enforces the order "EXECUTED first, costs second"; a failed transaction still cost the bucket its fee. |
+| 8 | `trader/execution/trade/gateway/gateway.py:190` `submit` → `:214` `_authorize` → `trader/execution/trade/ledger/ledger.py:38` `authorize` | In one `BEGIN IMMEDIATE` transaction: idempotency lookup, `policy_state()` (daily notional, trades/hour, loss, breaker since this process started, unresolved intents), `policy.evaluate` (`policy/policy.py:368`, pure), insert the intent as EXECUTING or DENIED. A denial by a rolling limit carries `retry_after` (A29): the oldest record the window counts + the window - now, from the state's `*_since` timestamps. | Two processes can never pass the same limit or reuse a key. |
+| 9 | `gateway.py:241` `_execute` → `SpotVenue.open` (`venues/spot.py`) → `venues/jupiter/provider.py:141` `buy` → `:181` `swap_with_details` → `_attempts` → `_do_swap` | Raw amount from the intent's spend; quote, price-impact cap, the quote's value against the Price API (≤ 2% below; on in real and paper), up to 3 attempts with rising slippage and a 60s deadline. Signatures of attempts that failed on-chain leave on the result or the final error (`failed_signatures`). | Retries are safe only before broadcast. |
 | 10 | `trader/execution/trade/venues/paper/executor.py:79` `SimulatedExecutor.execute` → `paper/wallet.py:175` `apply_swap` | The output is the quote's minus `slippage_bps` (10), never below its `otherAmountThreshold`. Under a file lock: re-read, debit input + fee (base + the policy's priority-fee cap) + first-time rent, credit output, write atomically. Returns an `ExecutionResult` with the simulated costs. | Paper behaves like the chain (fees, rent, slippage) across processes. |
 | 11 | `trader/execution/trade/ledger/intents.py:163` `mark_executed` | EXECUTING → EXECUTED with the signature and amounts. A failure here leaves the row EXECUTING, which blocks the account. | Fail closed: never buy twice after an unrecorded swap. |
 | 12 | `Venue.fetch_costs` → `provider.py` `fetch_swap_costs` (from `fills.py`) | Real mode reads the confirmed transaction; paper already has the costs. Never raises. | Costs are recorded, never assumed. |
-| 13 | `spot.py:167` `_to_order` → `trader/execution/trade/gateway/orders.py:33` `order_from_fill` | Real amounts, else the quote's; USD rates; never raises. | A trade that happened is never lost. |
-| 14 | `spot.py:358` `record_fill_safely` → `gateway.py:150` `record_fill` → `intents.py:244` `attach_order` | Stores the order JSON, cost and PnL columns on the (EXECUTED) row; a failure is logged, not raised. `book.open(order)` (`models/book.py:108`) opens the position in memory. | The ledger is the truth; the book is its in-memory copy. |
-| 15 | `service.py:428` (after `_place`) | `_check_max_loss`: realized loss past `max_loss_usd` retires the bucket; `_close_if_retiring` (`:438`) sells a leftover once per order. | Exits don't depend on the strategy. |
-| 16 | `loop.py:84` `_handle_reply`, `:210` `_report_order` | Filled → log and Telegram, with the bucket after the fill (realized PnL; an open position marked to market, `Position.unrealized_usd`); no pause after a fill (A5). Denied/rejected → pause orders 30s. Error → loop backoff; no price from the hub (`PriceUnavailableError`) is a WARNING, anything else an ERROR with its traceback (`:221` `_on_error`). | The strategy keeps getting prices while orders pause; a fill is reported even if the `connect` stops right after it. |
+| 13 | `spot.py:75` `_to_order` → `trader/execution/trade/gateway/orders.py:33` `order_from_fill` | Real amounts, else the quote's; USD rates; never raises. | A trade that happened is never lost. |
+| 14 | `spot.py:151` → `fills.py:96` `record_fill_safely` → `gateway.py:161` `record_fill` → `intents.py:247` `attach_order` | Stores the order JSON, cost and PnL columns on the (EXECUTED) row; a failure is logged, not raised. `book.open(order)` (`models/book.py:161`) opens the position in memory. | The ledger is the truth; the book is its in-memory copy. |
+| 15 | `service.py:375` (after `_place`) | `_check_max_loss`: realized loss past `max_loss_usd` retires the bucket; `_close_if_retiring` (`:385`) sells a leftover once per order. | Exits don't depend on the strategy. |
+| 16 | `loop.py:85` `_handle_reply`, `:211` `_report_order` | Filled → log and Telegram, with the bucket after the fill (realized PnL; an open position marked to market, `Position.unrealized_usd`); no pause after a fill (A5). Denied/rejected → pause orders of that side: until the reply's `retry_after` (a rolling limit, A29; at most 1 h, then it asks again), else 30s. Error → loop backoff; no price from the hub (`PriceUnavailableError`) is a WARNING, anything else an ERROR with its traceback (`:230` `_on_error`). | The strategy keeps getting prices while orders pause; a fill is reported even if the `connect` stops right after it. |
 
-A **sell** takes the same path with `account.sell` (`spot.py:362`): the
+A **sell** takes the same path with `account.sell` (`spot.py:155`): the
 wallet is read fresh (`WalletBalances.fresh` also reads the token's own
 account by address and keeps the larger: the RPC's owner index once came
 back without it, A15), the quantity is capped at the position, a wallet that
@@ -105,7 +105,8 @@ can't cover it refuses the sell (`WalletShortfallError`, A5: buys of the token
 blocked, one `sell_shortfall` event and Telegram), the idempotency key is
 fixed per position (`<account>:sell:<entry order>:<qty>`), the intent records
 whether it closes the position, budget rules don't apply, and
-`book.close`/`book.reduce` compute the realized PnL.
+`book.settle_sell` (`models/book.py:192`, through `close` or `reduce`)
+computes the realized PnL.
 
 When a bucket is **retired and flat**, the `serve` sweep closes the token
 account its first buy opened and the rent comes back
@@ -128,7 +129,7 @@ after, and a send without an outcome is resolved on later sweeps
 | Signal state (entry price, peak, cooldown, re-arm, expiry) | `SpecStrategy` | Restored through `resume()` from the bucket snapshot. |
 | Paper balances | `data_dir()/paper-wallet.json` (`paper/wallet.py`) | Created with 100 USDC + 0.5 SOL; delete it to start over. Open paper perps sit under `perps`, one per market and side (`paper/perps.py`). |
 | Policy | `policy_file()` (`policy.toml`, untracked) | Model: `policy.example.toml`. Paper has roomy limits by default. |
-| Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. `websockets` at INFO, `hpack`/`h2` at WARNING; the bot writes the ticker and open-position lines once per bar (`_log_bar`), prices with 8 significant digits (`format_price`). |
+| Logs | `logs_dir()/trader-<ts>-<pid>.log` | Rotating, pruned after 14 days, secrets redacted. `websockets` at INFO, `hpack`/`h2` at WARNING; the bot writes one line per bar (`_log_bar`: price and the open position) and the bucket's line only when it changes, prices with 8 significant digits (`format_price`). The file is plain text (`PlainFileFormatter` strips Rich markup); the console leaves out the `file.py:line` column. A fill is one INFO line (`fill_line`, on `serve`'s console too), the whole `Order` at DEBUG; the RPC/Jupiter wrapper logs one line per call (A32). |
 
 `trader/shared/paths.py` resolves all of them from `TRADER_DATA_DIR` /
 `TRADER_POLICY_FILE` / `TRADER_LOG_DIR` (relative to the project root), never
@@ -151,7 +152,7 @@ quote's amounts and the blockhash's `last_valid_block_height` to the ledger
 (`trade/gateway/resolve.py`), run by `serve` at start and on every sweep,
 asks `Executor.outcome` about each send: landed -> EXECUTED with its order and
 PnL, failed or expired -> FAILED with the fee booked, still pending -> it keeps
-blocking. `fetch_costs` (`executor.py:182`) parses the
+blocking. `fetch_costs` (`executor.py:362`) parses the
 confirmed transaction (`swap_costs.py`) for the real amounts, fee and rent.
 Real mode is denied unless `real_trading_enabled = true`.
 
@@ -163,7 +164,28 @@ bar an interpolated path (rising bar open → low → high → close, falling ba
 open → high → low → close; `backtest/ticks.py`); a bar with no candle (no
 trade) is one flat tick at the previous close (A4), and too few bars for the
 warm-up is an error. Result times are UTC like the ledger (candles are naive
-local time; `to_utc`). `Backtester` (`backtest/replay.py`) then runs hops 1–16
+local time; `to_utc`). With `--from/--to` (A34) the ticks are a past window
+instead: `backtest/window.py` `fetch_window` reads `[from - warm-up, to)`
+through `JupiterCandles.between` (`execution/market/candles.py`: one request
+per 1000-bar chunk aligned to the epoch, closed chunks cached on disk by
+`execution/market/history.py`), refuses a hole over `MAX_HOLE`, and passes
+the bars before `from` as `Backtester(warmup=)`, so the window's ticks are
+only the window; the result adds `window` and `coverage`. `--scenario`/
+`--rolling` (A35, `backtest/scenarios.py` `run_scenarios`) repeats that per
+window of `docs/scenarios.json`, valid until the window's end
+(`backtest_spec(until=)`, which `--from` uses too) and costs resolved once, and adds each window's
+measured stats (`window_stats`) and tag flags. `--vary` (A36,
+`backtest/variants.py`) makes spec variants by JSON path and `run_matrix`
+replays each variant x seed on each window (read once, with the widest
+warm-up), ranking them without the `holdout` windows; with `--jobs` (A37)
+the parent reads each window once and groups of its variants run in
+worker processes that read it back from the disk cache (a window whose last
+chunk is still forming, so not cached, runs in the parent). Stresses (A38,
+`backtest/stress.py`) rerun each cell with costs x N or a price shock on
+the window's ticks (built once per window, the stress outside the variants);
+`--volume-slippage` gives `ReplayQuoteClient` a per-bar `VolumeScales` it
+reads per quote.
+`Backtester` (`backtest/replay.py`) then runs hops 1–16
 with three substitutions:
 
 - quotes come from `ReplayQuoteClient` (tick price minus `fee_bps +
@@ -201,7 +223,9 @@ seed, so the same input and the same costs always give the same result (a
 summary, or JSON with `--json`); pass `--fee-bps` and `--network-fee-usd` to
 fix the costs instead of measuring them. Every result reports the cost per
 round trip from its in-memory ledger, computed like the live reports
-(`Ledger.round_trip_costs`).
+(`Ledger.round_trip_costs`); the rent of a perp position account is a
+one-time deposit, charged on the first open of a market and side and shown
+apart as `account_rent_usd` (A25).
 
 **Live vs backtest.** `trader/backtest/compare.py` (via
 `.claude/scripts/live_vs_backtest.py`) replays a `--record-ticks` file the way
@@ -216,7 +240,7 @@ The full authoring guide is [`specs.md`](specs.md). In short, a spec is JSON: a 
 an **exit** with a required **stop** (`stop_loss` / `trailing_stop`) plus
 optional conditions; `fixed_usd` or `pct_of_bucket` sizing; a budget, a max
 loss, a cooldown, and `ttl_days` or `expires_at`. Prices are in the pair's
-quote token; money is in USD. `SpecStrategy` (`strategy_spec/strategy.py`):
+quote token; money is in USD. `SpecStrategy` (`strategy/spec/strategy.py`):
 
 1. updates the bars once per tick (`IndicatorBank`; a gap of more than
    `MAX_GAP_BARS` between live ticks restarts the series and the spec warms
@@ -237,14 +261,25 @@ always long; short comes with perps (A8).
 Each condition type is a model in `models.py` plus a pure predicate in
 `conditions.PREDICATES`; tests keep both in step with each other and with
 [`specs.md`](specs.md), the guide specs are written from. The `expr` condition
-is parsed by `strategy_spec/expr.py` (`ast.parse` in `eval` mode, a whitelist
+is parsed by `strategy/spec/expr.py` (`ast.parse` in `eval` mode, a whitelist
 walk that also checks number vs condition, and its own evaluator; never `eval`) when the spec is validated, and evaluated on the
-same `TickContext` and `IndicatorBank` as the blocks.
+same `TickContext` and `IndicatorBank` as the blocks. `IndicatorBank.get(name,
+window, back)` reads an indicator `back` closed bars before the forming one
+(A22): `expr`'s `ema(9, 1)` and the `ma_crosses_above`/`_below` blocks use
+it, and add those bars to the warm-up. The bank keeps values per bar, so a
+closed bar reads the value its last tick computed instead of recomputing it
+over a full window that has moved on (an EMA or RSI would shift slightly,
+enough to misjudge a near-tie cross). For the forming bar, `sma`, `wma`,
+`ema`, `rsi`, `high` and `low` are split (A37, `indicators.PARTIAL`): a state over the
+closed bars, once per bar, and one step for the last price, in the same
+Decimal operations, so the value is identical and a tick costs one step.
 
 ## 8. Safety nets
 
 - **Policy** per trade, per day, per hour, daily loss, allowed symbols; real
   mode off by default. Sells skip the budget rules so a position is never stuck.
+  A denial by a rolling limit says when its window frees, and the bot waits
+  for it (A29).
 - **Idempotency keys** in the ledger: no double execution across restarts.
 - **UNCONFIRMED and own-account EXECUTING intents** block trading until the
   trade-runner resolves them from their logged sends (A3).
@@ -257,7 +292,8 @@ same `TickContext` and `IndicatorBank` as the blocks.
   **transaction inspection** (allowed programs, simulated balances) before
   anything is sent.
 - **No stale prices:** the hub refuses a price older than 30s, so a bot
-  backs off instead of deciding.
+  backs off instead of deciding; with a position open, `serve` tells the
+  owner after 2 min of it (A28).
 - **Per-bucket hourly limit** next to the wallet-wide one.
 - **Wallet checks:** one balance cache per `TradeService`; open budgets must
   fit the wallet; open positions are reconciled against the wallet at the first
@@ -281,18 +317,21 @@ the tests run a bot against a local `TradeRunner` (`served` in
   what's left in retired buckets, so exits don't depend on the other process.
   Its log shows each bucket open, each accepted `hello` and each disconnect,
   with the number of specs connected. It also runs the price hub and answers
-  `price` and `candles`, so N strategy-runners share one websocket and one
+  `tick`, `price` and `candles`, so N strategy-runners share one websocket and one
   Price API poll and never talk to Jupiter themselves;
   the hub is also its own price oracle (budgets, USD values, the sweep, the
   daily report and the quote check), so nothing else polls the Price API.
 - **`main.py connect spec.json`** (`trader/strategy/runner.py`, the
   strategy side) runs the usual bot with a `RemoteTradeClient`
-  (`trading_service/remote.py`), and a
-  `HubMarketData` over `RemoteTradeClient.price` and `RemoteCandles` (the
-  warm-up). `--record-ticks FILE` writes every price it gets for `backtest
+  (`trading_service/remote.py`), a `RemoteTicks` (one `tick` op per tick,
+  A21) and a `HubMarketData` over `RemoteCandles` (the warm-up). `--record-ticks FILE` writes every price it gets for `backtest
   --ticks`. It has no key,
   no ledger and no mode; on a dropped connection it reconnects and resends with
   the same idempotency key, so an order executes at most once.
+- **`main.py stop spec.json`** (or `--all`; `runners.stop` →
+  `remote.stop_specs`, A33) is the owner's manual stop: one `stop` op, then
+  one line per bucket (exit 1 if a sale didn't happen or nothing was open).
+  A running `connect` sees its bucket retired and flat and exits.
 - **One execution process per mode** (`trader/api/cli/lock.py`): `serve`
   takes an OS lock, so the shared balance cache, the budget allocation and the
   startup reconcile in `TradeService` see every order.
@@ -301,6 +340,13 @@ the tests run a bot against a local `TradeRunner` (`served` in
   (`TradeRunner.background`). Each minute it checks whether the previous UTC day
   has a `daily_report` event; if not, it sends fills, costs, realized PnL and
   open positions marked at the hub's price for every bucket of the mode.
+- **Outage alerts** (A28, `trader/execution/notification/outages.py`): every
+  10 s `TradeRunner.check_prices` asks the hub for the USD price of every
+  open position's non-stable mints (`TradeService.open_positions`, no
+  network); stale ones count as an outage. The sweep's perps step
+  (`_check_perps`) failing counts too. Each is an `Outage`: one Telegram
+  after 120 s down while any bucket has an open position, one when it is
+  back, nothing per tick and nothing without a position.
 
 ### The wire protocol
 
@@ -316,9 +362,11 @@ together.
 |---|---|---|
 | `{"op": "hello", "token", "terms"}` | `{"ok": true, "bucket"}` | `SpecTerms` (id, name, symbol, budget, max loss, largest buy, expiry; decimals as strings) checked against `serve`'s policy; opens or re-attaches to `strategy:<id>`; refuses a bad token or a second live connection for the same spec |
 | `{"op": "bucket"}` | `{"ok": true, "snapshot"}` | `BucketSnapshot` (position with its orders, PnL, status) |
-| `{"op": "submit", "request"}` | `{"ok": true, "reply"}` | `OrderReply` (filled / denied / rejected / error); the client always sends an idempotency key, so a resend after a reconnect executes once |
-| `{"op": "price", "mint"}` | `{"ok": true, "price", "age"}` | From the price hub; a price older than 30s is an error, never a value. Requests for a mint whose first poll is in flight wait for it |
+| `{"op": "tick", "mints"}` | `{"ok": true, "prices": {mint: price}, "snapshot"}` | A21: a strategy-runner's tick in one round trip. Each price from the hub (a stale one refuses the whole tick, kind `StalePriceError`); `mints` is the token, plus the quote when it isn't a USD stable |
+| `{"op": "submit", "request"}` | `{"ok": true, "reply"}` | `OrderReply` (filled / denied / rejected / error; a denial by a rolling limit has `retry_after` in seconds, A29; a fill carries `snapshot`, the bucket after it, A21); the client always sends an idempotency key, so a resend after a reconnect executes once |
+| `{"op": "price", "mint"}` | `{"ok": true, "price", "age"}` | Kept beside `tick` for tests and scripts. From the price hub; a price older than 30s is an error, never a value. Requests for a mint whose first poll is in flight wait for it |
 | `{"op": "candles", "mint", "interval", "qty"}` | `{"ok": true, "candles": [...]}` | Warm-up candles: `qty` 1–1000, `interval` an `Interval` value; each candle `{timestamp, open, high, low, last}`, decimals as strings |
+| `{"op": "stop", "token", "terms" \| "all": true}` | `{"ok": true, "stopped": [{"bucket", "spec", "outcome", "reasons"?}]}` | The manual stop (A33, `main.py stop`); needs no `hello`. Opens the spec's bucket if this `serve` hasn't (same policy check), then `TradeService.stop` (`RETIRING` + a `bucket_stopped` event that `open_bucket` reads back, so the stop survives restarts) and sells the position at the hub's pair price. `outcome`: `sold`, `flat`, `no_price` or the sale's refusal status (the sweep retries those). `all`: every bucket this `serve` has open |
 
 Any request that fails answers `{"ok": false, "error": "<Type>: <msg>", "kind": "<Type>"}`
 (`TradeRunner._answer`) and the connection stays open; `connect` turns kind
@@ -330,7 +378,8 @@ Any request that fails answers `{"ok": false, "error": "<Type>: <msg>", "kind": 
 A spec with `market` (`"direction": "short", "leverage": 3`) is checked at
 `hello` like any other plus the perp rules (`validate.py::_perp`, the
 spec's own stop and `max_hold` checks in `terms.py::check_perp`), and the
-runner opens its bucket with `PerpTerms`. `TradeService` builds a
+runner opens its bucket with `PerpTerms`. `TradeService` has its `PerpDesk`
+(`trading_service/perps.py`, A23) build the account (`PerpDesk.open_account`), a
 `PerpAccount` (on the same `BaseAccount` as `SpotAccount`, A23, with its buy
 and sell going to the `PerpVenue`; it never sees the spot `Venue`), so
 the hops above are the same from 3 to 8 and from 11 to 16: the intent carries
@@ -343,7 +392,7 @@ collateral + PnL - borrow - fees. Hop 13 is `orders.py::perp_order_from_fill`
 the open, `PerpAccount` places the venue stop as its own intent (side `STOP`,
 key `{key}:stop`, A12; paper keeps the level in the position's record). A
 sell smaller than the position closes that part (`exit.partial`). On every
-sweep `check_perps` (through `PerpDesk`, `trading_service/perps.py`, A23)
+sweep `check_perps` (`PerpDesk.sweep(names)`, A23)
 reads the open perp buckets from the venue once
 (`PerpVenue.sweep`, A20): the ones it closed (a liquidation, or its stop
 crossed) are booked with
@@ -351,7 +400,7 @@ crossed) are booked with
 then does the venue drop it (`acknowledge`, which pays a stop exit back), so
 a failed write is retried on the next sweep. Then the ones still open
 with `market.add_collateral` near liquidation get an `ADD` intent
-(`PerpAccount.top_up`; the entry grows, `PositionBook.add`). Fill messages and the daily report add side,
+(`PerpDesk.top_up` → `PerpAccount.top_up`, active buckets only; the entry grows, `PositionBook.add`). Fill messages and the daily report add side,
 leverage, liquidation price and accrued borrow (`Position.perp_line`).
 
 **The real venue, read-only (A10).** `JupiterPerpsReader`
@@ -380,13 +429,13 @@ left after a close: the keeper removes it itself within seconds, so
 `stop_left` reads it every 2 s for up to 30 s first, and a cancel that fails
 re-reads it once; only a stop still there is `perp_stop_left` (A24). The
 sweep books exits the venue made (its stop, a liquidation) from
-the keeper's payout. At the first perp open, `reconcile_perps`
-(`execution/models/reconcile.py`) checks the venue's positions against the
-ledger's in one read.
+the keeper's payout. At the first perp open, `PerpDesk` runs `reconcile_perps`
+(`execution/models/reconcile.py`), checking the venue's positions against the
+ledger's in one read; a market the ledger doesn't know blocks buys there
+(checked first in `PerpAccount.buy`).
 
 ## 11. Where it's going
 
-The roadmap is [`plan.md`](plan.md): the first tiny-budget real run is done
-(A6), perps run in paper and in backtests (A7-A9) and on Jupiter Perps
-(A10-A12); next the real long run (A11b). Specs stay
-files written from [`specs.md`](specs.md).
+The roadmap is [`plan.md`](plan.md): spot and perps have traded real money
+in tiny budgets; next is the backtest (longer windows, costs closer to
+live). Specs stay files written from [`specs.md`](specs.md).

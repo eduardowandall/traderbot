@@ -5,8 +5,9 @@ ao vivo) e recusa dados curtos demais: sem aquecer, a spec nunca opera, e um
 resultado com 0 trades enganaria.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from trader.backtest.replay import Backtester, BacktestResult
@@ -52,6 +53,17 @@ def bars_in(ticks: list[Tick], interval: Interval) -> int:
     return len({bar_index(t.timestamp, interval.seconds) for t in ticks})
 
 
+def warmup_bars(
+    warmup: Sequence[TickerData], ticks: list[Tick], interval: Interval
+) -> int:
+    """Quantas barras os candles de aquecimento cobrem até o primeiro tick (os
+    buracos curtos entre eles o `BarSeries` preenche)."""
+    if not warmup or not ticks:
+        return 0
+    first = min(bar_index(c.timestamp, interval.seconds) for c in warmup)
+    return max(bar_index(ticks[0].timestamp, interval.seconds) - first, 0)
+
+
 @dataclass(frozen=True)
 class ReplayCosts:
     fee_bps: Decimal = Decimal("30")
@@ -67,11 +79,13 @@ def spec_backtester(
     costs: ReplayCosts,
     seed: str,
     warmup: Sequence[TickerData] = (),
+    until: datetime | None = None,
+    slippage_scale: Callable[[datetime], Decimal] | None = None,
 ) -> Backtester:
     """O backtest de uma spec: o orçamento e a perda máxima dela; numa perp, o
-    motor de perps do paper (A9)."""
+    motor de perps do paper (A9). `until`: a validade de uma janela (A35)."""
     return Backtester(
-        SpecStrategy(spec),
+        SpecStrategy(spec, until),
         spec.symbol,
         ticks,
         initial_balance=spec.budget_usd,
@@ -84,6 +98,7 @@ def spec_backtester(
         warmup=warmup,
         perp=perp_terms_for(spec.symbol, spec.market, spec.exit.stop.pct),
         borrow_bps_hour=costs.borrow_bps_hour,
+        slippage_scale=slippage_scale,
     )
 
 
@@ -95,15 +110,26 @@ async def backtest_spec(
     slippage_bps: Decimal = ReplayCosts.slippage_bps,
     network_fee_usd: Decimal = ReplayCosts.network_fee_usd,
     borrow_bps_hour: Decimal = ReplayCosts.borrow_bps_hour,
+    warmup: Sequence[TickerData] = (),
+    until: datetime | None = None,
+    slippage_scale: Callable[[datetime], Decimal] | None = None,
 ) -> dict:
+    """`warmup`: candles de antes dos ticks que aquecem a spec (uma janela,
+    A34); sem eles, os primeiros ticks aquecem. `until`: a spec vale até lá,
+    no lugar da validade dela (o fim de uma janela, A35)."""
     bars = bars_in(ticks, spec.timeframe)
-    if bars < spec.history() + MIN_EVAL_BARS:
+    missing = spec.history() - warmup_bars(warmup, ticks, spec.timeframe)
+    if bars < missing + MIN_EVAL_BARS:
         raise ValueError(
-            f"{bars} barras de {spec.timeframe} < aquecimento de "
-            f"{spec.history()} barras + {MIN_EVAL_BARS} avaliadas: use mais candles"
+            f"{bars} barras de {spec.timeframe} < aquecimento de {missing} "
+            f"barras + {MIN_EVAL_BARS} avaliadas: use mais candles ou uma janela "
+            "maior"
         )
     costs = ReplayCosts(fee_bps, slippage_bps, network_fee_usd, borrow_bps_hour)
-    result = await spec_backtester(spec, ticks, costs, seed).run()
+    backtester = spec_backtester(
+        spec, ticks, costs, seed, warmup, until, slippage_scale
+    )
+    result = await backtester.run()
     return {
         "spec_id": spec.spec_id(),
         "name": spec.name,

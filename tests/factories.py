@@ -5,14 +5,15 @@
 `-W error::ResourceWarning` continua limpo.
 """
 
+from collections.abc import Callable, Collection
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from trader.execution.models.intent import IntentSide, TradeIntent
 from trader.execution.trade.ledger import Ledger
-from trader.shared.models import SOLANA_MINTS
+from trader.shared.models import SOLANA_MINTS, Interval, TickerData
 from trader.shared.paths import PROJECT_ROOT
 from trader.shared.spec.terms import SpecTerms
 from trader.strategy.spec.models import StrategySpec
@@ -185,6 +186,71 @@ class PriceTable:
         return None
 
 
+def candle(t: datetime, price: Decimal) -> TickerData:
+    """Um candle plano em `t`, em hora local sem fuso como os da Jupiter."""
+    naive = datetime.fromtimestamp(t.timestamp())
+    return TickerData(timestamp=naive, high=price, last=price, low=price, open=price)
+
+
+class FakeRange:
+    """`CandleRange` (A34): um preço por mint (fixo, ou uma função do
+    horário) e barras faltando."""
+
+    def __init__(
+        self,
+        prices: dict[str, Decimal | Callable[[datetime], Decimal]],
+        missing=(),
+    ):
+        self.prices = prices
+        self.missing = set(missing)
+        self.asked: list[tuple[str, datetime, datetime]] = []
+
+    def price(self, mint: str, t: datetime) -> Decimal:
+        price = self.prices[mint]
+        return price(t) if callable(price) else price
+
+    async def between(self, mint, interval, start, end):
+        self.asked.append((mint, start, end))
+        bar = timedelta(seconds=interval.seconds)
+        opens = (start + bar * i for i in range(int((end - start) / bar)))
+        return [candle(t, self.price(mint, t)) for t in opens if t not in self.missing]
+
+    async def aclose(self):
+        pass
+
+
+class FakeCandleApi:
+    """A API de candles como conferida ao vivo (A34): as barras de `[end - qty, end)`, menos as
+    de `missing`."""
+
+    def __init__(self, missing: Collection[datetime] = frozenset()):
+        self.missing = missing
+        self.calls: list[tuple[str, Interval, int, datetime | None]] = []
+        self.closed = False
+
+    async def get_candles(self, mint, interval, candle_qty, end=None):
+        self.calls.append((mint, interval, candle_qty, end))
+        assert end is not None
+        bar = timedelta(seconds=interval.seconds)
+        opens = (end - bar * (candle_qty - i) for i in range(candle_qty))
+        return [_raw(t) for t in opens if t not in self.missing]
+
+    async def aclose(self):
+        self.closed = True
+
+
+def _raw(t: datetime) -> dict:
+    price = 100 + (int(t.timestamp()) // 60) % 7
+    return {
+        "time": int(t.timestamp()),
+        "open": price,
+        "high": price + 1,
+        "low": price - 1,
+        "close": price + 0.5,
+        "volume": 12.25,
+    }
+
+
 class NoCandles:
     """`CandleSource` vazio (o trade-runner exige um)."""
 
@@ -212,18 +278,23 @@ def trade_runner(service, limits=None, prices=None, candles=None, **kwargs):
 
 
 @asynccontextmanager
-async def served(service, terms: SpecTerms | None = None, **spec_overrides):
+async def served(
+    service,
+    terms: SpecTerms | None = None,
+    prices: dict[str, Decimal] | None = None,
+    **spec_overrides,
+):
     """O serviço atrás de um `TradeRunner` local: o `RemoteTradeClient` da spec.
 
     Sem `terms`, os de `make_spec(ttl_days=5, **spec_overrides)` (paper recusa
     prazos de mais de 30 dias). O cliente sai fechado (o bot abre e fecha); o
-    serviço fica com quem o criou.
+    serviço fica com quem o criou. `prices`: os USD do hub (op `tick`).
     """
     from trader.strategy.trading_service.remote import RemoteTradeClient
 
     spec = make_spec(ttl_days=5, expires_at=None) | spec_overrides
 
-    runner = trade_runner(service)
+    runner = trade_runner(service, prices=prices)
     async with await runner.start() as server:
         port = server.sockets[0].getsockname()[1]
         yield RemoteTradeClient(

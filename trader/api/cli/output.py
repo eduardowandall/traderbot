@@ -86,7 +86,19 @@ def backtest_summary(result: dict) -> str:
         lines.insert(-1, f"  {_measured_line(result['measured_costs'])}")
     if result.get("rent_usd"):
         lines.insert(-1, f"  {_rent_line(result)}")
+    if result.get("window"):
+        lines.insert(2, f"  {_window_line(result)}")
     return "\n".join(lines + _trade_lines(result["trades"]))
+
+
+def _window_line(result: dict) -> str:
+    """A janela pedida (A34) e quantas barras dela a API tinha."""
+    window, cover = result["window"], result["coverage"]
+    return (
+        f"janela (UTC): {_when(window['from'])} -> {_when(window['to'])}, "
+        f"{cover['bars']}/{cover['expected']} barras com candle "
+        f"({cover['pct']:.1f}%)"
+    )
 
 
 def _costs_line(result: dict) -> str:
@@ -130,6 +142,7 @@ def _round_trip_line(costs: dict) -> str:
         count=costs["count"],
         notional_usd=costs["notional_usd"],
         cost_usd=costs["cost_usd"],
+        account_rent_usd=costs["account_rent_usd"],
     ).describe()
 
 
@@ -153,3 +166,101 @@ def _trade_lines(trades: list[dict]) -> list[str]:
 
 def _when(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%d %H:%M")
+
+
+def scenarios_summary(run: dict) -> str:
+    """Um run de cenários (A35): uma linha por janela e o resumo."""
+    summary = run["summary"]
+    lines = [
+        f"Cenários {run['name']} ({run['spec_id']}) {run['symbol']} "
+        f"{run['timeframe']}: {summary['ran']} de {summary['windows']} janela(s)"
+    ]
+    for row in run["windows"]:
+        lines.extend(_scenario_lines(row))
+    ran = [row for row in run["windows"] if "error" not in row]
+    if ran:
+        lines.append(_costs_line(ran[0]["result"]))
+        lines.append(f"  {_scenarios_total(summary)}")
+    if run.get("measured_costs"):
+        lines.append(f"  {_measured_line(run['measured_costs'])}")
+    return "\n".join(lines)
+
+
+def _scenario_lines(row: dict) -> list[str]:
+    if "error" in row:
+        return [f"  {row['id']:<20} erro: {row['error']}"]
+    result, stats = row["result"], row["stats"]
+    line = (
+        f"  {row['id']:<20} {float(result['return_pct']):+7.2f}%  "
+        f"dd {float(result['max_drawdown_pct']):5.2f}%  "
+        f"{result['closed_trades']:>3} trade(s)  par {stats['return_pct']:+6.1f}%  "
+        f"vs segurar {row['vs_hold_pct']:+6.1f}%"
+    )
+    return [line, *(f"    {flag}" for flag in row["flags"])]
+
+
+def _scenarios_total(s: dict) -> str:
+    return (
+        f"resumo: mediana {s['median_return_pct']:+.2f}%, pior "
+        f"{s['worst_return_pct']:+.2f}% ({s['worst_id']}), drawdown máximo "
+        f"{s['worst_drawdown_pct']:.2f}%, {s['profitable_pct']:.0f}% com lucro, "
+        f"{s['trades']} trade(s), mediana vs segurar {s['median_vs_hold_pct']:+.2f}%"
+    )
+
+
+def matrix_summary(run: dict) -> str:
+    """Variantes x janelas (A36): uma linha por variante na ordem do ranking,
+    depois as janelas da melhor."""
+    best = run["variants"][0]
+    lines = [
+        f"Variantes {run['name']} ({run['spec_id']}) {run['symbol']} "
+        f"{run['timeframe']}: {len(run['variants'])} variante(s), "
+        f"{best['summary']['windows']} janela(s) no ranking"
+    ]
+    lines += [_variant_line(i, v) for i, v in enumerate(run["variants"], start=1)]
+    lines.append(f"  janelas da melhor ({_changes(best['changes'])}):")
+    seeded = len({r["seed"] for r in best["windows"] if "seed" in r}) > 1
+    stressed = bool(best["stress"])
+    for row in best["windows"]:
+        head, *notes = _scenario_lines(row)
+        seed = f" semente {row['seed']}" if seeded else ""
+        stress = f" [{row['stress']}]" if stressed and "stress" in row else ""
+        held = " [holdout]" if "holdout" in row["tags"] else ""
+        lines += [f"  {head}{seed}{stress}{held}", *(f"  {note}" for note in notes)]
+    ran = [row for row in best["windows"] if "error" not in row]
+    if ran:
+        lines.append(_costs_line(ran[0]["result"]))
+    if run.get("measured_costs"):
+        lines.append(f"  {_measured_line(run['measured_costs'])}")
+    return "\n".join(lines)
+
+
+def _variant_line(rank: int, variant: dict) -> str:
+    head = f"  {rank:>2}. {variant['spec_id']} {_changes(variant['changes']):<28}"
+    s = variant["summary"]
+    if not s["ran"]:
+        return f"{head} nenhuma janela rodou"
+    held = variant["holdout"]
+    holdout = (
+        "-" if not held or not held["ran"] else f"{held['median_return_pct']:+.2f}%"
+    )
+    return (
+        f"{head} mediana {s['median_return_pct']:+.2f}%, pior "
+        f"{s['worst_return_pct']:+.2f}% ({s['worst_id']}), "
+        f"{s['profitable_pct']:.0f}% com lucro, {s['trades']} trade(s); "
+        f"holdout {holdout}{_stress_text(variant)}"
+    )
+
+
+def _stress_text(variant: dict) -> str:
+    """A mediana em cada estresse (A38) e o aviso de frágil."""
+    parts = [
+        f"{name} {s['median_return_pct']:+.2f}%" if s["ran"] else f"{name} -"
+        for name, s in variant["stress"].items()
+    ]
+    text = f"; {', '.join(parts)}" if parts else ""
+    return f"{text} [!] frágil" if variant["fragile"] else text
+
+
+def _changes(changes: dict) -> str:
+    return ", ".join(f"{k}={v}" for k, v in changes.items()) or "base"

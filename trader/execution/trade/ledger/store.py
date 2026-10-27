@@ -162,11 +162,11 @@ class LedgerStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, timeout=10)
         self.conn.row_factory = sqlite3.Row
-        if not in_memory:
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            # seguro com WAL: evita um fsync por commit no loop do bot
-            self.conn.execute("PRAGMA synchronous=NORMAL")
         try:
+            if not in_memory:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                # seguro com WAL: evita um fsync por commit no loop do bot
+                self.conn.execute("PRAGMA synchronous=NORMAL")
             _open_schema(self.conn, self.path)
         except Exception:
             self.conn.close()

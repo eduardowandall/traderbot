@@ -40,6 +40,9 @@ POLL_SECONDS = 2.0  # o limite da Price API sem chave
 REST_AFTER_SECONDS = 5.0  # sem notícia do websocket há isso: Price API
 MAX_AGE_SECONDS = 30.0  # mais velho que isso não serve
 RECONNECT_SECONDS = 5.0
+# A28: a conexão morre pelo caminho de rede, sem close frame; sem pings do
+# cliente ela fica meio-aberta e muda para sempre (o servidor não fecha)
+PING_SECONDS = 20.0
 
 PriceStream = Callable[[Collection[str]], AsyncGenerator[tuple[str, Decimal]]]
 
@@ -54,7 +57,11 @@ async def websocket_prices(
     """`(mint, preço USD)` de cada mensagem do websocket, para os mints dados."""
     wanted = set(mints)
     async with websockets.connect(
-        WS_URL, additional_headers={"Origin": "https://jup.ag"}, compression="deflate"
+        WS_URL,
+        additional_headers={"Origin": "https://jup.ag"},
+        compression="deflate",  # sem ela, o servidor responde 426
+        ping_interval=PING_SECONDS,
+        ping_timeout=PING_SECONDS,
     ) as ws:
         await ws.send(
             json.dumps({"type": "subscribe:prices", "assets": sorted(wanted)})
@@ -93,6 +100,9 @@ class PriceHub:
         # mint nesse meio-tempo espera por ele (F10), em vez de achá-lo sem preço
         self._first_polls: dict[str, asyncio.Task[None]] = {}
         self._changed = asyncio.Event()
+        # a conexão do websocket de agora já trouxe algum preço (A28)
+        self._streamed = False
+        self._failures = 0  # conexões seguidas que não trouxeram preço
 
     # --- quem pede preço ---------------------------------------------------------
 
@@ -116,10 +126,10 @@ class PriceHub:
         nada fica velho e nenhuma chamada sai daqui.
         """
         new = await self._watch(mints)
-        stale = [m for m in set(mints) - new if self._age(m) > self.max_age]
+        stale = [m for m in set(mints) - new if self.age(m) > self.max_age]
         if stale:
             await self.poll(stale)
-        return {m: self._points[m].price for m in mints if self._age(m) <= self.max_age}
+        return {m: self._points[m].price for m in mints if self.age(m) <= self.max_age}
 
     async def _watch(self, mints: Collection[str]) -> set[str]:
         """Passa a acompanhar os mints novos (o 1º preço vem já, pela API).
@@ -177,7 +187,8 @@ class PriceHub:
     def _set(self, mint: str, price: Decimal) -> None:
         self._points[mint] = _Point(price, self.monotonic())
 
-    def _age(self, mint: str) -> float:
+    def age(self, mint: str) -> float:
+        """Segundos desde o último preço do mint (infinito se nunca veio)."""
         point = self._points.get(mint)
         return float("inf") if point is None else self.monotonic() - point.at
 
@@ -194,7 +205,7 @@ class PriceHub:
             self._set(mint, price)
 
     async def poll_stale(self) -> None:
-        stale = [m for m in self._mints if self._age(m) > self.rest_after]
+        stale = [m for m in self._mints if self.age(m) > self.rest_after]
         if stale:
             await self.poll(stale)
 
@@ -210,12 +221,12 @@ class PriceHub:
             if not self._mints:
                 await self._changed.wait()
             self._changed.clear()
+            self._streamed = False
             try:
                 await self._stream_until_changed(set(self._mints))
             except Exception as ex:
-                logger.warning(
-                    f"Websocket de preços caiu ({error_text(ex)}); a API cobre"
-                )
+                self._failures = 0 if self._streamed else self._failures + 1
+                _log_drop(error_text(ex), self._failures)
                 await asyncio.sleep(RECONNECT_SECONDS)
 
     async def _stream_until_changed(self, mints: set[str]) -> None:
@@ -239,4 +250,21 @@ class PriceHub:
         async with aclosing(self.stream(mints)) as prices:
             async for mint, price in prices:
                 self._set(mint, price)
+                if not self._streamed and self._failures:
+                    logger.info("Websocket de preços de volta")
+                self._streamed = True
         raise ConnectionError("o websocket fechou")
+
+
+def _log_drop(error: str, failures: int) -> None:
+    """A28: o websocket cai a cada 15-25 min (o caminho de rede reseta todas as
+    conexões juntas; não é o servidor nem a idade da conexão) e volta na
+    reconexão, com a Price API cobrindo: rotina, INFO. Um aviso só quando ele
+    não volta, uma vez por sequência de falhas (numa queda de rede, a cada 5 s).
+    """
+    if failures == 0:
+        logger.info(f"Websocket de preços caiu ({error}); reconectando, a API cobre")
+    elif failures == 1:
+        logger.warning(f"Websocket de preços não conecta ({error}); a API cobre")
+    else:
+        logger.debug(f"Websocket de preços ainda não conecta ({error})")

@@ -190,6 +190,13 @@ class PerpVenue(PostTrade, Protocol):
         """O venue já tem uma posição neste mercado e lado (uma por carteira)?"""
         ...
 
+    async def open_sol_lamports(self, terms: PerpTerms) -> int | None:
+        """O SOL (lamports) que abrir `terms` precisa além da reserva de taxas
+        (A26, `open_sol_lamports` de `models/perp.py`): com o rent da conta da
+        posição só se ela ainda não existe. None: o venue não cobra SOL da
+        carteira (o replay)."""
+        ...
+
     async def open_markets(self) -> list[tuple[str, Direction]]:
         """(mercado, lado) de cada posição aberta no venue, numa leitura só
         (a conferência contra o ledger, D10)."""

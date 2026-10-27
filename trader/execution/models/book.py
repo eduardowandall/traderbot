@@ -6,13 +6,24 @@ livro é reconstruído com `PositionBook.restored(...)`.
 
 O PnL fica em duas formas:
 - nativo, no token de cotação (bruto, líquido e custos em SOL): a verdade;
+  os custos incluem os de fora das pernas (o stop do venue, transações que
+  falharam, menos o rent devolvido; A30);
 - `realized_usd`, a estimativa líquida em USD usada pelo orçamento do bucket.
+
+Numa perp, o bruto (colateral devolvido - postado) já vem depois das taxas
+do venue e do empréstimo: o livro os soma à parte, e o resumo abre o bruto
+em preço, taxas e empréstimo (A31).
 """
 
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
-from trader.shared.models.costs import FailedTxFee, PnLResult, TradeCosts
+from trader.shared.models.costs import (
+    FailedTxFee,
+    PnLResult,
+    TradeCosts,
+    perp_split_text,
+)
 from trader.shared.models.order import Order
 from trader.shared.models.perp import scaled
 from trader.shared.models.position import Position
@@ -123,12 +134,18 @@ class PositionBook:
     gross_quote: Decimal = ZERO
     net_quote: Decimal = ZERO
     costs_sol: Decimal = ZERO
-    incomplete: int = 0  # posições fechadas sem custos convertidos
-    # taxas de transações que falharam na rede (já descontadas de realized_usd)
+    # posições fechadas sem custos convertidos, e custos fora das pernas sem
+    # valor no token de cotação
+    incomplete: int = 0
+    # taxas de transações que falharam na rede (uma parte de `costs_sol`)
     failed_fee_sol: Decimal = ZERO
-    # rent devolvido ao fechar a conta do token (o líquido da taxa já está em
-    # realized_usd; A15)
+    # rent devolvido ao fechar a conta do token (já descontado de `costs_sol`;
+    # A15)
     rent_refund_sol: Decimal = ZERO
+    # perps (A31): o que o venue cobrou nas posições fechadas, dentro do bruto
+    perp_fees_quote: Decimal = ZERO
+    perp_borrow_quote: Decimal = ZERO
+    perp_closes: int = 0  # fechamentos de perp: o bruto ganha as partes
 
     @classmethod
     def restored(
@@ -142,9 +159,11 @@ class PositionBook:
         entry: Position | None,
         failed_fee_sol: Decimal = ZERO,
         rent_refund_sol: Decimal = ZERO,
+        perp: tuple[int, Decimal, Decimal] = (0, ZERO, ZERO),
     ) -> PositionBook:
         """O livro reconstruído a partir do ledger (totais + posição aberta,
-        com as contagens dela, A20)."""
+        com as contagens dela, A20). `perp`: (fechamentos, taxas, empréstimo)
+        das perps fechadas (A31)."""
         book = cls(
             quote_symbol,
             realized_usd=realized_usd,
@@ -154,6 +173,9 @@ class PositionBook:
             incomplete=incomplete,
             failed_fee_sol=failed_fee_sol,
             rent_refund_sol=rent_refund_sol,
+            perp_closes=perp[0],
+            perp_fees_quote=perp[1],
+            perp_borrow_quote=perp[2],
         )
         book.position = entry
         return book
@@ -206,13 +228,25 @@ class PositionBook:
         closed = self.reduce(exit_order) if keep_rest else self.close(exit_order)
         return exit_order, closed
 
-    def charge(self, fee: FailedTxFee) -> None:
+    def charge(self, fee: FailedTxFee, quote: Decimal | None) -> None:
         """Taxa de transações que falharam: sai do PnL (e do orçamento)."""
         self.failed_fee_sol += fee.sol
-        self.charge_cost(fee.usd)
+        self.charge_outside(fee.sol, quote, fee.usd)
 
-    def charge_cost(self, usd: Decimal | None) -> None:
-        """Um custo sem trade (o stop do venue, A11c): sai do PnL e do orçamento."""
+    def charge_outside(
+        self, sol: Decimal, quote: Decimal | None, usd: Decimal | None
+    ) -> None:
+        """Um custo sem trade (o stop do venue, A11c; uma transação que falhou)
+        no PnL nativo, em USD e no orçamento (A30).
+
+        `quote` é o custo no token de cotação (`outside_cost_quote`); None
+        marca o PnL nativo como incompleto.
+        """
+        self.costs_sol += sol
+        if quote is None:
+            self.incomplete += 1
+        else:
+            self.net_quote -= quote
         self.realized_usd -= usd or ZERO
 
     def _open(self) -> Position:
@@ -239,19 +273,38 @@ class PositionBook:
         net = pnl.net_quote
         self.net_quote += pnl.gross_quote if net is None else net
         self.incomplete += 0 if pnl.complete else 1
+        if pnl.price_quote is not None:
+            self.perp_closes += 1
+            self.perp_fees_quote += pnl.perp_fees_quote or ZERO
+            self.perp_borrow_quote += pnl.perp_borrow_quote or ZERO
+
+    @property
+    def price_quote(self) -> Decimal | None:
+        """Numa perp, o ganho do preço das posições fechadas (A31): o bruto
+        antes das taxas do venue e do empréstimo; None sem perp fechada."""
+        if not self.perp_closes:
+            return None
+        return self.gross_quote + self.perp_fees_quote + self.perp_borrow_quote
+
+    def _perp_split(self) -> str:
+        price = self.price_quote
+        if price is None:
+            return ""
+        return perp_split_text(price, self.perp_fees_quote, self.perp_borrow_quote)
 
     def summary(self) -> str:
         """PnL realizado: líquido nativo, estimativa USD, bruto e custos."""
-        flag = (
-            f" [!] {self.incomplete} trade(s) incompleto(s)" if self.incomplete else ""
-        )
-        extra = (
-            f", tx falhas {self.failed_fee_sol:.9f} SOL" if self.failed_fee_sol else ""
-        )
+        flag = f" [!] {self.incomplete} incompleto(s)" if self.incomplete else ""
+        # partes de `custos`, já contadas nele
+        parts = []
+        if self.failed_fee_sol:
+            parts.append(f"tx falhas {self.failed_fee_sol:.9f}")
         if self.rent_refund_sol:
-            extra += f", rent devolvido {self.rent_refund_sol:+.9f} SOL"
+            parts.append(f"rent devolvido {self.rent_refund_sol:+.9f}")
+        extra = f" (inclui {', '.join(parts)})" if parts else ""
         return (
             f"PNL líquido {self.net_quote:+.6f} {self.quote_symbol} "
-            f"(~${self.realized_usd:+.4f}); bruto {self.gross_quote:+.6f}, "
+            f"(~${self.realized_usd:+.4f}); bruto {self.gross_quote:+.6f}"
+            f"{self._perp_split()}, "
             f"custos {self.costs_sol:.9f} SOL{extra}{flag}"
         )

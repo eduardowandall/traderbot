@@ -1,0 +1,20 @@
+{
+  "about": "Backtest windows (A35), in UTC, picked from SOL's 1h bars on 2026-10-21. Tags are about SOL; each run measures the spec's own pair and flags a tag it disagrees with. The 24h and weekly windows run on SOL at 15s (checked 2026-10-21); the months are long at 15s, and bullish-2024-11 has a 15s/1m hole from ~11-27. A thin token has real hours without trades: pass --max-hole.",
+  "scenarios": [
+    {"id": "crash-2024-08-04", "start": "2024-08-04T12:00:00Z", "end": "2024-08-05T12:00:00Z", "tags": ["black_swan", "bearish", "short"], "note": "yen carry unwind, -24.9% in 24h"},
+    {"id": "drop-2025-02-23", "start": "2025-02-23T23:00:00Z", "end": "2025-02-24T23:00:00Z", "tags": ["black_swan", "bearish", "short"], "note": "-19.4% in 24h inside the February slide"},
+    {"id": "drop-2025-03-03", "start": "2025-03-03T03:00:00Z", "end": "2025-03-04T03:00:00Z", "tags": ["black_swan", "short", "holdout"], "note": "-22.2% in 24h, the day after the reserve-announcement pump"},
+    {"id": "drop-2025-04-06", "start": "2025-04-06T09:00:00Z", "end": "2025-04-07T09:00:00Z", "tags": ["black_swan", "bearish", "short"], "note": "tariff selloff, -20.4% in 24h"},
+    {"id": "crash-2025-10-10", "start": "2025-10-10T13:00:00Z", "end": "2025-10-11T13:00:00Z", "tags": ["black_swan", "short"], "note": "tariff crash, -24.1% in 24h and a fast rebound"},
+    {"id": "bearish-2025-02", "start": "2025-02-01T00:00:00Z", "end": "2025-03-01T00:00:00Z", "tags": ["bearish", "long"], "note": "-36% over the month"},
+    {"id": "bearish-2025-11", "start": "2025-11-01T00:00:00Z", "end": "2025-12-01T00:00:00Z", "tags": ["bearish", "long", "holdout"], "note": "-29% over the month"},
+    {"id": "bullish-2024-11", "start": "2024-11-01T00:00:00Z", "end": "2024-12-01T00:00:00Z", "tags": ["bullish", "long"], "note": "+25% over the month; 15s/1m have a hole from ~11-27, so only 1h runs whole"},
+    {"id": "bullish-2025-04", "start": "2025-04-01T00:00:00Z", "end": "2025-05-01T00:00:00Z", "tags": ["bullish", "long", "holdout"], "note": "+18% over the month, after the tariff selloff"},
+    {"id": "bullish-2026-08", "start": "2026-08-01T00:00:00Z", "end": "2026-09-01T00:00:00Z", "tags": ["bullish", "long"], "note": "+41% over the month"},
+    {"id": "quiet-2026-04-22", "start": "2026-04-22T00:00:00Z", "end": "2026-04-29T00:00:00Z", "tags": ["quiet"], "note": "one of the calmest weeks (daily vol ~1.7%)"},
+    {"id": "quiet-2026-07-20", "start": "2026-07-20T00:00:00Z", "end": "2026-07-27T00:00:00Z", "tags": ["quiet", "holdout"], "note": "one of the calmest weeks (daily vol ~1.7%)"},
+    {"id": "choppy-2024-07-04", "start": "2024-07-04T00:00:00Z", "end": "2024-07-11T00:00:00Z", "tags": ["choppy"], "note": "flat week with a ~21% range"},
+    {"id": "choppy-2025-02-28", "start": "2025-02-28T00:00:00Z", "end": "2025-03-07T00:00:00Z", "tags": ["choppy"], "note": "+4% week with a ~43% range"},
+    {"id": "choppy-2026-02-22", "start": "2026-02-22T00:00:00Z", "end": "2026-03-01T00:00:00Z", "tags": ["choppy", "holdout"], "note": "flat week with a ~20% range"}
+  ]
+}

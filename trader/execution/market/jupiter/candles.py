@@ -26,6 +26,7 @@ def candles_to_tickers(candles: list[dict[str, Any]]) -> list[TickerData]:
             low=_dec(candle["low"]),
             open=_dec(candle["open"]),
             last=_dec(candle["close"]),
+            volume=None if candle.get("volume") is None else _dec(candle["volume"]),
         )
         for candle in candles
     ]

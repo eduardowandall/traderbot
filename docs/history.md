@@ -3850,6 +3850,165 @@ schema or wire change:
   perp reconcile now runs when the account is built, before
   `bucket_opened`, so an RPC failure there leaves no `bucket_opened`.
 
+#### A11 and A11b. Perps: execution, sent — L (built 2026-10-07; the short run 2026-10-08; the long run still the owner's)
+Moved from `plan.md` on 2026-10-12 when the plan was rewritten; the text
+is as it stood there.
+
+- **A11. Jupiter Perps execution — L.** Requests, keeper wait, idempotent
+  `counter` (D8); the required venue stop, closing the position if it can't be
+  placed (D7); reconcile against position accounts (D10). Real perps stay off
+  until the owner opens and closes a minimal position with a tiny budget.
+  Split by the owner on 2026-10-07 into A11a (build and simulate, nothing
+  sent) and A11b (send, keeper wait, first real run); longs and shorts both.
+  - **Spike (2026-10-07).** Hand-encoded Anchor instructions
+    (`sha256("global:<snake_name>")[:8]` + Borsh params, the IDL's account
+    order, an absent optional account passed as the program id) simulate
+    cleanly on mainnet (`simulateTransaction`, `sigVerify` off,
+    `replaceRecentBlockhash`): `createIncreasePositionMarketRequest` for a
+    short (USDC collateral) and for a long (USDC in, swapped by the keeper,
+    `jupiterMinimumOut` set), with a public exchange wallet as the payer;
+    `createDecreasePositionMarketRequest` (entire position) and
+    `createDecreasePositionRequest2` (a trigger: the venue stop) as the owner
+    of a public open short, read-only. The trigger needs the custody's
+    `dovesAgOracle` (the plain `dovesOracle` fails with 6002) and its Pyth
+    account. PDAs: `perpetuals` = `["perpetuals"]`, the event authority
+    `["__event_authority"]`, a request `["position_request", position,
+    counter LE u64, 1 increase | 2 decrease]` with its token account the ATA
+    of the request (off-curve). About 95k compute units. Request creation
+    took collateral as small as 1 USD; the keeper's own minimum at execution
+    is not known yet (A11b's first run).
+- **A11b. Perp requests, sent — L.** Sign and send through `serve real`
+  (the key stays there): `JupiterPerpsVenue` (a `PerpVenue`) logs each send
+  first (A3), waits for the keeper (60 s, D8), maps a keeper rejection to
+  REJECTED and a missing outcome to UNCONFIRMED; places the venue stop after
+  every open and closes the position if it can't (D7, `perp_stop_failed`);
+  tx inspection allows the perps program; the reconcile runs at start and
+  in the sweep; the A3 resolver learns perp requests. Done when the owner
+  opens and closes a minimal real perp (both sides) with a tiny budget.
+  Notes from the A11a review: sign and inspect through the spot path
+  (`AsyncRPCClient.sign_instructions` and its simulation, as
+  `close_token_account` does) instead of a second builder; set the compute
+  limit from the simulated units and the price from recent fees capped by
+  the policy (today every request pays the whole cap); the sweep reads the
+  derived position and request addresses in one `getMultipleAccounts`, never
+  `getProgramAccounts`; read the position before any resend (a request
+  account disappears once executed, D8).
+  - **Design (2026-10-07).** Real perps run only in `serve real` with
+    `perps_enabled` in `[real]`; paper and the backtest don't change.
+    - **Sending** (one path with the spot swaps): `OnChainExecutor` gains
+      `send_instructions(instructions, spends)`, the part of
+      `close_token_account` that signs (`sign_instructions`), checks the
+      programs (the allowlist now takes the perps program when the caller
+      passes it), simulates with the wallet's accounts and checks that only
+      the given token leaves, up to the given amount (USDC collateral for an
+      open, nothing for a close or a stop), logs the send (`announce_send`,
+      A3) and sends and confirms with the same error mapping (failed on chain
+      / submitted). `close_token_account` uses it too.
+    - **Fees:** the compute limit is the units of an unsigned simulation
+      x 1.3; the price is the 75th percentile of the recent priority fees on
+      the perps pool (`getRecentPrioritizationFees`), capped so the
+      priority never passes `max_priority_fee_lamports`.
+    - **`JupiterPerpsVenue`** (`trade/venues/jupiter_perps/venue.py`, a
+      `PerpVenue`): `open_perp` reads the Doves price (and, for a long, a
+      USDC->SOL Jupiter quote for `jupiterMinimumOut`, at the provider's
+      slippage), sends the open request, then waits for the keeper: polls
+      the request and the position accounts (one `getMultipleAccounts`,
+      every 2 s, 60 s). Executed (the position grew): the fill is the
+      position account (entry price, size, collateral). The request gone
+      and the position unchanged: rejected (`SwapRejectedError`, REJECTED,
+      the keeper returns the collateral). Neither in time:
+      `TransactionSubmittedError` (UNCONFIRMED). `close_perp` does the same
+      with the close request, and its fill is the USDC that came back (the
+      owner's USDC account before the send and after the keeper; orders run
+      one at a time under the service lock), at the Doves price.
+    - **Venue stop (D7):** `PerpVenue.place_stop(terms, entry fill)` (paper:
+      nothing to do). `PerpAccount.buy` calls it right after recording the
+      open, at the spec's stop or half the distance to liquidation,
+      whichever is closer (`PerpTerms` gains `stop_pct`, kept in
+      `perp_json`: no schema change). If it fails: event
+      `perp_stop_failed` and an immediate sell through the normal path
+      (rationale: the venue stop could not be placed). Placed:
+      `perp_stop_placed` with the request address. After a close, a stop
+      request still on chain is logged and recorded (`perp_stop_left`): the
+      owner cancels it in the Jupiter UI (cancelling from the bot is A12).
+    - **Exits the venue made** (the stop fired, a liquidation): the sweep's
+      `liquidations()` reads the open buckets' position addresses in one
+      call; a position gone or at size 0 is an exit: its payout is the
+      owner's USDC change in the latest transaction on the position account
+      (`getSignaturesForAddress` limit 1 + `getTransaction`), 0 meaning
+      liquidated. It is booked like A8's liquidations (outside the policy).
+      `reconcile_perps` at start: positions the ledger doesn't know are
+      `perp_mismatch` events and block perp entries in that market.
+    - **Not here (A12):** the A3 resolver keeps a perp intent blocking (the
+      owner checks the position); cancelling a leftover stop from the bot.
+    - **Tests:** the venue with fake RPC/reader/executor (open executed,
+      rejected, timed out; close; stop placed, failed -> closed; an external
+      exit booked with its payout, and 0 as a liquidation); the send path
+      against the spot fakes; the fee pick. Nothing live sends.
+  - **Built (2026-10-07), waiting for the owner's run.** As designed:
+    `OnChainExecutor.send_instructions` (the rent close uses it too, now
+    with the balance simulation); `JupiterPerpsVenue`
+    (`trade/venues/jupiter_perps/venue.py`); `PerpVenue.open_perp`/
+    `close_perp` take the intent's key, plus `place_stop`/`stop_left`;
+    `PerpTerms.stop_pct`; `PerpAccount` places the stop after a recorded open
+    and sells at once if it fails (`perp_stop_failed`), checks for a leftover
+    stop after a close (`perp_stop_left`), and books a venue exit at its
+    payout (`venue_exit`; 0 is a liquidation, `perp_liquidated`);
+    `perp_mismatch` when a bucket opens and the venue has a position the
+    ledger doesn't; `wiring` gives real mode the venue only with
+    `perps_enabled` in `[real]`. The reader gained `priority_fee`,
+    `token_amount` and `last_payout`. Recent fees on the pool read 0 on
+    2026-10-07, so the price is the floor (a quarter of the cap). Tests:
+    `test_perps_venue.py` (13), `test_send_instructions.py`, two more in
+    `test_perp_buckets.py`. 907 tests; a paper `/smoke` of a fast short is
+    clean.
+  - **Owner checklist for the first real perp run:** archive or keep the
+    ledger as you prefer (schema 3); fund the hot wallet with USDC for the
+    collateral (Jupiter's keeper minimum is unknown: try 10 USDC) and keep
+    ~0.05 SOL for fees and the request/position accounts' rent; in
+    `policy.toml` `[real.trading]` set `perps_enabled = true`,
+    `allowed_symbols` with SOL and USDC, and `[real.limits]` `max_trade_usd`
+    at least the exposure (collateral x leverage); a spec with `market`
+    (e.g. a 2x short, 10 USDC, `max_hold` 10 min, a 2% stop); `serve real`
+    + `connect` in a terminal. Watch the `serve` log for `perp_stop_placed`
+    after the open, check the position and its stop in the Jupiter UI, and
+    after the close look for `perp_stop_left` (cancel that stop in the UI).
+    Then the same for a long. Report the keeper's minimum and timing.
+  - **Run 1, the short (owner, 2026-10-08).** `perp-test-short`
+    (`fc12cec93781`): 2x SOL short, 1 USDC of collateral (2 USD size),
+    random entry, `max_hold` 10 min. Opened 17:37:25 UTC at 106.673, closed
+    by `max_hold` at 17:47:29 at 106.388; nothing UNCONFIRMED, FAILED or
+    REJECTED. The ledger matches the chain: posted 1.000000, the position
+    held 0.99845 (opening fee 0.00155), 1.00279 came back (the move
+    +0.00535 less the closing fee 0.00101), gross +0.00279, net +0.00066
+    after the two legs' 20,000 lamports; round trip 23.6 bps. **Keeper:**
+    1 USDC of collateral was accepted; it executed the open 1-2 s after the
+    send and the close 1-4 s after. The A16 changes on the send path
+    (guarded send, single signature) ran clean on all three sends. Before
+    it traded, two `hello`s were refused as designed (`max_trade_usd` 10
+    under the 20 USD exposure; a wallet with no USDC yet). The wallet's SOL
+    across the trip, from the chain: -1,777,520 lamports, of which the
+    ledger has 20,000. Findings:
+    - **F1 (accounting).** The position account's rent (1,747,520
+      lamports, ~0.19 USD) is paid at the first open and was not returned
+      at the close (the position PDA stays); the ledger books none of it.
+      Like the token account's rent (A15): book it at the open, and a
+      refund if the account is ever closed.
+    - **F2 (accounting).** The venue stop's own send (10,000 lamports) is
+      booked nowhere; only the two legs are.
+    - **F3 (false alarm).** `perp_stop_left` fired at 17:47:34, but the
+      keeper closed the stop request (and refunded its rent) at 17:47:35:
+      nothing was left to cancel. `stop_left` must give the keeper time
+      (poll for a few seconds) before it alarms.
+    - **F4 (labels).** Each send's 10,000 lamports is 5,000 base + 5,000
+      priority, booked as `fee_lamports` with `priority_fee_lamports` 0.
+    - **F5 (strategy side).** A refused `hello` (`HelloRefusedError`:
+      reconnecting can't help) is retried by the bot loop until Ctrl+C;
+      it should stop the bot with the reason.
+    - Each request locks ~0.0037 SOL of rent for a few seconds (the keeper
+      refunds it); an open needs ~0.009 SOL free on top of the 0.02 reserve.
+    The long side is still to run.
+
 #### A24. Perp send fixes from the overnight long — S (done 2026-10-13)
 - **Why** (G1, G2 of A11b's run 2, the long, in `plan.md`). Reconciled
   against the chain, the wallet spent 1,875,146 lamports of SOL and the
@@ -3890,3 +4049,1073 @@ schema or wire change:
   keeper that clears the request after 6 s and gives up after 30 s, one
   read with `wait=False` (`test_perps_venue.py`); `failed_signatures_of` on
   the bare error (`test_failed_tx_fees.py`).
+
+#### A25. The perp position rent is a one-time deposit — M (done 2026-10-13)
+- **Why** (G3 of A11b's run 2, in `plan.md`). Jupiter never closes a
+  position account: one PDA per wallet, market and side, reused by every
+  later open (1,747,520 lamports, 2026-10-12). Only run 2's first open paid
+  it, but `round_trip_costs` counted it as a per-trip cost (51 bps instead of
+  20), and paper and the replay never charged it, so a backtest's first
+  trip was cheaper than real.
+- **Built (2026-10-13).** Real keeps booking the rent on the open that
+  created the account, as that bucket's cost (A11c): PnL and budget stay
+  conservative, no schema change.
+  1. **Apart from the round trip.** `RoundTripCosts` has
+     `account_rent_usd` (and `deposit`); `Reports.round_trip_costs` takes
+     each sell through `_add_leg`, which subtracts the rent of a perp's legs
+     (the entry's share that the sell closes plus the sell's own, in USD at
+     the leg's SOL price, the other leg's when missing, as the PnL does)
+     from the leg cost and deposits it apart. A spot leg keeps its token
+     rent in the cost (it comes back as `rent_refund`, A15). `describe()`
+     adds "rent da conta da perp ~$X à parte", so the backtest summary
+     (`output.py`) and the daily report show it; `as_dict()` carries it to
+     `--json`, `ledger_dump.py`, `spec_check.py` and `live_vs_backtest.py`.
+  2. **Paper charges it once.** `SimulatedWallet` keeps `perp_accounts`
+     (in the file; an older file counts its open positions as accounts; a
+     reset forgets them), adds the key on every open and answers
+     `needs_perp_account` (re-reading the file). `SimulatedPerpsVenue` takes
+     `position_rent_lamports` (`DEFAULT_PERP_POSITION_RENT_LAMPORTS`,
+     1,747,520) and charges it in SOL on the first open of a market and
+     side, as `rent_lamports` on that open; `apply_perp` logs it as the
+     send's `rent`, so `resolve_send` gives a crashed open its rent back.
+  3. **The replay too.** `ReplayPerpsVenue` asks the wallet before the open
+     and, on the first one of the run, puts the rent on the leg and in
+     `fees_usd` (outside the wallet, which has no SOL, like the network fee):
+     it never comes back.
+  No schema, wire or spec-id change. Tests: 11 new
+  (`test_perp_position_rent.py`: only the first open of a market and side
+  pays, across a restart of the wallet file, an older file, a reset, a
+  resolved open, the replay; `test_perp_rent_round_trip.py`: the run-2 legs
+  give 20 bps with the rent apart, a partial close takes its share, a spot
+  leg keeps its rent, two paper trips cost the same). Existing expectations
+  updated for the rent: `test_paper_perps.py` (SOL after the first open),
+  `test_perp_backtest.py` (PnL and equity of the first trip, the rent apart
+  in the round trip); `test_perp_buckets.py`'s paper venue charges no rent
+  (its tests check exact fees of other things).
+
+#### A11b. The real perp long, run 2 — owner (done 2026-10-13)
+The short (run 1) is above; this closes A11b and goal 6's real runs.
+- **The run.** 2026-10-12 17:22 → 10-13 08:19 UTC,
+  `spec-wma-composer-perp.json` (`da2394726513`: 2x SOL long, 10 USDC of
+  collateral, 3.1% trailing stop, `max_hold` 240 min, budget 12, max loss
+  3) on a 14.78 USDC + 0.056 SOL wallet, with `[real.limits]`
+  `max_trade_usd = 20`, `max_daily_notional_usd = 60`. Three round trips:
+  -0.180 (`max_hold`, includes the position rent), -0.574 (the trailing
+  stop), +0.625 (`max_hold`); net -0.134 USD. Then 33 buys denied by the
+  daily notional (3 x 20). The keeper filled every request in 3-8 s; every
+  open placed its venue stop.
+- **Reconciled against the chain.** USDC 14.778727 -> 14.844075 (+0.065348
+  = the ledger's `gross_quote`, exact); SOL 56,117,044 -> 54,241,898
+  lamports (1,875,146 spent; the ledger booked 1,855,146). Cost per round
+  trip 51 bps (0.103 USD), 20 bps (0.040 USD) without the one-time
+  position rent.
+- **Findings** (each became an item):
+  - **G1.** The 20,000-lamport gap was the fee of two stop cancels that
+    failed on chain: perp sends didn't carry `failed_signatures` (A24).
+  - **G2.** Two false `perp_stop_left` ERRORs: the keeper removed the stop
+    request (rent refunded) between `stop_left`'s 2 s check and the
+    cancel, which failed with Anchor 3012 (A24).
+  - **G3.** The position account (1,747,520 lamports) is never closed and is
+    reused: a one-time deposit per market and side, which paper and the
+    replay didn't charge (A25).
+  - **G4.** Each request locks 3,723,640 lamports of rent until the keeper
+    runs, and the venue stop's stays locked while the position is open;
+    nothing checks the wallet has that SOL before an open (A26).
+  - **G5.** The ticker shows `custos 0` while a position is open, and a close
+    books `borrow_usd = 0` with the borrow inside `fees_usd` (A27).
+  - **G6.** DNS failed twice (19:13-19:30 UTC with a position open: prices
+    1032 s stale, the perps sweep failed; the venue stop was the guard),
+    and the price websocket dropped every 15-25 min all night (A28).
+  - **G7.** A denial pauses the bot 30 s, so a rolling 24 h limit was asked
+    again 33 times (A29).
+- **After.** The owner changed the spec on 2026-10-13 (trailing stop 4.1%,
+  `max_hold` 480 min, max loss 5): a new id, `62419bec0aa4`, so a new
+  bucket; `da2394726513` stays flat in the ledger.
+
+#### A26. SOL room before a perp open — S (done 2026-10-13)
+G4: an open spends USDC, so `WalletBalances.spendable` never looked at SOL,
+yet each Jupiter request locks 3,723,640 lamports of rent (the request and
+its USDC account) until the keeper runs, the venue stop locks the same while
+the position is open, and the close request locks another next to it. With
+too little SOL the open would land and the stop or the close fail on chain.
+- **The rule.** `open_sol_lamports(position_rent, fee_per_send)`
+  (`execution/models/perp.py`) = 2 x `PERP_REQUEST_LOCK_LAMPORTS` + the
+  position account's rent + 3 sends (open, stop, close) at base + the
+  priority-fee cap. `PERP_POSITION_RENT_LAMPORTS` (1,747,520) moved there
+  too; paper's `DEFAULT_PERP_POSITION_RENT_LAMPORTS` is that constant.
+- **The venues.** `PerpVenue.open_sol_lamports(terms)` answers it with the
+  rent only when the position account doesn't exist yet: paper asks its
+  wallet (`needs_perp_account`), real reads the position's PDA, and
+  `ReplayPerpsVenue` answers None (its wallet has no SOL: no check).
+- **The check.** `PerpAccount.buy`, after the venue lock, the stale-oracle
+  and one-position checks and before the intent, reads SOL fresh and
+  refuses below the wallet's fee reserve + that: `SolRoomError`, a
+  `WalletShortfallError` whose reason names the SOL needed (a buy, so the
+  service answers it as a rejection; nothing reaches the ledger). With the
+  0.02 reserve and the default 100,000-lamport cap: 0.0295098 SOL for the
+  first open of a market and side, 0.02776228 after (`docs/specs.md`, Perps:
+  keep ~0.03 SOL).
+- **Not done:** logging the real lock when the open's simulation differs
+  from the constant (it would sit in `jupiter_perps/venue.py`'s costs read).
+  No schema, wire or spec-id change. Tests (`test_perp_sol_room.py`, 5): the
+  sum; a paper buy refused with 0.025 SOL (no intent, no position) and
+  filled with 0.03; after a round trip (0.0279 SOL left) a second open
+  needs no position rent; the refusal is a `WalletShortfallError` on SOL.
+  `test_perps_sol_room.py` (2): the real venue reads the position's PDA and
+  counts the rent only when it is missing.
+
+#### A27. What the logs show about a perp — S (done 2026-10-13)
+- **Why** (G5 of A11b's run 2). The ticker read `custos 0` all the while
+  a position was open (the bucket's summary is the realized PnL: the
+  entry's costs count only at the close), and a real close booked
+  `borrow_usd = 0` with the borrow inside `fees_usd`.
+- **The ticker.** `with_entry_costs` (`strategy/bot/loop.py`) adds the
+  open position's entry costs to the bucket's summary, in the per-bar
+  ticker and in `bucket_line` (the fill's Telegram message):
+  `entrada: custos <fee+rent+other> SOL (rent <rent>), taxas perp $<fees_usd>`
+  (the SOL part only when the costs are known; the perp part only on a
+  perp; a spot entry shows its own). `PositionBook.summary` is unchanged.
+- **A close's borrow.** `close_perp` (`jupiter_perps/venue.py`) reads the
+  collateral custody with the position, oracle and USDC (one gather; the
+  feed caches it), and `_Before` carries the part's borrow
+  (`closed.borrow_usd(custody)`: the scaled part of a partial close owes
+  its share). `_exit_fill` books it as `borrow_usd`, and `fees_usd` is
+  `expected - returned - borrow`, never below 0. A custody read that
+  fails is logged and leaves the borrow at 0 (all in the fees, as before):
+  it never blocks a close. What came back, and so the PnL, doesn't change.
+  A close resolved after a crash (`_payout`) still has no fee split.
+- **Paper and the replay** already split them: `SimulatedPerpsVenue._exit`
+  (and `ReplayPerpsVenue`, its subclass) books `borrow_usd` from
+  `borrow_at` and the fee apart. No change there.
+- No schema, wire or spec-id change. Tests (10):
+  `test_entry_costs.py` (the ticker line with an open perp, the bar log,
+  a flat bucket unchanged, unknown costs, a spot entry);
+  `test_perp_close_borrow.py` (a close with 0.3 USD of borrow owed: 0.3
+  borrow and 0.182 fees; no borrow; fees floored at 0; a partial close
+  takes half; an unread custody never blocks the close).
+
+#### A29. A denial waits for its window — S (done 2026-10-13)
+- **Why** (G7 of A11b's run 2). A denial paused the bot 30 s, so a rolling
+  24 h limit (the daily notional) was asked again 33 times, 30 s apart,
+  with the same answer.
+- **The policy.** `PolicyState` carries `as_of` and, per rolling limit, the
+  oldest record its window counts: `daily_notional_since` (the oldest buy
+  of the 24 h), `trades_last_hour_since` (the wallet's hour),
+  `account_trades_last_hour_since` (the bucket's hour) and
+  `daily_loss_since` (the oldest realized loss of the 24 h; wins are not
+  dated). `Ledger.policy_state` fills them from the same rows it already
+  read. `_WINDOWS` (`policy/policy.py`) maps each rolling rule to its
+  timestamp and window; `evaluate` returns `PolicyDecision.retry_after`,
+  seconds until the longest refusing window frees (oldest + window - now,
+  rounded up, at least 1 s). It is a floor, not a promise: when the oldest
+  record leaves, the limit may still hold, and the next ask gets the next
+  wait. Denials without a window (max trade, unknown notional, mints, the
+  breaker, unresolved intents) have none.
+- **The reply.** `PolicyDeniedError.retry_after` → `OrderReply.of_denial(
+  reasons, retry_after)`; `OrderReply.retry_after` is a field with a default
+  and the wire sends it (`reply_to_dict`); a reply from an older `serve`
+  without it reads as None. A wire change: restart `serve` and `connect`
+  together.
+- **The bot.** `_handle_reply` pauses orders until `retry_after` (capped at
+  `MAX_DENIAL_WAIT`, 1 h, then it asks again), else `denial_cooldown`
+  (30 s: rejections, denials without a window, an older `serve`). The pause
+  is now per side: a buy waiting a 24 h window never holds the stop's sell.
+  The log line says the real wait (`novas ordens em 1h00`, `wait_text`).
+- No schema or spec-id change. Tests (16): `test_denial_windows.py` (each
+  rolling limit's `retry_after` from the state; two windows wait for the
+  longer, never below 1 s; denials without a window have none; the ledger
+  dates each window's oldest record and the oldest loss, not the oldest
+  win; a `connect` gets the bucket hour's wait over the wire; the wire
+  round trip and an older reply); `test_denial_wait.py` (no order before
+  the window; the 1 h cap; 30 s without a window and from an older
+  `serve`; a waiting buy never holds a sell; the log line; `wait_text`).
+
+#### A28. Network outages — S (done 2026-10-13)
+- **Why** (G6 of A11b's run 2). DNS failed twice on 2026-10-12 (19:13-19:30
+  UTC with a position open): prices were 1032 s stale and the perps sweep
+  failed, the venue stop was the only guard, and nobody was told (the log
+  had a line per attempt). The price websocket also logged a WARNING
+  ("no close frame received or sent") every 15-25 min all night.
+- **Built (2026-10-13).**
+  1. **One alert per outage.** `Outage` (`execution/notification/outages.py`)
+     follows one source: `failing(with_position, detail)` sends one
+     Telegram (and an ERROR) once it has failed for 120 s
+     (`ALERT_AFTER_SECONDS`) while any bucket has an open position, `ok()`
+     sends one when it is back (only after an alert); nothing per tick,
+     nothing without a position (the count goes on, so a position opened
+     during a long outage alerts at once). `TradeRunner` has two:
+     `price_outage`, fed every 10 s (`WATCH_SECONDS`, its own loop next to
+     the sweep, so a slow sweep doesn't delay it) by `check_prices`, which
+     asks the hub (`usd_prices`, so a mint no `connect` asks for any more is
+     still followed) for the non-stable mints of every open position
+     (`TradeService.open_positions`, no network); and `perps_outage`, fed by
+     the sweep's perps step (`_check_perps`). `serve` gives the runner its
+     notifier. `PriceHub.age` is public (was `_age`).
+  2. **Why the websocket drops (live, 2026-10-13).** Four connections side
+     by side for 45 min (`tests/live/test_live_price_stream.py` keeps what
+     the hub relies on). The three with keepalive pings, opened at different
+     times (ages 721, 961 and 1141 s), dropped at the same instant after 16 s
+     without a message, with a local reset (WinError 64, code 1006, no close
+     frame), and all reconnected 3 s later through another CloudFront edge
+     (MAD53 -> BCN50). It is the network path resetting every connection at
+     once, not a lifetime limit of the server, so resubscribing early would
+     not help and was not built. The connection without pings never noticed:
+     it stayed half-open and silent for 25+ min. The server answers pings and
+     refuses a connection without `permessage-deflate` (426). The overnight
+     log fits a periodic event on this machine's network (a NAT or VPN
+     cycle, say): several drops were exactly 14 min 6 s apart, and the
+     same night had the DNS failures.
+  3. **Logs.** `websocket_prices` sets the pings explicitly
+     (`PING_SECONDS` = 20 s, interval and timeout: they turn a dead path
+     into a reconnect). A drop of a connection that had delivered prices is
+     INFO ("reconectando, a API cobre": the Price API covers a mint after
+     5 s); the first connection of a streak that brings no price is a
+     WARNING ("não conecta"), the rest DEBUG, and the first price after
+     that INFO ("de volta").
+  No schema, wire or spec-id change. Tests: 8 new (1029): the alarm fires
+  once after 120 s and once on recovery, not without a position, at once
+  for a position opened mid-outage (`test_outages.py`); against a paper
+  `TradeRunner`, a Price API outage with a position alerts once and on
+  recovery, without a position sends nothing, a failing perps sweep alerts
+  once and on recovery (same file); a drop after prices is INFO, a streak
+  without prices warns once, then DEBUG, then "de volta"
+  (`test_hub_reconnects.py`). Live: 2 (pings answered, 426 without
+  compression).
+
+#### A30. Every SOL cost in the bucket's native PnL — S (done 2026-10-14)
+
+Run 3
+(2026-10-14, `62419bec0aa4`) showed `PNL líquido -0.045989 USDC (~$-0.0481)
+... custos 0.000020000 SOL` after one round trip that cost the wallet
+30,000 lamports: open, venue stop, close. The venue stop's fee
+(`perp_stop_fee`), like a failed send's (`failed_tx_fee`) and a rent
+refund (`rent_refund`), came off `realized_usd` and the budget but never
+reached `costs_sol` or `net_quote`, the native figures the owner reads to
+judge a strategy. Fix: `PositionBook.charge_outside(sol, quote, usd)` puts
+a cost outside the legs in all three (a refund is a negative cost), and
+`AccountPnL` does the same from the events when the book is rebuilt. The
+quote value is exact for a SOL quote (the lamports) and a USD stable (the
+event's USD); any other quote counts the cost as incomplete (`[!]`). `tx
+falhas` and `rent devolvido` stay in the line as a breakdown of `custos`.
+A cost paid while a position is open (its venue stop) counts at once,
+unlike the entry's own fees, which count at the close. No schema or wire
+change. Tests: the book and `pnl_totals` agree after a stop fee, a failed
+fee and a refund, for a USDC and a SOL quote; the ticker line of a perp
+round trip shows three transactions.
+
+Done as planned. `outside_cost_quote` (`shared/models/costs.py`) converts;
+`PositionBook.charge(fee, quote)` and `charge_outside(sol, quote, usd)`
+replace `charge_cost`; `BaseAccount._charge_outside` feeds the venue stop's
+fee; `AccountPnL` keeps the `quote_mint` (from the fills, or the one
+`restore`/`pnl_totals` are given for a bucket with no fill yet) and folds
+`failed_tx_fee`, `perp_stop_fee` and `rent_refund` into `costs_sol` and
+`net_quote`. The summary's incomplete flag reads `[!] N incompleto(s)` (it
+now counts unconverted costs too). The running `serve real` keeps the old
+figures until it restarts; its ledger needs nothing (the events already
+carry the lamports and USD). Tests: 4 new, 4 extended (1033): the book
+after a stop fee, a failed fee and a refund; `pnl_totals` and a restore
+reach the book's native figures after a venue stop; the conversion for
+SOL, USDC and JUP quotes.
+
+#### A31. What a leveraged position earned and paid — S (done 2026-10-14)
+
+A perp bucket's `bruto` is collateral back - posted: already after
+Jupiter's open and close fees and the borrow, so a 2x round trip that made +$0.0107 on price
+and paid $0.052 in fees and $0.0025 borrow reads only `bruto -0.043849`;
+and the position line shows the price move on the notional, not the
+return on the collateral (at 150x a 0.5% move is ~75% of it). Fix: a
+closed perp's `PnLResult` carries `perp_fees_quote` (the close's
+`fees_usd` plus the open's share of posted - collateral kept, so a
+top-up's repeated fill never counts twice) and `perp_borrow_quote` (the
+close's `borrow_usd`); the price PnL is `bruto` + both, so the parts
+always add up. `PositionBook` sums them and the summary splits `bruto`
+into `preço`, `taxas perp` and `empréstimo` (the SOL network costs stay
+in `custos`). `AccountPnL` rebuilds the same from the legs' `order_json`
+(the entry followed through adds and partial sells, as the book does):
+no schema change. `connect`'s SELL line says what the round trip made on
+price and paid (from the snapshot's entry and the fill). The position
+line of a perp shows the price move and the return on the collateral,
+and its mark-to-market includes the borrow accrued so far. A venue exit
+booked from the keeper's payout (its stop, a liquidation) has no fee
+split: everything stays in its price figure. Tests: a paper round trip's
+summary splits price/fees/borrow and they add up to `bruto`; the same
+after `restore_from_ledger`; the position line at 150x.
+
+Done as planned. `PnLResult` gains `perp_fees_quote`, `perp_borrow_quote`
+and `price_quote` (None on spot, so spot lines don't change);
+`shared/models/perp.py` has `open_fees`, `venue_costs` and
+`return_on_collateral`. `PositionBook` keeps `perp_closes`,
+`perp_fees_quote` and `perp_borrow_quote` (`restored(..., perp=...)`), and
+`AccountPnL._follow_perp` walks the BUY/ADD/SELL legs with the book's own
+`added_entry`/`remainder_entry`. `Position.unrealized_usd(price, now)`
+takes the borrow accrued to `now` (the bucket line, the bar log and the
+daily report pass it). In `connect`, `round_trip_line` (from the
+pre-fill snapshot's entry and the fill) goes on the SELL log line and in
+the Telegram fill; `position_pnl` writes `PNL: preço X%, colateral Y% (~$Z
+com taxas e empréstimo)` for a perp. No schema or wire change: a running
+`serve real` shows the split after a restart, old ledgers included (the
+legs already carry it). Tests: 5 new (1038): a paper short round trip
+whose summary splits price/fees/borrow exactly and the same after a
+restart; a top-up and a partial close counting each fee once, also after
+a restart; the 150x position line; the real run's SELL example; a spot
+line unchanged.
+
+#### A32. Logs a person can read — S (done 2026-10-14)
+
+Run 3's logs (2026-10-14): the
+`connect` console printed two long lines every 15 s and repeated the
+bucket's realized PnL, which only changes at a fill; zero parts
+(`rent 0.000000000`) and an 88-character signature on every fill; Rich
+markup (`[blue]...[/blue]`) written raw into the files; `serve`'s fills a
+Python dict with `Decimal('...')`, and INFO, so never on its console;
+~85% of `serve`'s file the RPC wrapper's dumps, `Pubkey(` split over
+lines. Fix:
+1. `connect`: one line per bar, the price and, with a position, its side,
+   size, entry, PnL (price, collateral, USD), liquidation and borrow.
+   The bucket's line (realized PnL, the open entry's costs) is printed at
+   the start and when it changes (a fill), not every bar.
+2. Zero parts left out (`rent`, `outros`, `priority` at 0); a fill's
+   signature shortened on the fill line, whole on its costs line.
+3. Files: Rich markup stripped (a record with `markup` is logged as plain
+   text).
+4. `serve`: a fill is one INFO line (side, size, price, the perp leg via
+   `describe_fill`, the leg's costs, the signature), on the console too;
+   the whole `Order` stays in the file at DEBUG.
+5. The RPC/Jupiter wrapper's DEBUG line is one line (whitespace
+   collapsed).
+No schema, wire or spec-id change; Telegram texts unchanged. Tests: the
+bar line with and without a position, the bucket line only on change,
+the file formatter strips markup, the console filter lets fills through,
+the wrapper's line has no newline.
+
+Done as planned, plus two trims seen in a paper smoke: the bar line of a
+perp reads `SOL-USDC 105.69496 | LONG 2x 0.18914444 @ 105.73930 | preço
+-0.04%, colateral -2.28% ~$-0.2283 | liq 53.2081, empréstimo $0.0000`
+(the USD figure already has the fees and borrow, so the line no longer
+says it each bar), and the console leaves out the `file.py:line` column
+(`show_path=False`; the file keeps the origin). `ConsoleFilter` lets INFO
+from `trader.execution.trade.accounts.*` through (only fills log there at
+INFO). `BaseAccount._log_fill` and `fill_line` replace the dict dumps;
+`describe_costs` leaves zero parts out; `log_bucket` and `position_text`
+in `strategy/bot/loop.py`. Tests: 7 new, 2 changed (1045).
+
+#### A33. A manual stop — S (done 2026-10-14)
+
+The owner can stop a spec (or every spec) by
+hand: its position is sold now and it never buys again, without waiting for
+the expiry or the max loss.
+
+**Design.** `main.py stop <spec.json> [--trader FILE]` or `main.py stop
+  --all [--trader FILE]` finds the trade-runner as `connect` does and sends
+  one `stop` op (token-checked, no `hello`: a spec whose `connect` is
+  running, dead or never started can be stopped; it takes the spec's
+  `terms`, or `all`). The trade-runner opens the bucket from the terms if
+  this `serve` hasn't (the same policy check as `hello`), then
+  `TradeService.stop`: the bucket goes `RETIRING` (no buys, as a retired
+  one) and a `bucket_stopped` event is written (A16 name). With a position,
+  it is sold at once at the hub's pair price (`close_bucket`; perps too);
+  if that sell fails, the 30 s sweep retries it as for any retired bucket;
+  flat, the sweep closes the token account (A15). The reply lists each
+  bucket with what happened (`sold`, `flat`, or the sale's refusal), and
+  `stop` prints one line per bucket (exit 1 on a refusal or no bucket).
+  The stop is **persistent**: `open_bucket` reads the account's last
+  `bucket_stopped` from the ledger and starts it `RETIRING`, so a restarted
+  `serve` + `connect` doesn't buy again; a running `connect` sees its
+  bucket retired and flat and exits (`bucket_done`). To trade that
+  strategy again, change the spec (a new id, a new bucket). `--all` stops
+  the buckets this `serve` has open (one per spec that connected or was
+  stopped since it started). No wire change for `connect`; `stop` needs a
+  `serve` from this version. Tests: the op sells an open position once,
+  refuses a bad token, opens an unconnected spec, `--all`; the stop
+  survives a reopen of the bucket; a connected bot exits; the CLI.
+
+**Done.** `TradeService.stop` and the `bucket_stopped` event; the `stop` op in `TradeRunner` (`_stop`, `stop_bucket`); `remote.stop_specs` and the `stop` command in `trader/api/cli/runners.py`; `smoke.py --stop`. Checked with a paper smoke run (the random spec bought, `stop` sold it, `connect` exited by itself). Tests: 11 new in `test_manual_stop.py`, 1 changed (1056).
+
+#### A21. One round trip per `connect` tick — S (done 2026-10-16)
+
+- A `tick` op replies with
+  the token's and quote's USD prices (the hub's; `StalePriceError` as today)
+  and the bucket snapshot; `HubMarketData` and `TradeClient` share it,
+  `market_for` stays strategy-side. The submit reply carries the snapshot
+  after the fill. `price`/`bucket` stay for warm-up and tests. Wire change.
+  - **Design.** Wire: `{"op": "tick", "mints": [token, quote?]}` (the quote
+    only when it isn't a USD stable, as the `price` calls today) answers
+    `{"prices": {mint: str}, "snapshot": {...}}`; each price is
+    `hub.price` (a stale one refuses the whole tick with its `kind`, so
+    `connect` still raises `PriceUnavailableError`), then `get_bucket`. The
+    `submit` reply of a fill gets `snapshot` (the bucket after it), read into
+    `OrderReply.snapshot` (None from an older `serve`). Strategy side:
+    `RemoteTradeClient.tick(mints)`; `RemoteTicks` (`remote.py`) is the
+    bot's `TickSource` (`bot/config.py`: `tick(mint) -> (price in quote,
+    snapshot)`), paced at one tick a second by the `Pacer` that
+    `HubMarketData` now uses too, and dividing by the quote's USD with
+    `pair_price` (`shared/market/pair.py`, also `PairMarketData`'s). The bot
+    takes an optional `ticks` in `BotConfig`: with it a tick is one call;
+    without it (tests, fakes) `get_price` + `bucket()` as today. After a
+    fill `_report_order` uses the reply's snapshot, and calls `bucket()`
+    only without one. `connect` builds `RemoteTicks`; `market` stays for
+    the warm-up candles. Tests: the runner's `tick` (prices + snapshot, a
+    stale mint refused with its kind, a non-stable pair), the submit
+    reply's snapshot over the wire, one round trip per tick and none extra
+    after a fill against a real `TradeRunner`.
+
+**Done.** The `tick` op (`TradeRunner._tick`) and the snapshot on a filled
+`submit` (`trader/execution/runner.py`); `OrderReply.snapshot` and
+`prices_to_dict`/`prices_from_dict` (`trader/shared/trading_service/`);
+`Pacer` (`shared/market/feed.py`) and `pair_price` (`shared/market/pair.py`);
+`TickSource` and `BotConfig.ticks` (`strategy/bot/config.py`), the bot's
+`_read_tick` and `_after_fill` (`strategy/bot/loop.py`);
+`RemoteTradeClient.tick` and `RemoteTicks` (`strategy/trading_service/remote.py`),
+built by `strategy_bot`. Checked with a paper smoke run (the random spec
+bought, one price a second, no errors). Tests: 4 new, 3 changed (1062).
+The live suite passes (28). On the way, `test_live_runners.py` opened the
+ledger right after `taskkill /F`, before Windows let go of the WAL files
+(`disk I/O error`): it now retries the open for up to 15 s, and
+`LedgerStore` closes its connection when the WAL pragmas fail (it leaked
+one).
+
+#### A22. Crossovers in specs — M (done 2026-10-21)
+
+- In `expr`, `NAME(window, back)` is the
+  indicator `back` closed bars ago (0–50; the lookback grows by it), so a
+  cross is `ema(9) > ema(21) and ema(9, 1) <= ema(21, 1)`. Typed blocks
+  `ma_crosses_above`/`ma_crosses_below {fast, slow, kind}` (the four places).
+  Existing spec ids don't change.
+  - **Design.** The series ends in the forming bar (its close is the last
+    price), so `back = 0` is today's value and `back = b` is the indicator
+    over the closes that end `b` bars before the forming one (a cross fires
+    on the tick that makes it, as the other conditions do).
+    `IndicatorBank.get(name, window, back=0)` slices the closes and caches
+    by `(name, window, back)`; too few bars is `None` (unknown), as today.
+    `indicators.lookback/history(name, window, back=0)` add `back`, so the
+    warm-up counts it everywhere. `expr`: a second integer argument in
+    `0..MAX_BACK` (50), its own error (`barras atrás`); `NAME(n, 0)` is
+    normalized to `NAME(n)` (same behaviour, same id). Typed blocks: one
+    `_MaCross(_MaVsMa)` base with `ma` (not `kind`: the same field as
+    `fast_ma_above_slow`, default `sma`), `fast < slow`, lookback/history of
+    the slow MA + 1; `ma_crosses_above` holds when MA(fast) > MA(slow) now
+    and MA(fast) <= MA(slow) one closed bar ago (`_below` mirrored), labels
+    `cross:ema9>ema21` / `cross:ema9<ema21`. Market conditions (entry or
+    exit). Tests: the typed blocks answer like the `expr` on every tick of
+    a random walk and see both sides; `ema(9, 1)` equals `ema(9)` one bar
+    earlier; the parse errors; `docs/examples/` ids pinned as before.
+
+**Done.** `back` in `IndicatorBank.get` (`strategy/spec/conditions.py`):
+values are kept per bar number (`BarSeries.bar`), the forming bar's redone
+each tick, so a closed bar reads what its last tick computed. Recomputing
+it over the full series (once the deque drops its oldest bar) moves the
+EMA/RSI seed one bar and shifts the value slightly, enough to miss or
+double a near-tie cross (found in the review). The second argument, `_bars`
+and `_indicator` in `strategy/spec/expr.py`, which adds `back` to the
+warm-up itself (`shared/indicators.py` kept `lookback`/`history` as they
+were: `back` is the same for every indicator); `render` writes `ema(9, 0)`
+as `ema(9)` without touching the tree; `MaCrossesAbove`/`MaCrossesBelow`
+(`strategy/spec/models.py`) with one `_crossed` predicate; rows and examples
+in `specs.md`. Checked end to end with
+`backtest --ticks` on a synthetic sine wave (an EMA 9/21 cross in, the
+`expr` cross out: three round trips at the troughs and peaks, warm-up 106).
+Tests: `test_crossovers.py` (11) and 11 new cases in `test_expr.py` (1086).
+
+#### A34. Candle history: paged and cached — M (done 2026-10-21)
+- `JupiterCandles.history(mint, interval, start, end)` pages `get_candles`
+  backwards with `to=` (an explicit `to` for `get_candles`, today always
+  now) until `start`, and keeps the candle's `volume` (`TickerData.volume`,
+  optional).
+- An on-disk cache: past candles never change, so a run is repeatable and
+  offline once fetched, and 30 days of 15 s bars (~173 requests) is
+  fetched once. `.data/candles/<mint>/<interval>/`, one file per chunk of
+  1000 bars, written only once the chunk has closed; `candles_dir()` in
+  `trader/shared/paths.py`. The cache lives in `trader/execution/market/`
+  (only it reads Jupiter); the backtest asks it.
+- **Holes are not quiet bars.** A missing bar is a flat tick today (A4),
+  which is right for a bar with no trades and wrong for a range the API
+  doesn't have. A window with a run of missing bars longer than
+  `MAX_HOLE` (1 h, to tune on the data) is refused with the range named;
+  shorter runs stay flat ticks. The window's coverage (bars present /
+  expected) goes in the result.
+- `backtest SPEC --from ISO --to ISO` replays that window (its warm-up is
+  fetched before `--from`); `--candles N` stays "the last N".
+- Live test: paging returns contiguous, non-overlapping bars; the floor per
+  interval is where the probe says (a change there is a datapi change).
+- **Design.**
+  - The API, probed: with `to` on a bar boundary T and `candles=1000` it
+    returns exactly the bars that open in `[T - 1000 bars, T)`; with holes it
+    returns fewer (never bars from before that range, never the bar at T).
+    So history is cut in **chunks** of 1000 bars aligned to the epoch (chunk
+    k covers `[k * 1000 * bar, (k + 1) * 1000 * bar)`: ~4.2 h of 15 s, ~16.7 h
+    of 1 m, ~41.7 days of 1 h), one request each, instead of one file per day
+    (a 90-day 1 h window would be 90 requests for 3 chunks).
+  - `AsyncJupiterClient.get_candles(..., end=None)`: `to` is `end` (now
+    without it). `TickerData.volume: Decimal | None = None`, read by
+    `candles_to_tickers` (and kept by `ratio_candles` as the token's).
+  - `trader/execution/market/history.py`: `chunks(interval, start, end)` and
+    `CandleCache` (`.data/candles/<mint>/<interval>/<chunk start
+    YYYYMMDDTHHMMSS>.csv`, `time,open,high,low,close,volume`, epoch seconds,
+    the API's decimals as strings). A chunk is written only once it is final
+    (its end + 1 bar + 60 s is past) and non-empty: an empty answer is
+    fetched again next time rather than trusted. `candles_dir()` in
+    `paths.py` (under `data_dir()`).
+  - `JupiterCandles.between(mint, interval, start, end)`: each chunk from the
+    cache or one request (at most 4 at once; `HTTP_RETRY` covers 429s),
+    then the candles opening in `[start, end)`, sorted. A `CandleRange`
+    protocol in `trader/shared/market/feed.py` for it.
+  - Holes: `trader/backtest/window.py` `holes(candles, interval, start,
+    end)` lists each run of missing bars (the window's edges included)
+    longer than `MAX_HOLE` (1 h); `coverage` is bars present / expected.
+    `fetch_window(source, spec, start, end)` reads `[start - history bars,
+    end)` of the token (and the quote, for a non-stable pair), refuses a
+    hole anywhere in it (`ValueError` naming the range: the API doesn't have
+    it), and returns the warm-up candles (before `start`, in the quote
+    token), the ticks of `[start, end)` and the coverage.
+  - `backtest SPEC --from ISO [--to ISO]` (a time without zone is UTC;
+    `--to` defaults to now; `--from` excludes `--ticks` and `--candles`):
+    the warm-up candles seed the strategy as live (`Backtester(warmup=)`,
+    as `compare_live`), so the window's ticks are only the window, and the
+    bars check becomes warm-up candles + at least `MIN_EVAL_BARS` in the
+    window. The result adds `window` (`from`, `to`) and `coverage` (`bars`,
+    `expected`, `pct`).
+  - Tests: chunk math and the request's `to`; the cache (final chunks
+    written, the open one and empty ones not; a second read makes no
+    request); `between` across chunks; holes (inside, at the edges, short
+    gaps pass); `fetch_window` for a stable and a non-stable pair; the CLI
+    with `--from/--to` against a fake. Live: a 15 s window across a chunk
+    boundary is contiguous, a second read is from the cache, the floors, and
+    a real `backtest --from/--to`.
+
+**Done.** `AsyncJupiterClient.get_candles(end=)`, `TickerData.volume`;
+`trader/execution/market/history.py` (`chunks`, `CandleCache`) and
+`JupiterCandles.between`; `CandleRange` (`shared/market/feed.py`);
+`trader/backtest/window.py` (`holes`, `coverage`, `fetch_window`);
+`backtest_spec(warmup=)`; `backtest --from/--to` with a `janela` line in the
+summary and `window`/`coverage` in the JSON. Checked on the 2025-10-10 crash
+(720 1 m bars, 100% coverage; the second run read the cache) and a window
+with the 2024-11/12 hole (refused, range named). Tests: 8 in
+`test_candle_history.py`, 12 in `test_backtest_window.py`, 5 in
+`test_main.py`; live: `tests/live/test_live_history.py` (4) (1111).
+
+#### A35. Scenarios: a catalog and a matrix — M (done 2026-10-21)
+- **A catalog** `docs/scenarios.json`: named windows in UTC, each with
+  `id`, `start`, `end`, `tags` (`bullish`, `bearish`, `choppy`, `quiet`,
+  `black_swan`, `short`, `long`, ...) and a `note`. Windows are absolute
+  dates, so a scenario means the same thing next month. The first set is
+  picked from SOL's data and checked against it (candidates: 2025-10-10
+  crash, the 2025-04 tariff selloff, the 2025-01 TRUMP spike; a few calm
+  weeks; a bullish and a bearish month at 1 h).
+- **Measured, not trusted.** A label is about one asset; "bearish" for SOL
+  may be flat for JUP-SOL. Each run measures the window on the spec's own
+  pair: return, max drawdown, realized volatility, median volume vs the
+  catalog's other windows, and buy-and-hold over the window. A tag the pair
+  disagrees with is flagged (`[!] tag bearish, pair +4%`).
+- **Rolling windows** for "many parts of history" without curating each:
+  `--rolling 7d --from 2025-01-01 --to 2026-10-01` makes one window per
+  week (`--step`, default the length).
+- **Running it:** `backtest SPEC --scenario ID|tag:NAME|all` (repeatable).
+  Each window is a fresh bucket with the spec's budget and max loss. The
+  spec's expiry (`ttl_days`/`expires_at`) is replaced by the window's end:
+  the lifetime is an operating choice, and a 30-day TTL would cut a 90-day
+  window. The max loss still retires the bucket inside a window, as live.
+  Costs are measured once per run (B9) and reused for every window.
+- **Output:** one row per window (its measured stats, the spec's return,
+  drawdown, trades, win rate, cost per round trip, and the return over
+  buy-and-hold), then a summary: median and worst return, worst drawdown,
+  share of windows with a profit, trades in all. `--json` has every window
+  and its trades. `spec_check.py` takes `--scenario` too.
+- **Design.**
+  - The first catalog, from a scan of SOL's 1 h bars 2024-07..2026-10
+    (2026-10-21): the worst 24 h drops (2024-08-04 -24.9%, 2025-02-23
+    -19.4%, 2025-03-03 -22.2%, 2025-04-06 -20.4%, 2025-10-10 -24.1%) as
+    24 h `black_swan` windows (2025-01-26's -26.5% was a 1 h wick: 7.6% at
+    15 s, dropped after the tag check caught it); the worst and best
+    months (2025-02 -36%, 2025-11 -29%; 2024-11 +25%, 2025-04 +18%, 2026-08
+    +41%) as `bearish`/`bullish` + `long`; the calmest weeks by volatility
+    (2026-04-22, 2026-07-20) as `quiet`; flat weeks with the widest range
+    (2024-07-04, 2025-02-28, 2026-02-22) as `choppy`. One window per regime
+    is also `holdout` (for A36). The day and week windows run on SOL at 15 s
+    (2024-07/08 too: the history goes further back than the first probe
+    said); a window a spec's data lacks is that window's error.
+  - `trader/backtest/scenarios.py`: `Scenario` (`id`, `start`, `end`,
+    `tags`, `note`), `load_catalog(path)` (ids unique, `end > start`, times
+    with a zone), `select(catalog, selectors)` (`all`, `tag:NAME`, an id; an
+    unknown one is an error), `rolling(start, end, length, step)` (ids
+    `rolling-<start>`, tag `rolling`), `parse_duration` (`30m`, `12h`,
+    `7d`).
+  - `WindowStats` from the window's pair candles (`Window.candles`, new):
+    `return_pct` (first open to last close: buy and hold, in the quote
+    token), `max_drawdown_pct` (peak close to later low), `range_pct`
+    (high / low - 1), `daily_vol_pct` (stdev of bar log returns x
+    sqrt(bars per day)), `median_volume`. `TAG_CHECKS`, one rule per tag:
+    `bullish` return >= 5%, `bearish` <= -5%, `black_swan` drawdown >= 10%,
+    `quiet` daily vol <= 2.5%, `choppy` range >= max(10%, 3 x |return|)
+    (the range dwarfs the move; |return| < 3% refused a +4% week with a 43%
+    range);
+    a tag whose rule fails gives a flag (`[!] bearish: pair +4.0%`). Other
+    tags are not checked.
+  - `run_scenarios(source, spec, scenarios, costs, seed, now)`: for each
+    window `fetch_window`, then `backtest_spec` on
+    `spec_for_window(spec, end)` (a copy with `expires_at = end`, no
+    `ttl_days`; the reported id stays the spec's). A window that fails
+    (a hole, too few bars) is a row with its `error`; the rest still run.
+    The summary is over the rows that ran: `median_return_pct`,
+    `worst_return_pct` (and its id), `worst_drawdown_pct`, `profitable`
+    (share of windows with return > 0), `trades`, `median_vs_hold_pct`
+    (return - buy and hold; in USD vs the quote token for a non-stable
+    pair, which the row notes).
+  - CLI: `backtest SPEC --scenario X` (repeatable) `[--catalog FILE]`
+    (default `docs/scenarios.json`), or `--rolling 7d --from ISO [--to ISO]
+    [--step 7d]`; neither takes `--candles`/`--ticks`, and `--scenario`
+    takes no `--from`. `--max-hole 6h` (windows and `--from`) raises the
+    hole limit: a thin token (NOBODY at 15 s) has real hours without a
+    trade, which the 1 h default refuses; the error lists 3 ranges and a
+    count. Costs are resolved once (measured or flags). Text:
+    one line per window and the summary (`output.scenarios_summary`);
+    `--json`: `{"spec_id", "windows": [...], "summary": {...},
+    "measured_costs"}`, each window with its stats, flags and the full
+    `backtest_spec` result.
+  - Tests: the catalog's own file loads and its ids are unique; selection;
+    rolling; durations; stats and each tag rule; expiry replaced; a failed
+    window doesn't stop the rest; the summary; the CLI in both modes. Live:
+    the catalog's 15 s windows that should exist have no hole on SOL, and
+    each catalog tag agrees with SOL's measured stats at 1 h.
+
+**Done.** `docs/scenarios.json` (15 windows); `trader/backtest/scenarios.py`
+(`load_catalog`, `select`, `rolling`, `parse_duration`, `window_stats`,
+`TAG_CHECKS`/`flags`, `spec_for_window`, `run_scenarios`, `summarize`);
+`Window.candles`; `max_hole` on `holes`/`fetch_window`; `backtest
+--scenario/--catalog/--rolling/--step/--max-hole` and
+`output.scenarios_summary`; `spec_check.py --scenario`; `FakeRange` and
+`candle` in `tests/factories.py`. Checked on SOL: the black swans, quiet
+and choppy windows at 15 s (all 11 ran), the black swans at 1 m (a real
+1 m hole refused 2025-01-26's warm-up). Tests: 16 in `test_scenarios.py`,
+8 in `test_main.py`; live: `tests/live/test_live_scenarios.py` (2) (1134).
+
+**Simplified (/simplify, 2026-10-21).** The window's end is the replay's
+deadline (`SpecStrategy(spec, until=)`, `backtest_spec(until=)`) instead of
+a copied spec with another id, and `--from/--to` uses it too, so both modes
+agree. `vs_hold_pct` compares USD with USD (`hold_return_pct` from the
+ticks; the tag stats stay in the quote token). The CLI decides the source in
+one place (`_Args`, `_source`: `int | Path | _Window | _Scenarios`) and
+refuses `--max-hole`/`--step` where they do nothing; costs are read by name.
+`daily_vol_pct` is the shared `volatility`; `median_volume` and the
+`failed` count went. The window's candles are dropped before its replay
+(memory on 30-day windows). Skipped: an in-memory chunk memo for
+overlapping windows, prefetching the next window (both A37), caching empty
+chunks, catching network errors per window (a network failure still ends
+the run). 1137 tests.
+
+#### A36. Parameter variants — M (done 2026-10-21)
+- `--vary PATH=V1,V2,...` (repeatable) on any spec field by its dotted
+  path (`exit.stop.pct=3,4.1,5`, `entry.conditions.0.fast=10,15,20`,
+  `sizing.usd=5,10`). The cartesian product of the values gives the
+  variants; each is parsed and validated as a spec (a bad one is an error
+  naming the path) and has its own spec id. The base spec is always one of
+  them.
+- The matrix becomes variants x windows; the summary ranks variants by the
+  median return over the windows and shows the worst window next to it, so
+  a variant that wins one window and loses the rest doesn't come first.
+  The best variant can be written out as a spec file (`--write-best FILE`).
+- Overfitting guard: windows tagged `holdout` are reported apart and never
+  used to rank. A walk-forward mode (rank on earlier windows, check on the
+  next) is the follow-up if this is used to tune.
+- `--seed N1,N2` runs each cell per seed for specs with `random_chance`.
+- **Design.**
+  - `trader/backtest/variants.py`: `parse_vary(["exit.stop.pct=3,4.1"])`
+    -> axes `(path, [values])`, each value a JSON literal (`3`, `"wma"`,
+    `true`) or else the text; a path is dot-separated keys and list
+    indexes. `variants(base_json, axes)`: the product, each set on a copy
+    of the spec's JSON (the key must already exist: a typo is an error,
+    not a new field), parsed by `parse_spec` (a refusal names the path and
+    value), deduplicated by spec id, the base first (`changes` empty).
+    `symbol`, `timeframe` and `market` can't vary: the data would differ
+    (run them as separate backtests).
+  - `run_matrix(source, variants, scenarios, costs, seeds, now, max_hole)`
+    (in `scenarios.py`, which `run_scenarios` becomes a one-variant,
+    one-seed view of): each window fetched once with the largest warm-up
+    among the variants (extra warm-up candles are harmless), its stats and
+    flags measured once, then every variant x seed replayed on it; a
+    window that can't be fetched is an error row for every variant. Per
+    variant: its rows, `summary` over the windows not tagged `holdout`
+    (seeds are rows too) and `holdout` (the same summary over the holdout
+    windows, never used to rank). Ranking: median return over the ranked
+    rows, then the worst return (higher first); a variant with no ranked
+    row comes last. Result: `{"variants": [...], "ranking": [ids],
+    "best": id}`.
+  - CLI: `--vary` (repeatable) needs `--scenario`, `--rolling` or `--from`
+    (a `--from` window becomes one scenario, `window`); `--seed 0,1,2`
+    takes several only with those too. `--write-best FILE` writes the best
+    variant's JSON (`indent=2`; refused without `--vary`). Text:
+    `output.matrix_summary`, one line per variant in rank order (rank, id,
+    changes, median, worst and its window, profitable share, trades,
+    holdout median), then the best one's per-window lines.
+  - Tests: `parse_vary` (literals, text, bad syntax); `variants` (product,
+    base first and deduplicated, a missing path, a refused value naming
+    the path, the fixed fields); the ranking (median, then worst; holdout
+    ignored; a variant without rows last); one fetch per window for all
+    variants; seeds as rows; the CLI (`--vary` with `--scenario` and
+    `--from`, `--write-best`, the refusals).
+
+**Done.** `trader/backtest/variants.py` (`parse_vary`, `variants`,
+`Variant`, `FIXED`); `run_matrix`, `rank` and `run_scenarios` as its
+one-variant view in `scenarios.py`; `backtest --vary/--write-best` and
+`--seed 0,1` (a `--from` window becomes the scenario `window`);
+`output.matrix_summary` (holdout rows marked). Checked on real data: 4
+variants of `sol-dip` (stop 3/5 x take profit 2/4) on the black swan and
+choppy windows at 1 m, ~25 min at today's replay speed (A37); the spec as
+written ranked first. Walk-forward stays a follow-up. Tests: 13 in
+`test_variants.py`, 6 in `test_main.py`; live: one in
+`test_live_scenarios.py` (1156).
+
+**Simplified (/simplify, 2026-10-21).** Fixed a bug the review found:
+`summarize` keyed returns by window id, so with several seeds only the last
+one counted (and `profitable_pct` could not pass 100/S %); each seed is now
+a row, and `worst_id` carries `#seed`. Matrix cells keep the numbers, not
+the trades (variants x windows x seeds of trades would not fit); the
+single-spec view keeps them. `rank` returns the sorted results; a
+variant's id is computed once (`Variant.id`); the CLI has one path for
+windows (`run_matrix`, `single_view` without `--vary`) and parses the spec
+once; seeds are deduplicated; `symbol`/`timeframe`/`market` are compared
+on the parsed variant instead of by path text. Skipped: refusing seeds for
+specs without `random_chance`, measuring costs per sizing, a narrower
+hole check per variant (a hole in the widest warm-up refuses the window
+for all; documented in `run_matrix`). 1156 tests.
+
+#### A37. Replay speed and parallel runs — M (done 2026-10-21)
+- Profile a 1000-bar replay first; the time is somewhere between the
+  service, the ledger (SQLite per run) and 25 ticks per bar. Target: 30 days
+  of 15 s bars for one spec in under 3 minutes, without changing any result
+  (the existing backtest tests and a pinned matrix are the check).
+- Cells run in parallel processes (`--jobs`, default the CPU count): each is
+  independent and reads the cache.
+- **Design.**
+  - Measured (2026-10-21, 12 h of 2025-10-10, 11 example specs pinned in a
+    scratch script): 2.8k-21k ticks/s. Two hotspots. Indicators are
+    recomputed over the whole series on every tick: `rsi` alone is ~50% of
+    an RSI spec (`sol-dip`, `sol-perp-short`, `jup-sol-expr`), `wma` ~15% of
+    `wma-composer-perp`. And the paper perps venue decodes each open
+    position's fill (`perp_from_dict` + two `replace`) twice a tick (sweep
+    and equity), ~40% of a perp spec.
+  - **Exact incremental indicators.** Within a bar only the last close
+    changes, so `sma`, `wma`, `ema` and `rsi` split into a state over the
+    closed bars (computed once per bar) and one step for the last price, in
+    the same order of Decimal operations, so the value is bit-identical:
+    `PARTIAL` in `trader/shared/indicators.py` (`prefix(closed, window) ->
+    state | None`, `finish(state, last, window)`; None falls back to the
+    full function: too few bars, or the last price inside a seed).
+    `IndicatorBank.get` uses it for `back == 0`, keeps the states per bar
+    (dropped on a new bar or a seed) and copies the closes only when a
+    full computation needs them. `volatility`, `high`, `low` stay as they
+    are (window-sized). A test compares split and full on random series
+    for every window.
+  - **Perps:** `SimulatedPerpsVenue` keeps the decoded entry of each open
+    position (keyed by the record's fill dict, checked by identity: paper
+    re-reads its file and gets new dicts, so it never reuses a stale one).
+  - **Parallel cells:** `run_matrix(..., jobs)`: with `jobs > 1` and a
+    source with a disk cache (`JupiterCandles`), the parent reads each
+    window once (filling the cache, measuring it, catching its errors) and
+    then each (window, variant) cell, with its seeds, runs in a
+    `ProcessPoolExecutor` worker that reads the window back from the cache
+    (`_cell_job`, module-level for pickling). Other sources (the tests'
+    fakes) run in-process. Results keep the serial order and are equal to
+    the serial ones. `backtest --jobs N` (default `os.process_cpu_count()`;
+    1 = in-process).
+  - Tests: split vs full indicators; the bank's values unchanged across
+    bars, seeds and resets; the perp venue's cache never serves another
+    record; parallel == serial on a pre-filled cache (no network). The
+    pinned scratch results must be identical before and after.
+
+**Done.** `indicators.PARTIAL` (`sma`, `wma`, `ema`, `rsi`) and
+`IndicatorBank._compute`/`_state` (closes copied only for a full
+computation); `SimulatedPerpsVenue._decode` (used by `_exit` and `_held`;
+`_exit` builds its `PerpFill` directly instead of `replace`); `run_matrix
+(jobs=)` with `_serial_rows`/`_parallel_rows`/`_cell_job`, and `backtest
+--jobs`. Results: the 11 pinned example specs are identical before and
+after; their 12 h replays went from 42 s to ~24 s in all (RSI specs 2-6x,
+perps ~2x, the rest 1.2-1.5x). 30 days of 15 s bars (4.1M ticks,
+`scalp-test`, from the cache) replay in 195 s: just over the 3 min target;
+a perp spec is still ~11k ticks/s (~6 min for 30 days). The A36 matrix
+(4 variants x 8 windows at 1 m) went from ~25 min to 67 s with the cells
+in 12 processes; `--jobs 1` and the default give byte-identical JSON.
+Paper smoke with a random 2x long perp: opens and closes, no errors.
+Left: the per-tick service work (`get_bucket`, equity, ~20%), and
+`volatility` stays full. Tests: 6 in `test_indicator_split.py`, 1 in
+`test_parallel_matrix.py`, 1 in `test_paper_perps.py`, 1 in
+`test_main.py` (1165).
+
+**Simplified (/simplify, 2026-10-21).** A review found that the workers
+re-read each window from the disk cache, which never holds a window's
+still-forming last chunk: a window ending near now was refetched by every
+worker (429 bursts) and could replay other candles than the ones measured.
+Such a window now runs in the parent (`_cached`); the others go to the
+workers in groups of variants (each worker reads its window once per
+group), submitted as each window is measured (`_ParallelCells`). `rsi`
+and its prefix share `_wilder`/`_smooth`, `ema` is its own prefix, `sma`
+and `wma` share `_head`, and `high`/`low` split too (`max`/`min` keep the
+first of equal values); the bank reads the closed bars through
+`BarSeries.closed` (one copy per bar). `_exit` is back to `replace` (the
+decode was the cost, not `replace`) and `_decode` keys on identity only.
+Skipped: sending the parsed window to the workers instead of re-reading
+it (pickling 4M ticks per job), `volatility` split, a minimum cell count
+before spawning. The pinned results and the serial/parallel JSON stay
+identical. 1168 tests.
+
+#### A38. Stress scenarios — M (done 2026-10-21)
+- **Cost stress:** `--costs base,2x` runs each cell with the measured costs
+  and with fee, slippage and network fee doubled (perps: borrow too). A spec
+  that only wins at base costs is fragile.
+- **Synthetic shocks** on a real window, since real crashes are few:
+  `--shock -15%@50%` moves the price by 15% between two ticks halfway in
+  (no ticks in between, as a gap), so stops fill past their level. Also a
+  sharp drop and recovery (`-10%~1h`).
+- Low volume today only means quiet prices: the replay's slippage doesn't
+  depend on volume. Scaling slippage by the bar's volume against the
+  window's median is the step that makes `quiet` windows test fills too.
+- **Design.**
+  - **Stresses are an axis of the matrix**, next to seeds:
+    `trader/backtest/stress.py` `Stress(name, costs x, shock)`. `--costs
+    2x,3x` (a multiplier on fee, slippage, network fee and borrow; `base`
+    is always there and first) and `--shock SPEC` (repeatable) each add one
+    stress; they don't combine (each is base plus one change). Each cell
+    runs per stress x seed; a row carries `stress`. Ranking stays on the
+    `base` rows (not `holdout`); each variant also gets `stress: {name:
+    summary}` over its non-holdout rows of that stress, and `fragile` when
+    the base median is above 0 and every stress median is not. A stress
+    turns matrix mode on (one variant is fine).
+  - **Shocks** on the window's ticks (the warm-up stays real; the window's
+    tag stats stay the real ones, `hold_pct` is per stress, from its
+    ticks): `-15%@50%` is a gap, every price from the tick at 50% of the
+    window's time on is x 0.85 (consecutive ticks: no fill in between, so a
+    stop fills past its level); `-10%~1h@50%` drops 10% there and recovers
+    linearly over 1 h. The position defaults to `@50%`.
+  - **Volume slippage** (`--volume-slippage`, windows only): each bar's
+    slippage is x `clamp(median volume of the window / bar volume, 1, 10)`
+    (a bar with no candle: x 10), never better than the flag or the
+    measured value. `Tick.slippage_scale` (None: x 1, as today), set by
+    `fetch_window(volume_slippage=True)` through `ticks_from_candles`;
+    `ReplayQuoteClient` takes fee and slippage apart and adds `slippage x
+    scale` (the same sum as today without a scale). Perps keep their own
+    impact model (not scaled).
+  - Text: the matrix line adds each stress median and `[!] frágil`; JSON
+    rows have `stress`, variants `stress` and `fragile`.
+  - Tests: parsing (`--costs`, `--shock` forms and errors); a gap and a
+    recovery on ticks (prices, timestamps unchanged, warm-up untouched);
+    costs x2 doubles each cost; rows per stress x seed, ranking on base,
+    `fragile`; volume scales (median, clamp, quiet bar) and the quote with
+    a scale; no scale gives the pinned results; the CLI.
+
+**Done.** `trader/backtest/stress.py` (`Stress`, `Shock`, `stresses`,
+`parse_shock`); `_Run.stresses`/`volume_slippage`, `_cells`/`_cell` per
+stress x seed, `_variant_result`'s `stress` summaries and `fragile`;
+`Tick.slippage_scale`, `ReplayQuoteClient(fee_bps, slippage_bps)`,
+`window.volume_scales`/`scaled_by_volume` and
+`fetch_window(volume_slippage=)`; `backtest --costs/--shock/
+--volume-slippage`; the matrix line shows each stress median and `[!]
+frágil`. Without a stress or the flag the pinned results are identical.
+Checked on the black swans at 1 m (`sol-dip`: base -5.7%, 2x -10.2%, a
+-15% gap -12.9%, a -10% drop recovered in 1 h -8.9%). Tests: 21 in
+`test_stress.py`, 5 in `test_main.py`; live: one in
+`test_live_scenarios.py` (1194).
+
+**Simplified (/simplify, 2026-10-21).** Bugs the review found: `--shock
+-10%~0h` divided by zero mid-replay (the shock now uses `parse_duration`,
+moved to `stress.py`, which refuses 0), and `--costs nanx`/`infx` passed
+(now finite and > 0). `--costs` multiplies only the fee and the slippage
+(the network fee is flat per transaction), and `--costs`/
+`--volume-slippage` are refused for a perp (its engine charges its own fee
+and impact: they tested nothing). The volume scale is a per-bar lookup the
+quote client makes per quote (`VolumeScales`), not a field rewritten on
+every tick (`Tick.slippage_scale`, `scaled_by_volume` gone: a 4M-tick
+pass). A shock rebuilds only the ticks it moves (`bisect`), once per window
+with the stress as the outer loop over the variants (`_window_cells`), so
+one stressed copy is alive at a time. `fragile` is now "wins on the base,
+loses in some stress that ran" (`is_fragile`). Rows are grouped by stress
+once; `_Args.seeds`/`stresses` are parsed once. Skipped: scaling the perp
+fee and impact, shocked tag stats (the rows keep the real window's). 1197
+tests.
+
+---
+
+## Perps design and decision log (moved from plan.md on 2026-10-16)
+
+The perps reference design (all built; code comments cite §8.x and D1–D11)
+and the dated decisions, moved when the plan was rewritten around the
+backtest. Text as written.
+
+### 8. Perps design
+
+The reference design for perps, from the owner's decisions of 2026-10-03
+(numbers for Jupiter Perps, the JLP pool, checked that day). Everything here
+is built; code comments cite §8.x and D1–D11.
+
+#### 8.1 Scope
+One perp market per spec, one direction per spec (`long` or `short`), one
+position per bucket. Market entry and exit; spec-level stops and exits as
+for spot, plus a stop the venue holds on-chain (D7); a partial close and
+adding collateral to an open position (A12). Paper, backtest, then real on
+one venue. Out of scope: flipping direction in a bucket, limit orders,
+cross-margin, several venues, funding-rate strategies.
+
+#### 8.2 Perps in one page
+
+| Concept | Spot | Perp |
+|---|---|---|
+| Direction | Long only | Long or short; a short profits when the price falls |
+| Exposure | What you spent | `size_usd = collateral_usd x leverage` (1.1x to 250x on Jupiter) |
+| What you hold | Tokens in the wallet | A position account on the venue; the wallet holds only unposted collateral |
+| PnL | `quote received - quote spent - costs` | `direction x (exit - entry) / entry x size_usd - fees`, settled in collateral |
+| Running costs | None | Hourly **borrow fee** from collateral (utilization x hourly rate x size) |
+| Trade fees | LP fees inside the amounts, network fee | 0.06% of size on open and close, a price-impact fee, the network fee |
+| Losing it all | The token goes to zero | **Liquidation** at maintenance margin (0.2% of size): the venue keeps all remaining collateral; borrow fees move the liquidation price closer every hour |
+| Price | Jupiter quote | The venue's oracle (the Doves aggregated feed; Edge, Chainlink and Pyth as checks) |
+| Execution | One transaction | **Two phases**: our transaction creates a `PositionRequest`, a Jupiter keeper fills or rejects it later |
+
+Liquidation price: `liq = entry -/+ |collateral - close_fee - borrow_fee -
+size/500| x entry / size` (minus for longs). Without fees, 3x liquidates after
+a ~33% adverse move, 10x after ~10%. A long posts the asset, a short a stable;
+any input is swapped automatically and a close can pay out in a chosen token,
+so a long funded and closed in USDC keeps the bucket in USD.
+
+#### 8.3 Venue
+
+| Venue | State (2026-10) | Fit |
+|---|---|---|
+| **Jupiter Perps** (SOL, ETH, wBTC) | Active, the largest remaining Solana perps venue; no REST API: instructions built from the Anchor IDL (program `PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu`), signed with our key, sent through Helius | **Chosen (D1)**: same key, RPC, custody and confirmation model as spot |
+| Pacifica | Active, REST + websocket, CCXT, testnet | Second choice: custody not fully on-chain |
+| Jupiter GUM beta | New order book, JUP stakers only, no API | Not now |
+| Velocity (ex-Drift) | Reopened after a $285M hack; Python SDK archived | Too risky |
+| Flash Trade, Zeta | Closed | No |
+
+#### 8.4 How coupled the code is
+Reviewed on 2026-10-12. The coupling found before perps (a trade as a swap
+of one mint for another) was removed in A7, A8 and A23; one item stays by
+choice.
+
+| # | Coupling | Status |
+|---|---|---|
+| C1 | Execution imported the concrete `AsyncJupiterProvider` | **Gone** (A7): only `wiring` and the backtest build venues; `test_architecture.py` enforces it |
+| C2 | One account class mixed wallet, limits, intents, fills and the book | **Gone:** `BucketAccount` (A7); `SpotAccount` and `PerpAccount` on `BaseAccount`, the perp side of the service in `PerpDesk` (A23) |
+| C3 | Intent, result and order are swap-shaped (`spend_mint`/`receive_mint`, `Order.input_mint`) | **Holds, by choice:** a perp rides them with `perp` (A8); the names are ledger columns and wire fields, so the rename waits for a schema bump (backlog) |
+| C4 | Long-only math in positions, stops, targets and `peak` | **Gone** (A7): `Direction` |
+| C5 | A bucket's money is a wallet balance; reconcile compares wallet balances | **Holds, inherent** (collateral is a wallet balance too); the wallet is its own seam, `Wallet` (A23); perps reconcile against the venue (A12) |
+| C6 | Paper and replays simulated a wallet of tokens only | **Gone** (A8, A9): `SimulatedPerpsVenue`, `ReplayPerpsVenue` |
+| C7 | A new spec field with a default changed every spec id | **Gone** (A7, A8): pinned ids, `market` out of `canonical_json` when spot |
+
+#### 8.5 Decisions (D1–D11)
+- **D1. Venue:** Jupiter Perps, SOL first, then ETH and wBTC.
+- **D2. Long and short; direction and leverage in the spec:**
+  `"market": {"kind": "perp", "venue": "jupiter", "direction": "short",
+  "leverage": 3}`; omitted means spot. BUY/SELL keep meaning enter/exit, so the
+  wire protocol and `decision.py` don't change.
+- **D3. Direction-aware conditions, written once:** `TickContext.direction`;
+  `peak` is the best price since entry; the five position blocks compare in the
+  favourable direction; market blocks don't change. Spot is long, so its
+  results don't change.
+- **D4. Two seams:** the venue (`Venue` for spot, `SpotVenue`; `PerpVenue`
+  for perps: `JupiterPerpsVenue`, `SimulatedPerpsVenue`, `ReplayPerpsVenue`)
+  and the account (`BucketAccount`: `SpotAccount`, `PerpAccount`).
+- **D5. Money in a perp bucket is collateral:** `sizing` and `budget_usd`
+  count collateral; the policy's notional is the exposure; a liquidation is a
+  realized loss of the whole collateral and counts toward `max_loss_usd`.
+- **D6. One ledger, one schema bump:** `TradeIntent.instrument` and an
+  optional `PerpTerms`, stored in `perp_json` + `instrument` (schema 3).
+- **D7. A venue-side stop is required:** every real perp open places a stop
+  at the spec's stop or at half the distance to liquidation, whichever is
+  closer, as its own intent; one left after a normal exit is cancelled; if it
+  can't be placed, the position is closed and `perp_stop_failed` recorded.
+- **D8. Two-phase execution on the intent lifecycle:** request failed on-chain
+  -> retry; keeper fills within 60s -> EXECUTED; keeper rejects -> REJECTED
+  (not counted by the breaker); deadline passed or anything failing after our
+  send -> UNCONFIRMED. The request's `counter` seed comes from the idempotency
+  key, and the position is read before any resend.
+- **D9. Accounting:** realized PnL = collateral returned - collateral posted,
+  from the actual token deltas, plus network fees; borrow and price-impact fees
+  are inside that amount and never subtracted again. Unrealized adds the
+  accrued borrow and the close-fee estimate.
+- **D10. Risk:** `perps_enabled` off in real, on in paper; `max_leverage`
+  default 3 in every mode; `allowed_perp_markets`; at `hello` and per intent,
+  `leverage <= max_leverage`, the stop well before liquidation (at most half
+  of `1 / leverage` after fees), a required `max_hold` exit; reconcile against
+  the venue's position accounts (`perp_mismatch`); entries stop in a market
+  where the venue has a position the ledger doesn't know.
+- **D11. Sequencing:** after the first real spot run (2026-10-05).
+
+#### 8.6 Design details
+- **Spec:** `symbol` stays `BASE-QUOTE` (the base is the market, the quote the
+  stable the bucket pays in); `market` is left out of `canonical_json` when it
+  is spot, so existing ids don't change.
+- **Paper and backtest engine** (`trader/execution/trade/venues/paper/perps.py`):
+  positions under a `perps` key in `paper-wallet.json`; the Jupiter fee model
+  (0.06% each way, linear price impact, hourly borrow: the live rate in paper,
+  `--borrow-bps-hour` in backtests); liquidation and the venue stop checked
+  on every price and by `serve`'s 30s sweep. Spot candles stand in for the
+  oracle; the output says so.
+- **Real adapter:** decodes `Pool`, `Custody`, `Position` and
+  `PositionRequest` with `getAccountInfo` at Confirmed (`Position` is a PDA,
+  never `getProgramAccounts`); builds the requests from the IDL; waits for
+  the keeper; places and cancels the venue stop. Transaction inspection
+  allows the perps program; an open refuses a Doves price older than 30 s.
+  The guard hook needed no change.
+
+| Failure | Behaviour |
+|---|---|
+| Keeper slow or down | Deadline -> UNCONFIRMED; the venue stop still protects |
+| Keeper rejects | REJECTED; nothing moved |
+| Oracle outage | No fills or liquidations; entries denied on a stale oracle |
+| Liquidated while the bot is down | The sweep books it as a venue exit when the bucket opens again (`perp_mismatch` if the ledger doesn't know it) |
+| Venue gone | Entries blocked; the owner closes by hand; a new adapter behind D4 |
+| Borrow fees creeping | `max_hold` required; the daily report shows accrued borrow |
+
+#### 8.7 Sources
+Checked on 2026-10-03.
+- Jupiter Perps: https://docs.jup.ag/user-docs/trade/perps,
+  https://developers.jup.ag/docs/perps
+- IDL (community, TypeScript):
+  https://github.com/julianfssen/jupiter-perps-anchor-idl-parsing
+- GUM markets: https://solanacompass.com/news/jupiter-perps-adds-six-markets-including-tokenized-spacex-hype-and-zec-via-gum-orderbook
+- Velocity/Drift: https://www.chainalysis.com/blog/lessons-from-the-drift-hack/,
+  https://docs.velocity.exchange/developers, https://github.com/drift-labs/driftpy
+- Pacifica: https://docs.pacifica.fi/api-documentation/api/rest-api
+- Comparison: https://madeonsol.com/blog/solana-perp-dexs-compared
+
+Not verified: the maximum open positions per wallet (6 or 9), and whether
+historical borrow rates can be downloaded. The keeper's timing was measured
+on the short: 1-4 s.
+
+### 9. Decision log
+
+Decisions up to 2026-10-04 are in [`history.md`](history.md).
+
+- **2026-10-03 (owner, perps):** Jupiter Perps; long and short; leverage set
+  by the spec and capped by `max_leverage` (default 3, every mode); a
+  venue-side stop on every real perp position (closed if it can't be placed).
+  Velocity rejected for now (hacked, Python SDK archived). The domain model is
+  swap-shaped end to end, so a decoupling step (A7) comes before perp code.
+- **2026-10-05:** the plan is renewed: finished work to `history.md`, perps
+  folded in from `perps.md`, items numbered from A1. A keeper rejection maps
+  to REJECTED instead of a `recusado:` prefix.
+- **2026-10-05 (owner, A2):** the paper soak ends after the second run
+  instead of a week; its findings are A13 and A14.
+- **2026-10-06 (owner, A6 run 1 -> A15):** a token account the bot opened is
+  closed when its bucket retires flat, and the refund is credited to the
+  bucket that paid the rent; sells re-read the token account directly when
+  the wallet read comes up short.
+- **2026-10-07 (A6 done):** the exit criteria for a bigger budget (5 clean
+  round trips, the rent refunded at retirement, live cost per round trip at
+  or below the backtest's) all hold. The next real budget is the owner's
+  call. A7 must keep the ids of `docs/examples/`.
+- **2026-10-07 (owner):** one wallet for every strategy stays; no owner
+  approval for large trades (a trade inside the policy and the spec's terms
+  is already approved).
+- **2026-10-07 (owner):** A11 splits into A11a (build and simulate, nothing
+  sent) and A11b (send, keeper wait, first real run); longs and shorts both.
+- **2026-10-08 (owner):** a pause for a code cleanup, execution first (A16),
+  then strategy (A17): behaviour, the ledger schema, the wire and the spec
+  ids stay as they are. `SpotVenue` and the `trading_service` names stay.
+- **2026-10-09 (owner, A12):** A12 takes partial closes and adding collateral
+  (no longer out of scope), and the A3 resolver learns perp intents.
+- **2026-10-09 (owner):** the backlog becomes A18–A22, fixes first, then
+  cleanup, then features. The service entrypoint stays in the backlog and
+  manual trades (goal 2) stay deferred.
+- **2026-10-12 (owner, A23):** a review of §8.4 against the code; what was
+  left of the accidental coupling is removed (`Wallet`, `BaseAccount`,
+  `PerpDesk`). The swap-shaped names (C3) stay until a schema bump.
+- **2026-10-12 (owner):** the plan is rewritten to hold only what is ahead;
+  A11/A11b's design and the short run's report move to `history.md`.

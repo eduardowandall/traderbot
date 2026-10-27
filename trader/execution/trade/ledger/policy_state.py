@@ -1,5 +1,6 @@
 """Agregados do ledger que a política usa (`PolicyState`)."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -15,6 +16,21 @@ from trader.execution.trade.policy import PolicyState
 STALE_EXECUTING_SECONDS = 300
 
 
+@dataclass(frozen=True)
+class _Spending:
+    """As compras que contam nos limites: o valor em 24h e quando foram."""
+
+    notional: Decimal
+    day: list[str]  # created_at (ISO) das compras das últimas 24h
+    last_hour: list[str]
+    mine: list[str]  # da última hora, só do bucket
+
+
+def _oldest(timestamps: list[str]) -> datetime | None:
+    """O mais antigo de timestamps ISO do ledger (None se vazio)."""
+    return datetime.fromisoformat(min(timestamps)) if timestamps else None
+
+
 class PolicyStateQueries(LedgerStore):
     def policy_state(
         self,
@@ -25,23 +41,25 @@ class PolicyStateQueries(LedgerStore):
         now = now or datetime.now(UTC)
         day_ago = (now - timedelta(hours=24)).isoformat()
         hour_ago = (now - timedelta(hours=1)).isoformat()
-        daily_notional, trades_last_hour, account_trades = self._spending(
-            day_ago, hour_ago, account
-        )
+        spending = self._spending(day_ago, hour_ago, account)
+        pnl, loss_since = self._realized_pnl_since(day_ago)
         return PolicyState(
-            daily_notional_usd=daily_notional,
-            trades_last_hour=trades_last_hour,
-            account_trades_last_hour=account_trades,
-            daily_realized_pnl_usd=self._realized_pnl_since(day_ago),
+            daily_notional_usd=spending.notional,
+            trades_last_hour=len(spending.last_hour),
+            account_trades_last_hour=len(spending.mine),
+            daily_realized_pnl_usd=pnl,
             consecutive_failures=self._consecutive_failures(failures_since),
             unresolved_intent_ids=self._unresolved_ids(now, account),
+            as_of=now,
+            daily_notional_since=_oldest(spending.day),
+            trades_last_hour_since=_oldest(spending.last_hour),
+            account_trades_last_hour_since=_oldest(spending.mine),
+            daily_loss_since=loss_since,
         )
 
-    def _spending(
-        self, day_ago: str, hour_ago: str, account: str | None
-    ) -> tuple[Decimal, int, int]:
-        """Compras/swaps que moveram fundos: valor em 24h, contagem em 1h, e
-        contagem em 1h só do bucket (0 sem conta)."""
+    def _spending(self, day_ago: str, hour_ago: str, account: str | None) -> _Spending:
+        """Compras/swaps que moveram fundos: valor em 24h, as da última hora,
+        e as da última hora só do bucket (nenhuma sem conta)."""
         placeholders, statuses = _in(MOVED_FUNDS_STATUSES)
         rows = self.conn.execute(
             f"SELECT notional_usd, created_at, account FROM intents "
@@ -52,17 +70,23 @@ class PolicyStateQueries(LedgerStore):
             (Decimal(r["notional_usd"]) for r in rows if r["notional_usd"]),
             Decimal("0"),
         )
+        day = [r["created_at"] for r in rows]
         last_hour = [r for r in rows if r["created_at"] >= hour_ago]
-        mine = sum(1 for r in last_hour if account and r["account"] == account)
-        return notional, len(last_hour), mine
+        mine = [
+            r["created_at"] for r in last_hour if account and r["account"] == account
+        ]
+        return _Spending(notional, day, [r["created_at"] for r in last_hour], mine)
 
-    def _realized_pnl_since(self, since: str) -> Decimal:
+    def _realized_pnl_since(self, since: str) -> tuple[Decimal, datetime | None]:
+        """PnL realizado desde `since` e quando foi a perda mais antiga (A29)."""
         rows = self.conn.execute(
-            "SELECT realized_pnl_usd FROM intents WHERE status = ? "
+            "SELECT realized_pnl_usd, updated_at FROM intents WHERE status = ? "
             "AND updated_at >= ? AND realized_pnl_usd IS NOT NULL",
             (str(IntentStatus.EXECUTED), since),
         ).fetchall()
-        return sum((Decimal(r["realized_pnl_usd"]) for r in rows), Decimal("0"))
+        pnl = [(Decimal(r["realized_pnl_usd"]), r["updated_at"]) for r in rows]
+        losses = [at for value, at in pnl if value < 0]
+        return sum((value for value, _ in pnl), Decimal("0")), _oldest(losses)
 
     def _consecutive_failures(self, since: datetime | None) -> int:
         """Falhas desde o último sucesso (e desde `since`, se dado).

@@ -30,7 +30,8 @@ uv run main.py connect docs/examples/spec-random.json --seed 1
 ```bash
 uv run main.py serve <paper|real>
 uv run main.py connect <spec.json> [--trader FILE] [--seed N] [--record-ticks FILE]
-uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--json]
+uv run main.py stop <spec.json> | --all [--trader FILE]
+uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--borrow-bps-hour 1] [--json]
 ```
 
 - **serve**: the mode is required. The only process with the key, the wallet
@@ -45,6 +46,11 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `--record-ticks` saves the prices for a later backtest, and
   `.claude/scripts/live_vs_backtest.py SPEC --ticks FILE` compares that
   backtest with what the bucket actually did.
+- **stop**: the manual stop. Sells the spec's position now (or every open
+  spec's, with `--all`) and retires its bucket for good: it never buys
+  again, even after `serve` and `connect` restart, and its `connect` exits
+  by itself. To trade the strategy again, change the spec (a new id gets a
+  new bucket). Ctrl+C on `connect` only stops the bot; the position stays.
 - **backtest**: replays recent candles (or recorded ticks) with the spec's
   budget and prints a short summary (return, drawdown, trades); `--json`
   prints the full result as one JSON object. Any registry token can be the
@@ -85,7 +91,7 @@ are blocked from real mode, the key and the real ledger
 **Policy** (`policy.toml`, not in git; start from `policy.example.toml`).
 Defaults: real mode off; $25 per trade, $100 per 24h, 10 trades per hour, a
 $20 daily loss stops buys, 3 failures in a row stop trading. Paper gets roomy
-limits by default. `[limits]` applies to every mode; `[paper.*]` and `[real.*]`
+limits by default. `[trading]` and `[limits]` apply to every mode; `[paper.*]` and `[real.*]`
 override only in that mode.
 
 ## What to know when running it

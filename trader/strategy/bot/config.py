@@ -14,10 +14,18 @@ from typing import Protocol
 from trader.shared.market import MarketData
 from trader.shared.models import Interval, OrderSignal, Position, TickerData
 from trader.shared.notification.notification_service import Notifier
+from trader.shared.trading_service.protocol import BucketSnapshot
 from trader.strategy.trading_service.client import TradeClient
 
 # a cada preço: horário, preço em cotação e o USD da cotação (ex: `TickRecorder`)
 OnTick = Callable[[datetime, Decimal, Decimal | None], None]
+
+
+class TickSource(Protocol):
+    """Um tick numa ida e volta (A21): o preço do mint no token de cotação e
+    o bucket. Num `connect`, `RemoteTicks` (op `tick`)."""
+
+    async def tick(self, mint: str) -> tuple[Decimal, BucketSnapshot]: ...
 
 
 class Strategy(Protocol):
@@ -64,3 +72,6 @@ class BotConfig:
     # chamado a cada preço recebido (ex: `TickRecorder.record`): horário,
     # preço em cotação e, num par sem stablecoin, o USD da cotação
     on_tick: OnTick | None = None
+    # A21: preço e bucket numa chamada; sem ela, `market.get_price` e
+    # `trader.bucket()` a cada tick
+    ticks: TickSource | None = None

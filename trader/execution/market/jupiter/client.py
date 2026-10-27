@@ -26,7 +26,7 @@ from trader.shared.models.public_data import Interval
 # vem). A API paga/gratuita atual é api.jup.ag; sem `x-api-key` as requisições
 # ainda funcionam, só que num limite de taxa menor (keyless). O endpoint
 # /swap/v1/* segue com o mesmo formato de request/response de antes, só muda
-# o host. Ver docs/plan.md §7.2.
+# o host. Ver docs/plan.md §4.2.
 DEFAULT_JUPITER_API_URL = "https://api.jup.ag"
 
 # teto do `Retry-After`: com as re-tentativas do provider por cima, um valor
@@ -119,7 +119,7 @@ class AsyncJupiterClient:
         api_key: str | None = None,
     ):
         # base da API de swap/quote; configurável porque a lite-api.jup.ag
-        # está sendo descontinuada em favor de api.jup.ag (docs/plan.md §7.2)
+        # está sendo descontinuada em favor de api.jup.ag (docs/plan.md §4.2)
         self.base_url = (
             base_url or os.getenv("JUPITER_API_URL") or DEFAULT_JUPITER_API_URL
         ).rstrip("/")
@@ -166,9 +166,19 @@ class AsyncJupiterClient:
     @logger_wrapper
     @HTTP_RETRY
     async def get_candles(
-        self, mint: str, interval: Interval = Interval.SECOND_15, candle_qty: int = 100
+        self,
+        mint: str,
+        interval: Interval = Interval.SECOND_15,
+        candle_qty: int = 100,
+        end: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        end_time = int(datetime.now().timestamp() * 1000)
+        """Os `candle_qty` candles que abrem antes de `end` (agora, sem ele).
+
+        Conferido ao vivo (A34): com `end` no limite de uma barra, vêm
+        exatamente as barras de `[end - candle_qty barras, end)`; com buracos,
+        menos.
+        """
+        end_time = int((end or datetime.now()).timestamp() * 1000)
         url = (
             f"https://datapi.jup.ag/v2/charts/{mint}"
             f"?interval={interval}&to={end_time}&candles={candle_qty}"

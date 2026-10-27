@@ -14,10 +14,12 @@ Convenções:
 - percentuais são em pontos percentuais (`1` = 1%).
 """
 
+import itertools
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from trader.shared.models.public_data import Interval, TickerData
 
@@ -74,6 +76,12 @@ def _rsi_from(avg_gain: Decimal, avg_loss: Decimal) -> Decimal:
 
 def rsi(values: Sequence[Decimal], period: int) -> Decimal | None:
     """RSI de Wilder: médias iniciais simples, depois suavização (n-1)/n."""
+    averages = _wilder(values, period)
+    return None if averages is None else _rsi_from(*averages)
+
+
+def _wilder(values: Sequence[Decimal], period: int) -> tuple[Decimal, Decimal] | None:
+    """As médias de alta e de baixa de Wilder sobre `values`."""
     if period < 1 or len(values) < period + 1:
         return None
     changes = _changes(values)
@@ -82,9 +90,13 @@ def rsi(values: Sequence[Decimal], period: int) -> Decimal | None:
     avg_gain = sum(gains[:period], ZERO) / period
     avg_loss = sum(losses[:period], ZERO) / period
     for gain, loss in zip(gains[period:], losses[period:], strict=True):
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-    return _rsi_from(avg_gain, avg_loss)
+        avg_gain = _smooth(avg_gain, gain, period)
+        avg_loss = _smooth(avg_loss, loss, period)
+    return avg_gain, avg_loss
+
+
+def _smooth(average: Decimal, value: Decimal, period: int) -> Decimal:
+    return (average * (period - 1) + value) / period
 
 
 def _returns_pct(values: Sequence[Decimal]) -> list[Decimal] | None:
@@ -126,6 +138,92 @@ INDICATORS: dict[str, Callable[[Sequence[Decimal], int], Decimal | None]] = {
     "high": rolling_high,
     "low": rolling_low,
 }
+# --- em duas partes: as barras fechadas e o último preço (A37) -------------------
+#
+# Dentro de uma barra só o último fechamento muda. Estes indicadores se
+# separam num estado sobre as barras fechadas (uma vez por barra) e um passo
+# com o último preço, nas mesmas operações e na mesma ordem que a função
+# inteira: o valor é idêntico, bit a bit. `prefix` devolve None quando não dá
+# para separar (poucas barras, ou o último preço dentro da semente): quem
+# chama usa a função inteira.
+
+
+def _head(closed: Sequence[Decimal], window: int) -> Sequence[Decimal] | None:
+    """As `window - 1` barras fechadas que, com o último preço, fazem a janela."""
+    if not 0 < window <= len(closed) + 1:
+        return None
+    return closed[len(closed) - (window - 1) :]
+
+
+def _sma_prefix(closed: Sequence[Decimal], window: int) -> Decimal | None:
+    head = _head(closed, window)
+    return None if head is None else sum(head, ZERO)
+
+
+def _sma_finish(state: Decimal, last: Decimal, window: int) -> Decimal:
+    return (state + last) / window
+
+
+def _wma_prefix(closed: Sequence[Decimal], window: int) -> Decimal | None:
+    head = _head(closed, window)
+    if head is None:
+        return None
+    return sum((v * w for v, w in zip(head, range(1, window), strict=True)), ZERO)
+
+
+def _wma_finish(state: Decimal, last: Decimal, window: int) -> Decimal:
+    # sum(range(1, window + 1)), sem somar a cada tick
+    return (state + last * window) / Decimal(window * (window + 1) // 2)
+
+
+def _ema_finish(state: Decimal, last: Decimal, window: int) -> Decimal:
+    alpha = Decimal(2) / (window + 1)
+    return state + alpha * (last - state)
+
+
+def _rsi_prefix(
+    closed: Sequence[Decimal], period: int
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    # a última variação precisa cair na suavização, não nas médias iniciais
+    averages = _wilder(closed, period) if len(closed) > period else None
+    return None if averages is None else (*averages, closed[-1])
+
+
+def _rsi_finish(
+    state: tuple[Decimal, Decimal, Decimal], last: Decimal, period: int
+) -> Decimal:
+    avg_gain, avg_loss, previous = state
+    change = last - previous
+    avg_gain = _smooth(avg_gain, max(change, ZERO), period)
+    avg_loss = _smooth(avg_loss, max(-change, ZERO), period)
+    return _rsi_from(avg_gain, avg_loss)
+
+
+def _high_prefix(closed: Sequence[Decimal], window: int) -> Decimal | None:
+    head = _head(closed, window) if window > 1 else None
+    return None if not head else max(head)
+
+
+def _low_prefix(closed: Sequence[Decimal], window: int) -> Decimal | None:
+    head = _head(closed, window) if window > 1 else None
+    return None if not head else min(head)
+
+
+Prefix = Callable[[Sequence[Decimal], int], Any]
+Finish = Callable[[Any, Decimal, int], Decimal]
+PARTIAL: dict[str, tuple[Prefix, Finish]] = {
+    "sma": (_sma_prefix, _sma_finish),
+    "wma": (_wma_prefix, _wma_finish),
+    # o último preço precisa cair no laço da EMA, não na SMA inicial: `ema` das
+    # barras fechadas já recusa (None) quando elas não passam da janela
+    "ema": (ema, _ema_finish),
+    "rsi": (_rsi_prefix, _rsi_finish),
+    # `max`/`min` devolvem o primeiro empatado, como sobre a janela inteira
+    "high": (_high_prefix, lambda state, last, _w: max(state, last)),
+    "low": (_low_prefix, lambda state, last, _w: min(state, last)),
+}
+
+
 # calculados sobre as variações: uma barra a mais que a janela
 _FROM_CHANGES = frozenset({"rsi", "volatility"})
 
@@ -217,6 +315,21 @@ class BarSeries:
     @property
     def closes(self) -> list[Decimal]:
         return list(self._closes)
+
+    @property
+    def closed(self) -> list[Decimal]:
+        """Os fechamentos das barras fechadas (sem a em formação)."""
+        return list(itertools.islice(self._closes, max(len(self._closes) - 1, 0)))
+
+    @property
+    def last(self) -> Decimal:
+        """O fechamento da barra em formação (o preço atual)."""
+        return self._closes[-1]
+
+    @property
+    def bar(self) -> int:
+        """O número da barra em formação (o último de `closes`; 0 sem barras)."""
+        return self._bucket or 0
 
     def __len__(self) -> int:
         return len(self._closes)

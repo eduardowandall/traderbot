@@ -6,12 +6,14 @@ wallet are never touched. Only paper: `real` is deliberately not accepted.
 
 Usage (from the project root):
     uv run --no-sync python .claude/scripts/smoke.py
-        [--seconds 40] [--spec docs/examples/spec-random.json] [--seed 1]
+        [--seconds 40] [--spec docs/examples/spec-random.json] [--seed 1] [--stop]
 
 Starts `serve paper` (the trade-runner), waits for its connection file, then
 `connect`s a strategy spec (default: the random one) on the spec's own pair;
 `--seed` fixes the `random_chance` draws. Trading is only `serve` + `connect`
 (B14). The report comes from `ledger_dump.py` (the CLI has no ledger commands).
+`--stop` runs `main.py stop <spec>` at the end (A33) and checks that `connect`
+exits by itself.
 """
 
 import argparse
@@ -39,6 +41,9 @@ def _parse_args() -> argparse.Namespace:
         help="strategy spec JSON to run",
     )
     parser.add_argument("--seed", default="1", help="seed for random_chance")
+    parser.add_argument(
+        "--stop", action="store_true", help="end with `main.py stop <spec>` (A33)"
+    )
     return parser.parse_args()
 
 
@@ -84,7 +89,23 @@ def _connect(args: argparse.Namespace, workdir: Path, env: dict) -> subprocess.P
     time.sleep(args.seconds)
     if client.poll() is not None:
         print(f"[!] connect exited before {args.seconds}s (code {client.poll()})")
+    elif args.stop:
+        _manual_stop(args, client, env)
     return client
+
+
+def _manual_stop(args: argparse.Namespace, client: subprocess.Popen, env: dict):
+    """`main.py stop <spec>` (A33), then `connect` should exit by itself."""
+    cmd = [*MAIN, "stop", str(args.spec)]
+    print("$", " ".join(cmd), flush=True)
+    proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True)
+    print(f"--- stop (exit {proc.returncode})")
+    print(_decode(proc.stdout + proc.stderr).strip())
+    try:
+        client.wait(timeout=15)
+        print(f"--- connect exited by itself (code {client.returncode})")
+    except subprocess.TimeoutExpired:
+        print("[!] connect still running 15s after the stop")
 
 
 def _run_bot(args: argparse.Namespace, workdir: Path, env: dict) -> None:

@@ -4,7 +4,7 @@ Camada strategy-side: monta o bot de sempre (`TradingBot`) com
 um `RemoteTradeClient` para o trade-runner (`main.py serve <modo>`). Não
 importa execução, venue nem risco (`tests/test_architecture.py`), então não
 alcança a chave, a carteira nem o ledger; nem sabe o modo. Nem fala com a
-Jupiter: preços e candles vêm do trade-runner (ops `price` e `candles`).
+Jupiter: preços e candles vêm do trade-runner (ops `tick` e `candles`).
 """
 
 import json
@@ -17,7 +17,11 @@ from trader.shared.paths import connection_files
 from trader.strategy.bot.config import BotConfig, OnTick
 from trader.strategy.bot.loop import TradingBot
 from trader.strategy.spec.strategy import SpecStrategy
-from trader.strategy.trading_service.remote import RemoteCandles, RemoteTradeClient
+from trader.strategy.trading_service.remote import (
+    RemoteCandles,
+    RemoteTicks,
+    RemoteTradeClient,
+)
 
 
 def find_connection(path: Path | None = None) -> dict:
@@ -42,8 +46,9 @@ def strategy_bot(
 ) -> TradingBot:
     """O bot da spec, com ordens, preços e candles pelo trade-runner.
 
-    Os preços vêm do hub do trade-runner (op `price`), um feed para todos os
-    strategy-runners; os candles do aquecimento, do op `candles`. O `hello`
+    Cada tick é uma ida e volta (op `tick`, A21): os preços do hub do
+    trade-runner, um feed para todos os strategy-runners, e o bucket; os
+    candles do aquecimento vêm do op `candles`. O `hello`
     leva só os termos da spec (`spec.terms()`), que o trade-runner confere.
     """
     connection = find_connection(connection_file)
@@ -66,5 +71,6 @@ def strategy_bot(
         trader=trader,
         notifier=notifier,
         on_tick=on_tick,
+        ticks=RemoteTicks(trader, strategy.spec.symbol),
     )
     return TradingBot(config)

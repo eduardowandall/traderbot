@@ -34,7 +34,10 @@ ONE = Decimal(1)
 
 
 class SpecStrategy:
-    def __init__(self, spec: StrategySpec):
+    def __init__(self, spec: StrategySpec, until: datetime | None = None):
+        """`until`: a validade no lugar da da spec (a janela de um backtest,
+        A35: o prazo é uma escolha de operação, e um `ttl_days` de 30 cortaria
+        uma janela de 90)."""
         # relógio e sorteios injetáveis: no backtest, o tempo do tick e uma
         # semente fixa (o resultado é determinístico)
         self.clock: Callable[[], datetime] = datetime.now
@@ -59,7 +62,8 @@ class SpecStrategy:
         # disparar de novo (senão recompra logo após o take_profit)
         self._armed = True
         # com `ttl_days`, conta do primeiro tick (no backtest, o do replay)
-        self._expires_at: datetime | None = spec.expires_at
+        self._until = until
+        self._expires_at: datetime | None = until or spec.expires_at
 
     @classmethod
     def from_file(cls, file: str) -> SpecStrategy:
@@ -85,8 +89,9 @@ class SpecStrategy:
         if last_exit_at is not None:
             self._last_exit = to_utc(last_exit_at)
             self._armed = False
-        if opened_at is not None and self.spec.expires_at is None:
-            self._expires_at = self.spec.expiry(opened_at)
+        if opened_at is not None and self._until is None:
+            if self.spec.expires_at is None:
+                self._expires_at = self.spec.expiry(opened_at)
 
     def warmup(self) -> tuple[Interval, int]:
         """Timeframe e quantidade de candles para aquecer os indicadores."""

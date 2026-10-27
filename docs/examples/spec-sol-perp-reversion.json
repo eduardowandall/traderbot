@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "sol-perp-reversion",
+  "agent_id": "claude",
+  "rationale": "A 2x SOL long on Jupiter Perps that buys a stretch below the day's mean and sells the snap back. Built from the real perp runs: a round trip costs ~20 bps of the exposure (12 bps of perp fees plus the sends) and borrow is negligible (~0.15 bps/h), so it trades rarely and only on moves several times its cost; max_hold exits did nothing in run 2, so the exit is the mean itself. Entry when the price is 4.5% under the 24-bar SMA of 1h bars; out when it is back over that SMA, on a 5% stop (well inside the 24.88% liquidation distance at 2x) or after 24 h. 10 USD of collateral (20 USD of exposure, within the real max_trade_usd of 20) inside a 12 USD budget: one position at a time, ~2 opens a month. Backtest 2026-06-11..10-14 (1h candles, 0.5 bps/h borrow): 8 round trips, all winners, +3.86 USD on 12 (+32%), max drawdown 5.6%; the 1m ticks of 09-30..10-14: 2 round trips, +0.64 USD (the first pays the one-time position rent). Every neighbour (band 4-5%, SMA 12-30, stop 3-6%) was positive on 1h. The stop never fired in that sample: a crash through it costs ~1.1 USD, and max loss 5 retires it after ~4 of them. The short mirror lost in every window: no short side.",
+  "symbol": "SOL-USDC",
+  "timeframe": "1_HOUR",
+  "market": {"kind": "perp", "venue": "jupiter", "direction": "long", "leverage": 2},
+  "entry": {
+    "mode": "all",
+    "conditions": [
+      {"type": "expr", "expr": "price < sma(24) * 0.955"}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "stop_loss", "pct": 5},
+    "mode": "any",
+    "conditions": [
+      {"type": "expr", "expr": "price > sma(24)"},
+      {"type": "max_hold", "minutes": 1440}
+    ]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 10},
+  "budget_usd": 12,
+  "max_loss_usd": 5,
+  "cooldown_minutes": 60,
+  "ttl_days": 30
+}

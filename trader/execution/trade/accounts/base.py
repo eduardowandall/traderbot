@@ -14,6 +14,7 @@ Quem executa é da subclasse: o `SpotAccount` troca no `Venue` (o swap), o
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
@@ -35,8 +36,14 @@ from trader.execution.trade.gateway.fills import Fill, execute_trade
 from trader.execution.trade.gateway.gateway import AccountState, TradeGateway
 from trader.execution.trade.gateway.orders import priced_mints
 from trader.shared.models import SOLANA_MINTS, Order, OrderSide
-from trader.shared.models.costs import LAMPORTS_PER_SOL, FailedTxFee
+from trader.shared.models.costs import (
+    LAMPORTS_PER_SOL,
+    FailedTxFee,
+    describe_costs,
+    outside_cost_quote,
+)
 from trader.shared.models.mints import SOL_MINT
+from trader.shared.models.perp import describe_fill
 
 
 class BaseAccount(ABC):
@@ -114,7 +121,7 @@ class BaseAccount(ABC):
             )
 
     def _restore_quietly(self) -> AccountState:
-        state = self.gateway.restore(self.account_id)
+        state = self.gateway.restore(self.account_id, str(self.input_mint))
         totals = state.totals
         self.book = PositionBook.restored(
             self.book.quote_symbol,
@@ -126,6 +133,11 @@ class BaseAccount(ABC):
             entry=state.open_position,
             failed_fee_sol=Decimal(totals.failed_fee_lamports) / LAMPORTS_PER_SOL,
             rent_refund_sol=Decimal(totals.rent_refund_lamports) / LAMPORTS_PER_SOL,
+            perp=(
+                totals.perp_closes,
+                totals.perp_fees_quote,
+                totals.perp_borrow_quote,
+            ),
         )
         self.opened_at = state.opened_at
         self.last_exit_at = state.last_exit_at
@@ -178,8 +190,21 @@ class BaseAccount(ABC):
         requested = intent.quantity or Decimal("0")
         return self._to_order(fill, side, requested, price, usd)
 
+    def _log_fill(self, label: str, order: Order, **detail) -> None:
+        """Um fill numa linha em INFO (console e arquivo do `serve`, A32); a
+        ordem inteira (e `detail`) fica no arquivo, em DEBUG."""
+        self.logger.info(f"{label}: {fill_line(order)}", extra=asdict(order))
+        whole = " ".join(f"{k}={v}" for k, v in detail.items())
+        self.logger.debug(f"{label}: order={asdict(order)} {whole}".rstrip())
+
     def _charge_failed_fee(self, fee: FailedTxFee) -> None:
-        self.book.charge(fee)
+        self.book.charge(fee, outside_cost_quote(self._quote, fee.sol, fee.usd))
+
+    def _charge_outside(self, lamports: int, usd: Decimal | None) -> None:
+        """Um custo sem trade pago em SOL (o stop do venue) no livro (A30)."""
+        sol = Decimal(lamports) / LAMPORTS_PER_SOL
+        quote = outside_cost_quote(self._quote, sol, usd)
+        self.book.charge_outside(sol, quote, usd)
 
     # --- intenções ---------------------------------------------------------
 
@@ -291,3 +316,14 @@ class BaseAccount(ABC):
         idempotency_key: str | None = None,
     ) -> Order:
         """Sai da posição, ou de `quantity` dela."""
+
+
+def fill_line(order: Order) -> str:
+    """Lado, quantidade, preço, a perna da perp, os custos e a assinatura."""
+    token = SOLANA_MINTS.symbol_of(order.output_mint)
+    parts = [f"{order.side.upper()} {order.quantity:.8f} {token} @ ${order.price:.4f}"]
+    if order.perp is not None:
+        parts.append(describe_fill(order.perp))
+    parts.append(describe_costs(order.costs, order.sol_usd))
+    parts.append(f"tx {order.order_id}")
+    return "; ".join(parts)

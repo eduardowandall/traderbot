@@ -23,6 +23,8 @@ from trader.strategy.spec.models import (
     DipFromHigh,
     Expr,
     FastMaAboveSlow,
+    MaCrossesAbove,
+    MaCrossesBelow,
     PriceBelowMa,
     RsiBelow,
     StrategySpec,
@@ -49,6 +51,8 @@ class TestGrammar:
             ("(sma(5) - sma(20)) / sma(20) > 0.01", None),
             ("price - (2 - 3) > 1 - 2 - 3", None),
             ("price / (2 * 3) > 1", None),
+            ("ema(9,1) <= ema(21, 1)", "ema(9, 1) <= ema(21, 1)"),
+            ("ema(9, 0) > ema(21)", "ema(9) > ema(21)"),
         ],
     )
     def test_text_is_normalized_and_round_trips(self, text, normalized):
@@ -83,6 +87,11 @@ class TestErrors:
             ("price ** 2 > 1", "não permitido", 0),
             ("price < 1 $", "sintaxe inválida", 10),
             ("sma 20 > 1", "sintaxe inválida", 4),
+            ("sma(9, 51) > 2", "barras atrás 51 fora de 0-50", 7),
+            ("sma(9, 1.5) > 2", "inteiro", 7),
+            ("sma(9, -1) > 2", "inteiro", 7),
+            ("sma(9, 1, 2) > 2", "esperava (janela) ou (janela, barras atrás)", 0),
+            ("sma() > 2", "esperava (janela)", 0),
         ],
     )
     def test_errors_say_what_and_where(self, text, message, pos):
@@ -124,6 +133,11 @@ class TestSpec:
             a.entry.conditions[0].label() == "rsi(14) < 30 and price < sma(20) * 0.98"
         )
 
+    def test_a_zero_back_keeps_the_id(self):
+        plain = self._spec("ema(9) > ema(21)").spec_id()
+        assert self._spec("ema(9, 0) > ema(21)").spec_id() == plain
+        assert self._spec("ema(9, 1) > ema(21)").spec_id() != plain
+
     def test_a_bad_expression_is_a_spec_error_at_its_path(self):
         with pytest.raises(ValidationError) as raised:
             self._spec("rsi(14) <")
@@ -139,6 +153,10 @@ class TestSpec:
             (
                 "volatility(10) < 2",
                 VolatilityBelow(type="volatility_below", window=10, pct=Decimal(2)),
+            ),
+            (
+                "ema(9) > ema(21) and ema(9, 1) <= ema(21, 1)",
+                MaCrossesAbove(type="ma_crosses_above", ma="ema", fast=9, slow=21),
             ),
         ],
     )
@@ -186,6 +204,14 @@ EQUIVALENT = [
     (
         "volatility(10) < 0.85",
         VolatilityBelow(type="volatility_below", window=10, pct=Decimal("0.85")),
+    ),
+    (
+        "ema(5) > ema(12) and ema(5, 1) <= ema(12, 1)",
+        MaCrossesAbove(type="ma_crosses_above", ma="ema", fast=5, slow=12),
+    ),
+    (
+        "sma(3) < sma(8) and sma(3, 1) >= sma(8, 1)",
+        MaCrossesBelow(type="ma_crosses_below", fast=3, slow=8),
     ),
 ]
 

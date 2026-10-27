@@ -193,6 +193,31 @@ class FastMaBelowSlow(_MaVsMa):
         return f"{self.ma}{self.fast}<{self.ma}{self.slow}"
 
 
+class _MaCross(_MaVsMa):
+    """A MA rápida cruzou a lenta: agora de um lado, uma barra fechada atrás
+    não (A22); o `expr` com `back` diz o mesmo."""
+
+    def lookback(self) -> int:
+        return super().lookback() + 1
+
+    def history(self) -> int:
+        return super().history() + 1
+
+
+class MaCrossesAbove(_MaCross):
+    type: Literal["ma_crosses_above"]
+
+    def label(self) -> str:
+        return f"cross:{self.ma}{self.fast}>{self.ma}{self.slow}"
+
+
+class MaCrossesBelow(_MaCross):
+    type: Literal["ma_crosses_below"]
+
+    def label(self) -> str:
+        return f"cross:{self.ma}{self.fast}<{self.ma}{self.slow}"
+
+
 class DipFromHigh(_Block):
     type: Literal["dip_from_high"]
     window: Window
@@ -345,6 +370,8 @@ _MARKET = (
     | PriceAboveMa
     | FastMaAboveSlow
     | FastMaBelowSlow
+    | MaCrossesAbove
+    | MaCrossesBelow
     | DipFromHigh
     | ReboundFromLow
     | PriceBelow

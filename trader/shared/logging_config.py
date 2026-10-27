@@ -17,6 +17,7 @@ from logging.handlers import RotatingFileHandler
 
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.text import Text
 
 from trader.shared.paths import logs_dir
 
@@ -31,6 +32,8 @@ LOG_RETENTION_DAYS = 14
 
 def stderr_rich_handler(**kwargs) -> RichHandler:
     """RichHandler no stderr: o stdout fica livre para as saídas `--json`."""
+    # sem a coluna `arquivo.py:linha` (A32): o arquivo de log já tem a origem
+    kwargs.setdefault("show_path", False)
     return RichHandler(console=Console(stderr=True), **kwargs)
 
 
@@ -88,6 +91,18 @@ class RedactingFormatter(logging.Formatter):
         return redact(super().formatException(ei))
 
 
+class PlainFileFormatter(RedactingFormatter):
+    """O arquivo em texto puro: um registro com `markup` (Rich) perde as tags
+    de estilo, que o console usa e o arquivo mostrava cruas (A32)."""
+
+    def format(self, record):
+        if getattr(record, "markup", False):
+            plain = Text.from_markup(record.getMessage()).plain
+            record = logging.makeLogRecord({**record.__dict__, "msg": plain})
+            record.args = None
+        return super().format(record)
+
+
 class BotNameFilter(logging.Filter):
     """Põe o nome do bot da task atual em `record.botname` ("-" fora de bots)."""
 
@@ -102,9 +117,15 @@ class ConsoleFilter(logging.Filter):
         "bot",
         "trader.strategy.spec.strategy",
     ]
+    # os fills do `serve` (uma linha em INFO, A32) aparecem no console dele
+    INFO_PREFIXES = ("trader.execution.trade.accounts.",)
 
     def filter(self, record):
         if record.name in ConsoleFilter.ALLOWED_LOGGERS:
+            return True
+        if record.levelno == logging.INFO and record.name.startswith(
+            ConsoleFilter.INFO_PREFIXES
+        ):
             return True
         return record.levelno >= logging.WARNING
 
@@ -118,7 +139,7 @@ LOGGING = {
     },
     "formatters": {
         "default": {
-            "()": RedactingFormatter,
+            "()": PlainFileFormatter,
             "format": (
                 "%(asctime)s %(levelname)s [%(botname)s] "
                 "%(name)s.%(funcName)s %(message)s"

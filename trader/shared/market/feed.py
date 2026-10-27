@@ -8,6 +8,7 @@ Num `connect`, preços e candles vêm do trade-runner (ops `price` e
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -24,8 +25,40 @@ class CandleSource(Protocol):
     async def aclose(self) -> None: ...
 
 
+class CandleRange(Protocol):
+    """Candles de uma janela do passado (A34): os que abrem em `[start, end)`."""
+
+    async def between(
+        self, mint: str, interval: Interval, start: datetime, end: datetime
+    ) -> list[TickerData]: ...
+
+
+class CandleHistory(CandleSource, CandleRange, Protocol):
+    """Os últimos N candles e as janelas do passado: a fonte do backtest."""
+
+
 class MarketData(CandleSource, Protocol):
     async def get_price(self, mint: str) -> Decimal: ...
+
+
+class Pacer:
+    """Um passo a cada `interval` segundos: o ritmo de um bot (o hub responde
+    na hora). `HubMarketData` e o tick remoto (A21) o usam."""
+
+    def __init__(
+        self,
+        interval: float = TICK_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+    ):
+        self.interval = interval
+        self.monotonic = monotonic
+        self._next = 0.0
+
+    async def wait(self) -> None:
+        wait = self._next - self.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._next = self.monotonic() + self.interval
 
 
 class HubMarketData:
@@ -47,15 +80,10 @@ class HubMarketData:
     ):
         self.price_of = price_of
         self.candles = candles
-        self.interval = interval
-        self.monotonic = monotonic
-        self._next = 0.0
+        self.pacer = Pacer(interval, monotonic)
 
     async def get_price(self, mint: str) -> Decimal:
-        wait = self._next - self.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
-        self._next = self.monotonic() + self.interval
+        await self.pacer.wait()
         return await self.price_of(mint)
 
     async def get_candles(

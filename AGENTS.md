@@ -29,8 +29,9 @@ as B7 are what code comments cite).
 ```bash
 uv run main.py serve paper                      # trade-runner: key, wallet, ledger
 uv run main.py connect <spec.json> [--trader FILE] [--seed N] [--record-ticks FILE]   # one per spec, no key
+uv run main.py stop <spec.json> | --all [--trader FILE]   # manual stop: sell now, never buy again
 uv run --env-file .env main.py serve real       # the owner only
-uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--borrow-bps-hour 1] [--json]
+uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE | --from ISO [--to ISO] | --scenario ID|tag:X|all ... | --rolling 7d --from ISO] [--max-hole 1h] [--vary PATH=V1,V2 ... [--write-best FILE]] [--seed N[,N2]] [--jobs N] [--costs 2x] [--shock -15%@50%] [--volume-slippage] [--fee-bps N] [--slippage-bps 10] [--network-fee-usd N] [--borrow-bps-hour 1] [--json]
 ```
 - **Trading is `serve` + `connect` only** (B14; there is no `run`). One
   `serve <mode>` per mode (`trader/api/cli/lock.py`, an OS lock on
@@ -44,12 +45,21 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `trader/execution/runner.py`, `trader/strategy/runner.py`. A `serve`
   and a `connect` from different versions may not talk (B6 renamed snapshot
   fields, B7 added the `price` op, B12 the `candles` op, A12
-  `market.add_collateral`, A20 the position's leg counts): restart them
-  together.
+  `market.add_collateral`, A20 the position's leg counts, A29 the reply's
+  `retry_after`, A21 the `tick` op and the reply's `snapshot`): restart
+  them together.
+- **The manual stop** (A33): `stop` sends one `stop` op (token, no `hello`;
+  the spec's terms, or `all` for every bucket this `serve` has open). The
+  trade-runner opens the bucket if needed, `TradeService.stop` retires it
+  and writes `bucket_stopped` (read back by `open_bucket`: the stop survives
+  restarts), and sells the position at the hub's pair price; a failed sale
+  is retried by the sweep. A running `connect` exits (`bucket_done`).
+  `smoke.py --stop` ends a smoke run with it.
 - **Prices come from a hub** (`trader/execution/market/hub.py`, B7): one websocket for
   every mint plus a batched Price API poll for quiet ones. `serve` runs it and
-  answers `connect`s through the `price` op (warm-up candles through the
-  `candles` op, B12). A price older
+  answers `connect`s through the `tick` op (A21: the mints' USD prices and
+  the bucket snapshot in one reply, read by `RemoteTicks`; warm-up candles
+  through the `candles` op, B12). A price older
   than 30s raises `StalePriceError` (no decisions on stale data; a refused
   reply carries its `kind`, and `connect` raises `PriceUnavailableError`), and
   `HubMarketData` paces each bot at one price per second. The hub is also
@@ -66,7 +76,8 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   once missed an account); at the first open, the open positions of every bucket in the ledger
   are checked against the wallet, and a missing token blocks buys of it
   (`reconcile_mismatch` event). A sell the wallet can't cover (for SOL, after
-  the 0.02 fee reserve) is refused, never capped (`WalletShortfallError`): it
+  the wallet's fee reserve, `WalletBalances.spendable`: 0.02 SOL in real and
+  paper, 0 in replays) is refused, never capped (`WalletShortfallError`): it
   blocks buys of the token and, once per position, writes `sell_shortfall`
   and sends Telegram from `serve`.
 - Modes: `paper` (simulated wallet `.data/paper-wallet.json`, real Jupiter
@@ -81,7 +92,10 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `TELEGRAM_BOT_TOKEN` are set: fills from `connect` (with the bucket's PnL and
   open mark-to-market) and, from `serve`, a daily report of the previous UTC
   day (`trader/execution/notification/daily_report.py`, once per day via a
-  `daily_report` ledger event). Ctrl+C stops them (on Windows, a test run is
+  `daily_report` ledger event), and network outages (A28,
+  `notification/outages.py`): with any open position, one message once the
+  positions' prices have been stale in the hub (checked every 10 s) or the
+  perps sweep has failed for 120 s, and one when it is back. Ctrl+C stops them (on Windows, a test run is
   stopped with `taskkill /PID <uv pid> /T /F`).
 - `backtest` prints a short readable summary (errors as `erro: path: msg` on
   stderr, exit 1). `--json` prints one JSON object instead, with every trade
@@ -90,7 +104,31 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   uses the spec's budget and max loss, replays each closed candle as an
   interpolated open -> low -> high -> close path (a bar with no candle is one
   flat tick at the previous close: no trade, A4), and refuses fewer than
-  warm-up + 20 bars. A non-stable input replays two candle series (the
+  warm-up + 20 bars. `--from/--to` (A34) replays a past window (no zone:
+  UTC; warm-up from before it): `JupiterCandles.between` fetches 1000-bar
+  chunks aligned to the epoch (`market/history.py`), cached once closed in
+  `.data/candles/`; a run of missing bars over 1 h (edges and warm-up
+  included) refuses the window (`backtest/window.py`: the API lacks it;
+  `--max-hole` raises it for a thin token). `--scenario` (A35) runs the
+  windows of `docs/scenarios.json` (or `--rolling`), each a fresh bucket
+  valid until the window's end (`backtest_spec(until=)`, also for
+  `--from`; the spec's own expiry is ignored there), measures each on the
+  spec's pair and flags a tag it disagrees with (`TAG_CHECKS`,
+  `backtest/scenarios.py`); a failed window is a row, not an exit.
+  `--vary exit.stop.pct=3,5` (A36, `backtest/variants.py`; repeatable: the
+  product; not `symbol`/`timeframe`/`market`) replays every variant (and
+  every `--seed`) on each window, read once, and ranks them by the median
+  return over the windows not tagged `holdout`, then the worst
+  (`run_matrix`; its JSON keeps each cell's numbers, not the trades; cells
+  run in processes, `--jobs`, default the CPU count, A37);
+  `--write-best FILE` writes the winner's JSON. `--costs 2x` (fee and
+  slippage) and `--shock -15%@50%` / `-10%~1h@50%` (A38,
+  `backtest/stress.py`) add stresses, rows next to the base (ranking stays on
+  the base; a variant that wins there and loses in some stress is
+  `fragile`); `--volume-slippage` scales each bar's slippage by median
+  volume / its volume (1x-10x). A perp refuses `--costs`/`--volume-slippage`
+  (its engine has its own fee and impact). A
+  non-stable input replays two candle series (the
   ratio, plus the quote's USD in `Tick.quote_usd`; a third column in tick
   CSVs) and measures equity in USD. Costs per leg: `fee_bps` +
   `slippage_bps` from the replay quote's output, and `network_fee_usd` as the
@@ -130,13 +168,16 @@ uv run main.py backtest <spec.json> [--candles 1000 | --ticks FILE] [--seed N] [
   `lookback()`/`label()`), its union there (`EntryCondition` for entry-only
   blocks such as `below_last_exit`), a predicate in `conditions.PREDICATES`,
   and a row in `docs/specs.md`. Tests fail if any of them disagree. Most ideas
-  fit an `expr` instead (`trader/strategy/spec/expr.py`: `ast.parse` plus a
+  fit an `expr` instead (`NAME(n, back)` reads an indicator `back` closed
+  bars ago, A22: crosses; `trader/strategy/spec/expr.py`: `ast.parse` plus a
   whitelist walk and its own evaluator, never `eval`). An indicator is one
   entry in `INDICATORS` (`trader/shared/indicators.py`, with its bars in
   `lookback`/`history`, A17): the typed conditions and `expr` both read it.
+  A recursive or weighted one can add a `PARTIAL` entry (A37: closed-bar
+  state + one step, bit-identical; `test_indicator_split.py` checks it).
 - Sizing is `fixed_usd` or `pct_of_bucket` (of what the bucket may spend now).
 - Stops and exits never wait for the warm-up; only entries do. Warm-up is
-  `spec.history()` (5x the period for EMA, 10x for RSI, capped at 900 bars).
+  `spec.history()` (5x the period for EMA, 10x + 1 for RSI, capped at 900 bars).
   `BarSeries.seed(candles, until=clock())` fills candle gaps forward up to now;
   only a gap of more than `MAX_GAP_BARS` between live ticks resets it (A4). After an exit, an entry must turn false once (re-arm) before firing again.
 - Strategies use `self.clock()` / `self.rng`, never `datetime.now()` / `random`,
@@ -166,7 +207,8 @@ command to run in a terminal. The rules are tested in
   `trader/backtest/` both in one process. `execution` and `strategy` never
   import each other; `shared` imports neither. A model used by one side lives
   in that side's `models/`. Only the trade-runner talks to Jupiter: `connect`
-  gets prices (`price` op) and warm-up candles (`candles` op) from `serve`.
+  gets prices and its bucket (`tick` op) and warm-up candles (`candles` op)
+  from `serve`.
 - **Layering** (`tests/test_architecture.py`): every `trader/` module is mapped
   to a layer; a new module must be added to the map. Strategy code and the
   strategy side (`trader/strategy/`) never import execution, venue or risk.
@@ -179,7 +221,7 @@ command to run in a terminal. The rules are tested in
   backtest) and accounts are `BucketAccount`s (`trade/accounts/`: `SpotAccount`,
   `PerpAccount`); they never import `trade/venues` (tested). A23: a `Venue`
   is a `Wallet` (balances, fee reserve, token accounts; what
-  `WalletBalances` reads) plus the swap; both accounts derive from
+  `WalletBalances.source`) plus `PostTrade` and the swap; both accounts derive from
   `BaseAccount` (`accounts/base.py`), and `PerpAccount` takes only the
   `WalletBalances` and its `PerpVenue`, never the spot `Venue`; the
   service's perp side is `PerpDesk` (`trading_service/perps.py`: it builds
@@ -197,7 +239,8 @@ command to run in a terminal. The rules are tested in
   `inAmount`. Both refusals are `SwapRejectedError`s. Test fakes of the RPC
   need `inspection_passes()` from `tests/factories.py`.
 - **Nothing raises after EXECUTED**: `fills.settle` (from `execute_trade` and
-  the A3 resolver) is the only caller of `Venue.fetch_costs` (never
+  the A3 resolver) is the only caller of `PostTrade.fetch_costs` (the spot
+  `Venue` or the `PerpVenue`; never
   raises), fills are written with `record_fill_safely`, build orders with
   `order_from_fill` (falls back to the quote), `record_fill` failures are
   logged. Nothing that can fail after confirmation goes inside `_do_swap`.
@@ -224,7 +267,12 @@ command to run in a terminal. The rules are tested in
 - **Cost per round trip** (`RoundTripCosts`, `Ledger.round_trip_costs`): per
   closed position, entry spend x (exit tick price / entry tick price - 1)
   minus the net realized PnL, in USD and bps, less rent refunds in the window.
-  It can be negative when fills beat the tick.
+  It can be negative when fills beat the tick. The rent of a perp position
+  account is left out and reported apart (`account_rent_usd`, A25): Jupiter
+  never closes it and reuses it, so it is a one-time deposit; paper (the
+  wallet's `perp_accounts`) and `ReplayPerpsVenue` charge it
+  (`DEFAULT_PERP_POSITION_RENT_LAMPORTS`) only on the first open of a market
+  and side, as real does.
 - **Rent comes back on retirement (A15).** The first buy of a token pays its
   account's rent (a cost). When the bucket is retired and flat, the `serve`
   sweep closes the empty account (`TradeService.close_token_account`; never SOL,
@@ -257,7 +305,9 @@ command to run in a terminal. The rules are tested in
   intent (`PerpVenue.check_fresh`). One position per market and side is checked at the
   buy (`PerpVenue.has_position`), before any intent; at the first perp open,
   `reconcile_perps` (`execution/models/reconcile.py`) checks the venue's
-  positions against the ledger's in one read (`perp_mismatch`). The resolver
+  positions against the ledger's in one read (`perp_mismatch`; run by
+  `PerpDesk`), and a market the venue has and the ledger doesn't blocks buys
+  there (checked first in `PerpAccount.buy`). The resolver
   settles perp intents through `PerpVenue.resolve_send`. `backtest` replays perps
   through `ReplayPerpsVenue` (A9; `Policy.unlimited()` allows them;
   `round_trip_costs` measures a perp on its exposure and direction; paper
@@ -287,7 +337,11 @@ command to run in a terminal. The rules are tested in
   is off until `real_trading_enabled = true`. Paper has roomy limits by default
   (`PAPER_DEFAULTS`); `[limits]` applies to every mode, `[paper.*]`/`[real.*]`
   only to theirs. `max_trades_per_hour` is wallet-wide;
-  `max_trades_per_hour_per_bucket` caps one spec.
+  `max_trades_per_hour_per_bucket` caps one spec. A denial by a rolling
+  limit (daily notional, trades per hour, daily loss) carries `retry_after`
+  (A29: `_WINDOWS` in `policy.py`, the oldest counted record + the window -
+  now), and the bot pauses that side's orders until then (at most 1 h);
+  other denials pause 30 s (`denial_cooldown`).
 - `trader/__init__.py` stays empty (every `import trader.x` loads it).
 - Windows console is cp1252: no non-Latin-1 symbols in log/CLI output (use `[!]`).
 
@@ -310,7 +364,7 @@ command to run in a terminal. The rules are tested in
 ## Jupiter
 - Quotes/swaps: `api.jup.ag` (`JUPITER_API_URL` overrides; `JUPITER_API_KEY` is
   sent as `x-api-key`, optional). Keyless requests hit `429` under bursts;
-  HTTP calls retry with backoff (`_HTTP_RETRY`, pre-broadcast only).
+  HTTP calls retry with backoff (`HTTP_RETRY`, pre-broadcast only).
 - The price websocket (`trench-stream.jup.ag`, several mints per subscription)
   and candles (`datapi.jup.ag`) are undocumented frontend endpoints; the hub
   backs prices with the Price API V3, candles have no fallback.
@@ -341,9 +395,33 @@ command to run in a terminal. The rules are tested in
   calling it left, and a cancel that fails re-reads it once (`wait=False`):
   gone is no leftover (A24); `perp_stop_left` only if it is still there.
   Venue exits (its stop fired, a liquidation) are booked from the
-  keeper's USDC payout in the sweep. Costs outside the collateral (A11c,
+  keeper's USDC payout in the sweep. A close's fill splits what the
+  position was worth at the oracle less what came back: `borrow_usd` is
+  the borrow it owed, read before the close, and `fees_usd` the rest (A27;
+  an unread custody leaves it all in the fees and never blocks the close).
+  With a position open, the bucket line and `bucket_line` add the entry's
+  costs (`entrada: custos ... SOL (rent ...), taxas perp $...`): the
+  bucket's summary counts them only at the close. `connect` logs one line
+  per bar and the bucket line only when it changes (A32). A31: a closed perp's
+  `PnLResult` carries `perp_fees_quote` (the close's `fees_usd` + the
+  open's share of posted - collateral kept, `venue_costs`) and
+  `perp_borrow_quote`; `PositionBook` and `AccountPnL` (from the legs'
+  `order_json`, the entry followed through adds and partial sells) sum
+  them, and `bruto` reads `(preço P, taxas perp -F, empréstimo -B)` with
+  P = bruto + F + B. `connect`'s SELL line splits that close
+  (`round_trip_line`); the position line shows the price move and the
+  return on the collateral (`Position.return_on_collateral`), and
+  `unrealized_usd(price, now)` takes the accrued borrow. Costs outside the collateral (A11c,
   A12): a request's fee and the rent of a position account it created come
   from its transaction's `meta`, filled or rejected (Jupiter keeps the
   account, nothing comes back), and a venue order's send fee is a
   `perp_stop_fee` event (in `pnl_totals`, the round-trip cost and the
   bucket's budget).
+- **Every SOL cost is in the native PnL (A30).** A cost outside the legs (a
+  venue stop's fee, a failed send's, minus a rent refund) goes into the
+  book's `costs_sol` and `net_quote` as well as `realized_usd`
+  (`PositionBook.charge_outside`; `AccountPnL._outside` rebuilds the same
+  from the events). In the quote token it is exact for a SOL quote and a USD
+  stable (`outside_cost_quote`); any other quote counts it as incomplete
+  (`[!]`). `tx falhas`/`rent devolvido` in the summary are parts of
+  `custos`, not extras.

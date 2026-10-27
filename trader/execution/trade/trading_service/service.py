@@ -58,6 +58,7 @@ from trader.execution.trade.trading_service.perps import PerpDesk
 from trader.execution.trade.trading_service.rent import RentRefunds
 from trader.shared.models import Order, OrderSide
 from trader.shared.models.perp import PerpFill
+from trader.shared.models.position import Position
 from trader.shared.notification.notification_service import (
     NotificationService,
     Notifier,
@@ -168,6 +169,9 @@ class TradeService:
         await self._check_allocation(name, bucket)
         self._buckets[name] = bucket
         self._check_max_loss(name, bucket)  # já restaurado além do limite?
+        if self.gateway.ledger.last_event(events.BUCKET_STOPPED, account.account_id):
+            bucket.status = BucketStatus.RETIRING  # parado pelo dono (A33)
+            logger.warning(f"Bucket {name} foi parado à mão: sem compras")
 
     async def _account(
         self,
@@ -321,6 +325,14 @@ class TradeService:
             {"account": bucket.account.account_id, "reason": reason},
         )
 
+    def stop(self, name: str) -> None:
+        """A parada manual (A33): encerra o bucket e grava `bucket_stopped`,
+        que `open_bucket` relê (um `serve` reiniciado não volta a comprar)."""
+        account = self._bucket(name).account.account_id
+        if not self.gateway.ledger.last_event(events.BUCKET_STOPPED, account):
+            self.gateway.add_event(events.BUCKET_STOPPED, {"account": account})
+        self.retire(name, "parada manual")
+
     def _bucket(self, name: str) -> _Bucket:
         try:
             return self._buckets[name]
@@ -350,6 +362,13 @@ class TradeService:
         if cap is None:
             return None, quote_usd
         return (cap / quote_usd if quote_usd else ZERO), quote_usd
+
+    def open_positions(self) -> dict[str, Position]:
+        """A posição aberta de cada bucket que tem uma, sem rede (A28)."""
+        positions = {
+            name: bucket.account.book.position for name, bucket in self._buckets.items()
+        }
+        return {name: p for name, p in positions.items() if p is not None}
 
     async def get_bucket(self, name: str) -> BucketSnapshot:
         bucket = self._bucket(name)
@@ -405,8 +424,10 @@ class TradeService:
         """Executa e classifica o desfecho; nenhuma exceção de execução escapa."""
         try:
             order = await self._execute(bucket, request)
-        except (PolicyDeniedError, DuplicateIntentError) as ex:
-            return OrderReply.of_denial(_reasons(ex))
+        except PolicyDeniedError as ex:
+            return OrderReply.of_denial(ex.reasons, ex.retry_after)
+        except DuplicateIntentError as ex:
+            return OrderReply.of_denial((str(ex),))
         except (ValueError, SwapRejectedError) as ex:
             # nada foi executado: saldo, orçamento, impacto de preço...
             return OrderReply.of_rejection(str(ex))
@@ -544,7 +565,3 @@ def _retired_flat(bucket: _Bucket) -> bool:
     return (
         bucket.status == BucketStatus.RETIRING and bucket.account.book.position is None
     )
-
-
-def _reasons(ex: PolicyDeniedError | DuplicateIntentError) -> tuple[str, ...]:
-    return ex.reasons if isinstance(ex, PolicyDeniedError) else (str(ex),)

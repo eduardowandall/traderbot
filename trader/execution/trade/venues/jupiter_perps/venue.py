@@ -42,6 +42,7 @@ from trader.execution.market.perps.reader import (
     PERPS_PROGRAM,
     SHORT_COLLATERAL,
     USD_SCALE,
+    CustodyState,
     VenuePosition,
     collateral_mint,
     open_position,
@@ -58,7 +59,12 @@ from trader.execution.models.intent import (
     SentTx,
     announce_send,
 )
-from trader.execution.models.perp import PerpTerms, stop_level
+from trader.execution.models.perp import (
+    PERP_POSITION_RENT_LAMPORTS,
+    PerpTerms,
+    open_sol_lamports,
+    stop_level,
+)
 from trader.execution.models.venue import Liquidation, PerpSweep
 from trader.execution.trade.venues.jupiter.compute_budget import ComputeBudget
 from trader.execution.trade.venues.jupiter.executor import OnChainExecutor
@@ -80,7 +86,7 @@ from trader.shared.models.costs import (
     priority_fee_lamports,
 )
 from trader.shared.models.direction import Direction
-from trader.shared.models.perp import PerpFill, liquidation_price
+from trader.shared.models.perp import ZERO, PerpFill, liquidation_price
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +117,13 @@ Done = Callable[[VenuePosition | None], bool]
 @dataclass(frozen=True)
 class _Before:
     """O que um fechamento leu antes do envio, para o fill ao vivo: a parte
-    que sai, o USDC da carteira e o preço do oráculo."""
+    que sai, o USDC da carteira, o preço do oráculo e o empréstimo que a
+    parte deve (A27)."""
 
     closed: VenuePosition
     usdc: int
     price: Decimal
+    borrow: Decimal = ZERO
 
 
 class JupiterPerpsVenue:
@@ -187,10 +195,11 @@ class JupiterPerpsVenue:
         fraction: Decimal = ONE,
     ) -> ExecutionResult:
         wallet = token_account(self.owner)
-        position, oracle, before = await asyncio.gather(
+        position, oracle, before, custody = await asyncio.gather(
             self.reader.position(self.owner, terms),
             self.feed.oracle_price(terms.market_mint),
             self.reader.token_amount(wallet),
+            self._custody_for_borrow(terms),
         )
         if position is None:
             raise SwapRejectedError("nenhuma posição perp aberta na Jupiter")
@@ -209,7 +218,20 @@ class JupiterPerpsVenue:
         # o tamanho que sai fica no envio: a resolução fecha essa quantidade
         size_raw = _size_raw(terms, closed.size_usd, closed.price)
         sent = await self._send(terms, request, 0, send, size_raw)
-        return await self._wait(sent, terms, _Before(closed, before, oracle.price))
+        owed = ZERO if custody is None else closed.borrow_usd(custody)
+        return await self._wait(
+            sent, terms, _Before(closed, before, oracle.price, owed)
+        )
+
+    async def _custody_for_borrow(self, terms: PerpTerms) -> CustodyState | None:
+        """A custody onde o empréstimo corre, para separá-lo das taxas no fill
+        (A27). Uma leitura que falha não impede o fechamento: sem ela, o
+        empréstimo fica nas taxas, como antes."""
+        try:
+            return await self.feed.custody(collateral_mint(terms))
+        except Exception as ex:
+            logger.warning(f"custody não lida antes do fechamento ({ex})")
+            return None
 
     async def add_collateral(
         self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
@@ -309,6 +331,14 @@ class JupiterPerpsVenue:
 
     async def has_position(self, terms: PerpTerms) -> bool:
         return await self.reader.position(self.owner, terms) is not None
+
+    async def open_sol_lamports(self, terms: PerpTerms) -> int | None:
+        """A26: as duas travas de pedido, o rent da conta da posição se ela
+        ainda não existe e três envios ao teto da priority fee."""
+        new = await self._gone(position_address(self.owner, terms))
+        rent = PERP_POSITION_RENT_LAMPORTS if new else 0
+        fee = BASE_FEE_LAMPORTS + self.executor.max_priority_fee_lamports
+        return open_sol_lamports(rent, fee)
 
     async def open_markets(self) -> list[tuple[str, Direction]]:
         """As posições abertas da carteira, numa leitura só (D10)."""
@@ -445,7 +475,7 @@ class JupiterPerpsVenue:
         else:
             returned = await self._usdc_back(terms, before)
             back = Decimal(returned) / USD_SCALE
-            fill = _exit_fill(terms, before.closed, before.price, back)
+            fill = _exit_fill(terms, before, back)
         # a quantidade que o envio fechou (o venue a gravou nele)
         return ExecutionResult(
             sent.signature,
@@ -703,18 +733,18 @@ def _worth(terms: PerpTerms, position: VenuePosition, price: Decimal) -> Decimal
     return held.collateral_usd + held.pnl_usd(price)
 
 
-def _exit_fill(
-    terms: PerpTerms, position: VenuePosition, price: Decimal, returned: Decimal
-) -> PerpFill:
-    """A saída: o que voltou; taxas e empréstimo juntos, pela diferença do
-    que a posição valia ao preço do oráculo."""
-    expected = _worth(terms, position, price)
+def _exit_fill(terms: PerpTerms, before: _Before, returned: Decimal) -> PerpFill:
+    """A saída: o que voltou. A diferença do que a posição valia ao preço do
+    oráculo é o empréstimo lido antes do fechamento e, o que sobra, as taxas
+    (A27; o PnL é o que voltou - o postado, e não muda)."""
+    expected = _worth(terms, before.closed, before.price)
     return PerpFill(
         direction=terms.direction,
         leverage=terms.leverage,
-        price=price,
-        size_usd=position.size_usd,
+        price=before.price,
+        size_usd=before.closed.size_usd,
         collateral_usd=returned,
-        fees_usd=max(expected - returned, Decimal(0)),
-        borrow_bps_hour=Decimal(0),
+        fees_usd=max(expected - returned - before.borrow, ZERO),
+        borrow_bps_hour=ZERO,
+        borrow_usd=before.borrow,
     )

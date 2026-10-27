@@ -25,6 +25,7 @@ USDC = SOLANA_MINTS.get_by_symbol("USDC").mint
 T0 = datetime(2026, 10, 7, 12, tzinfo=UTC)
 SHORT3 = PerpTerms(SOL_MINT, Direction.SHORT, Decimal(3))
 LONG3 = PerpTerms(SOL_MINT, Direction.LONG, Decimal(3))
+RENT = Decimal("0.00174752")  # a conta da posição (A25)
 
 
 def _venue(tmp_path, price="100"):
@@ -46,7 +47,8 @@ async def test_open_posts_collateral_and_keeps_one_position_per_side(tmp_path):
     assert fill.fees_usd == Decimal("0.018") + Decimal("0.000009")
     assert fill.collateral_usd == 10 - fill.fees_usd
     assert wallet.balance(USDC) == 90
-    assert wallet.balance(SOL_MINT) == Decimal(1) - Decimal("0.000005")
+    # a taxa e o rent da conta da posição: a primeira abertura do lado (A25)
+    assert wallet.balance(SOL_MINT) == Decimal(1) - Decimal("0.000005") - RENT
     assert (result.input_mint, result.output_mint) == (USDC, SOL_MINT)
     assert SOLANA_MINTS[SOL_MINT].raw_to_ui(result.out_amount) == Decimal("0.3")
     with pytest.raises(SwapRejectedError, match="já existe"):
@@ -223,7 +225,7 @@ async def test_the_venue_stop_fires_in_the_sweep_and_pays_back(tmp_path):
     stop = Decimal(wallet.perps()[f"{SOL_MINT}:short"]["stop"])
     assert placed.venue_order and stop == 105
     # o envio do stop pagou a taxa de rede, como no real
-    assert wallet.balance(SOL_MINT) == Decimal(1) - 2 * Decimal("0.000005")
+    assert wallet.balance(SOL_MINT) == Decimal(1) - 2 * Decimal("0.000005") - RENT
 
     oracle.set("104")
     assert (await venue.sweep([terms])).exits == []  # antes do stop: nada
@@ -293,3 +295,21 @@ async def test_each_send_is_logged_with_its_fill_and_resolves_from_it(tmp_path):
     again = await venue.resolve_send(sent, SHORT3)
     assert again is not None and again.perp == opened.perp
     assert (again.in_amount, again.out_amount) == (opened.in_amount, opened.out_amount)
+
+
+async def test_a_position_is_decoded_once_until_its_record_changes():
+    # na memória (o backtest): a carteira devolve os mesmos dicts a cada tick
+    wallet = SimulatedWallet(initial={"USDC": Decimal(100), "SOL": Decimal(1)})
+    clock = [T0]
+    venue = SimulatedPerpsVenue(wallet, PerpOracle("100"), clock=lambda: clock[0])
+    await venue.open_perp(USDC, SHORT3, Decimal(10), "k")
+    [record] = wallet.perps().values()
+
+    first = venue._decode(record)
+    # uma nova leitura da carteira traz o mesmo registro: sem decodificar de novo
+    assert venue._decode(wallet.perps()[f"{SOL_MINT}:short"])[0] is first[0]
+
+    await venue.add_collateral(USDC, SHORT3, Decimal(5), "a")
+    held = (await venue.sweep([SHORT3])).held[SHORT3]
+    # o registro novo traz outro dict: a entrada nova, não a guardada
+    assert held.collateral_usd > first[0].collateral_usd + Decimal(4)

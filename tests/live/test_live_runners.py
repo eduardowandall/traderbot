@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -57,6 +58,19 @@ def _wait_for(path: Path, seconds: float = 30) -> None:
         time.sleep(0.5)
 
 
+def _open_ledger(path: Path, seconds: float = 15) -> Ledger:
+    """O ledger de um `serve` recém-morto: no Windows, os arquivos WAL dele
+    ficam presos por um instante depois do `taskkill /F` (`disk I/O error`)."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return Ledger(path)
+        except sqlite3.OperationalError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.5)
+
+
 def test_a_strategy_runner_trades_through_a_paper_trade_runner(tmp_path):
     policy_file().write_text(POLICY, encoding="utf-8")
     server = _start("serve", "paper")
@@ -68,7 +82,7 @@ def test_a_strategy_runner_trades_through_a_paper_trade_runner(tmp_path):
     finally:
         _stop(server)
 
-    with Ledger(ledger_path("paper")) as ledger:
+    with _open_ledger(ledger_path("paper")) as ledger:
         records = ledger.list_intents(100)
     executed = [r for r in records if r.status == IntentStatus.EXECUTED]
     assert executed, [(r.status, r.error, r.decision_reasons) for r in records]

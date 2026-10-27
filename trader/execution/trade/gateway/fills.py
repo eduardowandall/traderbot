@@ -85,7 +85,7 @@ async def settle(
 ) -> Fill:
     """Depois de EXECUTED: os custos do swap e a taxa das tentativas falhas.
 
-    Único caminho até `fetch_swap_costs` (o `execute_trade` e a resolução de
+    Único caminho até `PostTrade.fetch_costs` (o `execute_trade` e a resolução de
     intenções, A3). **Nunca** levanta.
     """
     costs = await venue.fetch_costs(result)

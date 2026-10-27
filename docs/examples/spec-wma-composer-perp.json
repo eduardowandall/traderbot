@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "name": "wma-composer-perp",
+  "agent_id": "claude",
+  "rationale": "The wma-composer entry on a 2x SOL long on Jupiter Perps: opens when the four WMAs agree (50<100, 15<100, 15>30, 5>10 on 15s bars), out on a 3.1% trailing stop (well inside the 24.88% limit at 2x) or after 4 hours, since borrow grows every hour. 10 USD of collateral (20 USD of exposure) a time inside a 12 USD budget, so one position at a time; retired after 3 USD of loss.",
+  "symbol": "SOL-USDC",
+  "timeframe": "15_SECOND",
+  "market": {"kind": "perp", "venue": "jupiter", "direction": "long", "leverage": 2},
+  "entry": {
+    "mode": "all",
+    "conditions": [
+      {"type": "fast_ma_below_slow", "ma": "wma", "fast": 50, "slow": 100},
+      {"type": "fast_ma_below_slow", "ma": "wma", "fast": 15, "slow": 100},
+      {"type": "fast_ma_above_slow", "ma": "wma", "fast": 15, "slow": 30},
+      {"type": "fast_ma_above_slow", "ma": "wma", "fast": 5, "slow": 10}
+    ]
+  },
+  "exit": {
+    "stop": {"type": "trailing_stop", "pct": 4.1},
+    "mode": "any",
+    "conditions": [
+      {"type": "max_hold", "minutes": 480}
+    ]
+  },
+  "sizing": {"type": "fixed_usd", "usd": 10},
+  "budget_usd": 12,
+  "max_loss_usd": 5,
+  "cooldown_minutes": 15,
+  "ttl_days": 30
+}

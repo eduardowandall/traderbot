@@ -36,6 +36,7 @@ from trader.strategy.bot.loop import (
     TradingBot,
     format_price,
 )
+from trader.strategy.trading_service.remote import RemoteTicks
 
 ONE = Decimal(1)
 
@@ -74,6 +75,42 @@ def _feed():
     feed.get_candles = AsyncMock(return_value=[])
     feed.get_price = AsyncMock(return_value=Decimal("1.0"))
     return feed
+
+
+async def test_a_connect_tick_is_one_round_trip_and_a_fill_adds_none(mock_sleep):
+    # A21: com `RemoteTicks`, cada tick é um op `tick`; o fill traz o bucket
+    strategy = FakeStrategy()
+    quotes = ReplayQuoteClient(USDC, Decimal(0))
+    quotes.tick = Tick(datetime(2026, 9, 1, 12, 0), Decimal("1"))
+    wallet = SimulatedWallet(initial={"USDC": Decimal("100"), "SOL": Decimal("1")})
+    service = TradeService(
+        SpotVenue(paper_provider(wallet, jupiter_client=quotes)), memory_gateway()
+    )
+    async with served(service, prices={BONK.mint: ONE}, **BONK_SPEC) as trader:
+        ops = []
+        call = trader._call
+
+        async def spy(message):
+            ops.append(message["op"])
+            return await call(message)
+
+        trader._call = spy  # type: ignore[method-assign]
+        bot = TradingBot(
+            BotConfig(
+                name="ticks",
+                symbol="BONK-USDC",
+                strategy=strategy,
+                market=_feed(),
+                trader=trader,
+                notifier=NotificationService(),
+                ticks=RemoteTicks(trader, "BONK-USDC"),
+            )
+        )
+        await bot.arun()
+
+    assert strategy.count == 2  # uma compra e uma venda
+    # o `bucket` do início restaura a estratégia; depois, só ticks e ordens
+    assert ops == ["bucket", "tick", "submit", "tick", "submit", "tick"]
 
 
 async def test_a_buy_and_a_sell_go_all_the_way_to_the_ledger(mock_sleep):

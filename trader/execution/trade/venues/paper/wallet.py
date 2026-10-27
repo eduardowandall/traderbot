@@ -44,6 +44,9 @@ class SimulatedWallet:
         # posições de perp abertas (A8), por "<mercado>:<lado>": o venue
         # simulado (`perps.py`) é quem sabe o que guardar em cada uma
         self._perps: dict[str, dict] = {}
+        # contas de posição perp já criadas (A25): a Jupiter nunca as fecha e
+        # as reusa, então só a primeira abertura de um mercado e lado paga rent
+        self._perp_accounts: set[str] = set()
         # horário do swap mais novo que já saiu do registro (None: nenhum)
         self.trimmed_at: float | None = None
         if self.path and self.path.exists():
@@ -69,6 +72,8 @@ class SimulatedWallet:
         # arquivos antigos não têm a lista: quem tem saldo já tem conta
         self._open = set(data.get("open_accounts", self._funded()))
         self._perps = dict(data.get("perps", {}))
+        # arquivos antigos não têm a lista: quem tem posição já tem conta
+        self._perp_accounts = set(data.get("perp_accounts", self._perps))
         log = data.get("applied", {})
         if isinstance(log, list):  # o primeiro formato do registro: só a lista
             self._applied, self.trimmed_at = log, None
@@ -88,6 +93,7 @@ class SimulatedWallet:
         }
         self._open = set(self._funded())
         self._perps = {}
+        self._perp_accounts = set()
         with _file_lock(self.path):  # um bot rodando não pode sobrescrever o reset
             self._commit()
 
@@ -97,6 +103,14 @@ class SimulatedWallet:
     def needs_account(self, mint: str) -> bool:
         """True se receber `mint` exige criar uma conta de token (e pagar rent)."""
         return mint != SOL_MINT and mint not in self._open
+
+    def needs_perp_account(self, key: str) -> bool:
+        """True se abrir a posição `key` cria a conta dela (e paga rent, A25).
+
+        Relê o arquivo: outro processo pode ter aberto o mesmo mercado e lado.
+        """
+        self.reload()
+        return key not in self._perp_accounts
 
     def applied(self, signature: str) -> dict | None:
         """O swap aplicado com esta assinatura, ou None.
@@ -135,6 +149,7 @@ class SimulatedWallet:
         moves: dict[str, int],
         signature: str | None = None,
         amend: bool = False,
+        rent_lamports: int = 0,
     ) -> None:
         """Abre (`record`) ou fecha (None) a posição `key` e move os saldos.
 
@@ -142,7 +157,8 @@ class SimulatedWallet:
         relê, confere o saldo, grava e só então muda a memória. Abrir uma
         posição que já existe, ou fechar uma que não existe, é recusado.
         `amend` (A12): troca o registro de uma posição aberta (parte fechada,
-        colateral a mais, o stop).
+        colateral a mais, o stop). A conta da posição fica lembrada (A25);
+        `rent_lamports` é a parte do SOL de `moves` que foi o rent dela.
         """
         with _file_lock(self.path):
             self._read()
@@ -151,12 +167,15 @@ class SimulatedWallet:
                 raise InsufficientFundsError(f"posição perp {key} {refusal}")
             raw = self._moved(moves)
             perps = {k: v for k, v in self._perps.items() if k != key}
+            accounts = self._perp_accounts
             if record is not None:
                 perps[key] = record
+                accounts = accounts | {key}
             logged = None
             if signature is not None:
-                logged = self._logged(signature, 0, 0, -moves.get(SOL_MINT, 0), 0)
-            self._commit(raw=raw, perps=perps, logged=logged)
+                fee = -moves.get(SOL_MINT, 0) - rent_lamports
+                logged = self._logged(signature, 0, 0, fee, rent_lamports)
+            self._commit(raw=raw, perps=perps, perp_accounts=accounts, logged=logged)
 
     def _perp_refusal(self, key: str, record: dict | None, amend: bool) -> str | None:
         exists = key in self._perps
@@ -273,6 +292,7 @@ class SimulatedWallet:
         opened: set[str] | None = None,
         perps: dict[str, dict] | None = None,
         logged: tuple[list[dict], float | None] | None = None,
+        perp_accounts: set[str] | None = None,
     ) -> None:
         """Grava o estado novo (o que não vem, fica) e só então muda a memória.
 
@@ -281,9 +301,11 @@ class SimulatedWallet:
         raw = self._raw if raw is None else raw
         opened = self._open if opened is None else opened
         perps = self._perps if perps is None else perps
+        accounts = self._perp_accounts if perp_accounts is None else perp_accounts
         applied, trimmed_at = logged or (self._applied, self.trimmed_at)
-        self._write(raw, opened, applied, trimmed_at, perps)
+        self._write(raw, opened, applied, trimmed_at, perps, accounts)
         self._raw, self._open, self._perps = raw, opened, perps
+        self._perp_accounts = accounts
         self._applied, self.trimmed_at = applied, trimmed_at
 
     def _write(
@@ -293,6 +315,7 @@ class SimulatedWallet:
         applied: list[dict],
         trimmed_at: float | None,
         perps: dict[str, dict],
+        perp_accounts: set[str],
     ) -> None:
         if self.path is None:
             return
@@ -306,6 +329,7 @@ class SimulatedWallet:
                     "open_accounts": sorted(opened),
                     "applied": {"swaps": applied, "trimmed_at": trimmed_at},
                     "perps": perps,
+                    "perp_accounts": sorted(perp_accounts),
                 },
                 indent=2,
                 sort_keys=True,

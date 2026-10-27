@@ -39,9 +39,16 @@ logger = logging.getLogger(__name__)
 
 
 class PolicyDeniedError(Exception):
-    def __init__(self, intent: TradeIntent, reasons: tuple[str, ...]):
+    def __init__(
+        self,
+        intent: TradeIntent,
+        reasons: tuple[str, ...],
+        retry_after: float | None = None,
+    ):
         self.intent = intent
         self.reasons = reasons
+        # A29: segundos até a janela móvel que recusou liberar (None: sem janela)
+        self.retry_after = retry_after
         super().__init__("Trade recusado pela política: " + "; ".join(reasons))
 
 
@@ -125,15 +132,18 @@ class TradeGateway:
 
     # --- estado e registros (sem passar pela política) ----------------------
 
-    def restore(self, account_id: str) -> AccountState:
-        """PnL e posição aberta da conta, para reconstruir após reinício."""
+    def restore(self, account_id: str, quote_mint: str | None = None) -> AccountState:
+        """PnL e posição aberta da conta, para reconstruir após reinício.
+
+        `quote_mint` converte os custos fora das pernas de uma conta ainda sem
+        fill (`pnl_totals`, A30)."""
         position, entry_intent_id = self.ledger.open_position(account_id) or (
             None,
             None,
         )
         entry = position and position.entry_order
         opened_at, last_exit_at = self.ledger.account_times(account_id)
-        totals = self.ledger.pnl_totals(account_id)
+        totals = self.ledger.pnl_totals(account_id, quote_mint=quote_mint)
         return AccountState(
             realized_usd=totals.net_usd,
             totals=totals,
@@ -236,7 +246,7 @@ class TradeGateway:
         assert decision is not None  # sem existente, sempre há decisão
         if not decision.allowed:
             logger.warning(f"Intenção {intent.intent_id} recusada: {decision.reasons}")
-            raise PolicyDeniedError(intent, decision.reasons)
+            raise PolicyDeniedError(intent, decision.reasons, decision.retry_after)
 
     async def _execute(
         self,

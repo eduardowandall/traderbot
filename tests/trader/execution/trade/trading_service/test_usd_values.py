@@ -1,5 +1,5 @@
 """Valores em USD vindos da Price API: notional de pares sem stablecoin e
-custos em SOL de pares sem SOL (item A4 do plano)."""
+custos em SOL de pares sem SOL (item A4, em `docs/history.md`)."""
 
 from datetime import datetime
 from decimal import Decimal

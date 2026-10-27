@@ -34,7 +34,7 @@ MAX_ORACLE_AGE_SECONDS = MAX_AGE_SECONDS
 
 
 class StaleOracleError(SwapRejectedError):
-    """O oráculo do venue está parado: nenhuma entrada com ele (§8.6)."""
+    """O oráculo do venue está parado: nenhuma entrada com ele (history.md §8.6)."""
 
 
 class PerpsFeed:

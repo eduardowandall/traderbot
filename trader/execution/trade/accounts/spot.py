@@ -147,7 +147,7 @@ class SpotAccount(BaseAccount):
             price,
             usd,
         )
-        self.logger.info(f"ORDER PLACED: {asdict(order)}", extra=asdict(order))
+        self._log_fill("ORDER PLACED", order)
         record_fill_safely(self.gateway, intent.intent_id, order)
         self.book.open(order)
         return order
@@ -199,10 +199,7 @@ class SpotAccount(BaseAccount):
             price,
             usd,
         )
-        self.logger.info(
-            f"ORDER PLACED: order={asdict(order)} position={asdict(position)}",
-            extra=asdict(order),
-        )
+        self._log_fill("ORDER PLACED", order, position=asdict(position))
         order, closed = self.book.settle_sell(order)
         record_fill_safely(
             self.gateway, intent.intent_id, order, closed.realized_usd, closed.pnl

@@ -17,6 +17,8 @@ from trader.strategy.spec.models import StrategySpec
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
 NO_FEES = ReplayCosts(Decimal(0), Decimal(0), Decimal(0), Decimal(0))
+# o rent da conta da posição na primeira abertura, ao SOL do tick (100), A25
+RENT_USD = Decimal("0.174752")
 
 
 def _spec(direction="short", leverage=3, stop=5, hold=600, **overrides):
@@ -51,9 +53,10 @@ async def test_a_gap_past_the_liquidation_price_liquidates_before_the_stop():
     assert result.rent_usd == 0  # A19: uma perp não abre conta de token
     [entry, liquidation] = result.trades
     assert liquidation.liquidated and liquidation.price == 140
-    # o colateral inteiro (10 USD) se foi; as taxas da abertura estavam nele
-    assert liquidation.realized_pnl == Decimal(-10)
-    assert result.final_equity == Decimal(20)
+    # o colateral inteiro (10 USD) se foi (as taxas da abertura estavam nele),
+    # e o rent da conta da posição, que a Jupiter não devolve
+    assert liquidation.realized_pnl == Decimal(-10) - RENT_USD
+    assert result.final_equity == Decimal(20) - RENT_USD
     assert not result.open_position
 
 
@@ -83,7 +86,7 @@ async def test_the_borrow_accrues_on_the_replay_clock():
     assert result.perp.fees_usd == pytest.approx(Decimal("0.024"), abs=Decimal("1e-4"))
     [_, exit_] = result.trades
     assert exit_.realized_pnl == pytest.approx(
-        -(result.perp.borrow_usd + result.perp.fees_usd)
+        -(result.perp.borrow_usd + result.perp.fees_usd + RENT_USD)
     )
 
 
@@ -93,9 +96,12 @@ async def test_equity_marks_the_open_perp_and_costs_are_on_the_exposure():
     result = await spec_backtester(_spec(hold=600), ticks, NO_FEES, "0").run()
 
     assert result.open_position
-    # 30 de tamanho x 2% = +0.6, menos as taxas de abrir e de fechar agora
+    # 30 de tamanho x 2% = +0.6, menos as taxas de abrir e de fechar agora e
+    # o rent da conta da posição
     gain = Decimal("0.6") - 2 * Decimal("0.018")
-    assert result.final_equity == pytest.approx(30 + gain, abs=Decimal("1e-3"))
+    assert result.final_equity == pytest.approx(
+        30 + gain - RENT_USD, abs=Decimal("1e-3")
+    )
 
 
 async def test_a_round_trip_cost_is_measured_on_the_exposure():
@@ -107,6 +113,8 @@ async def test_a_round_trip_cost_is_measured_on_the_exposure():
     assert costs.count == 1 and costs.notional_usd == 30
     # 2 x 0.06% de 30 (e um impacto ínfimo): ~12 bps, mesmo vendido
     assert Decimal(11) < costs.bps < Decimal(13)  # type: ignore[operator]
+    # o rent da conta da posição fica à parte (A25)
+    assert costs.account_rent_usd == RENT_USD
 
 
 async def test_a_partial_take_profit_and_a_top_up_replay_like_live(monkeypatch):

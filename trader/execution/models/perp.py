@@ -16,6 +16,16 @@ from trader.shared.spec.terms import AddCollateral, PerpMarket
 SPOT = "spot"
 PERP = "perp"
 
+# o rent que um pedido da Jupiter Perps trava até o keeper rodar: o pedido e
+# a conta de USDC dele (medido no real, A11b run 2, G4)
+PERP_REQUEST_LOCK_LAMPORTS = 3_723_640
+# o rent da conta de uma posição (medido no real, 2026-10-12): a Jupiter
+# nunca a fecha e a reusa, então só a primeira abertura de um mercado e lado
+# o paga (A25)
+PERP_POSITION_RENT_LAMPORTS = 1_747_520
+# os envios de uma ida e volta que a carteira paga: abrir, o stop, fechar
+OPEN_SENDS = 3
+
 
 @dataclass(frozen=True)
 class PerpTerms:
@@ -42,6 +52,18 @@ def stop_level(terms: PerpTerms, fill: PerpFill) -> Decimal:
     if terms.stop_pct is not None:
         distance = min(terms.stop_pct / 100, distance)
     return fill.price * (1 - fill.direction.sign * distance)
+
+
+def open_sol_lamports(position_rent: int, fee_per_send: int) -> int:
+    """O SOL que uma abertura precisa além da reserva de taxas (A26, G4).
+
+    O pedido de abrir trava `PERP_REQUEST_LOCK_LAMPORTS` até o keeper rodar;
+    a ordem de stop trava o mesmo enquanto a posição está aberta, e o pedido
+    de fechar trava outro ao lado dela: duas travas ao mesmo tempo. Mais o
+    rent da conta da posição (`position_rent`, 0 se ela já existe) e os três
+    envios a `fee_per_send` (a base mais o teto da priority fee).
+    """
+    return 2 * PERP_REQUEST_LOCK_LAMPORTS + position_rent + OPEN_SENDS * fee_per_send
 
 
 def perp_terms_for(

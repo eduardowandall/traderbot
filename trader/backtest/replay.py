@@ -47,7 +47,9 @@ from trader.execution.trade.venues.paper.executor import (
 )
 from trader.execution.trade.venues.paper.perps import (
     DEFAULT_BORROW_BPS_HOUR,
+    DEFAULT_PERP_POSITION_RENT_LAMPORTS,
     SimulatedPerpsVenue,
+    position_key,
 )
 from trader.execution.trade.venues.paper.wallet import SimulatedWallet
 from trader.execution.trade.venues.spot import SpotVenue
@@ -107,13 +109,23 @@ CLOSING_LOGGERS = (
 class ReplayQuoteClient:
     """Substitui o `AsyncJupiterClient` do provider: quotes do tick atual.
 
-    A saída é o tick menos `fee_bps` (taxa do pool + slippage); a taxa de rede
-    não sai daqui, então o fill é o que seria ao vivo (A14).
+    A saída é o tick menos `fee_bps` + `slippage_bps` (este x
+    `slippage_scale(hora do tick)`, A38); a taxa de rede não sai daqui, então
+    o fill é o que seria ao vivo (A14).
     """
 
-    def __init__(self, quote_mint: Mint, fee_bps: Decimal):
+    def __init__(
+        self,
+        quote_mint: Mint,
+        fee_bps: Decimal,
+        slippage_bps: Decimal = ZERO,
+        slippage_scale: Callable[[datetime], Decimal] | None = None,
+    ):
         self.quote_mint = quote_mint  # stablecoin (input do par)
         self.fee_bps = fee_bps
+        self.slippage_bps = slippage_bps
+        self.slippage_scale = slippage_scale
+        self._cost_bps = fee_bps + slippage_bps
         self.tick: Tick | None = None
 
     @property
@@ -141,7 +153,7 @@ class ReplayQuoteClient:
             out_ui = in_ui / price  # compra do token
         else:
             out_ui = in_ui * price  # venda do token
-        out_ui = out_ui * (BPS - self.fee_bps) / BPS
+        out_ui = out_ui * (BPS - self._bps()) / BPS
         return JupiterQuoteResponse.single_route(
             input_mint,
             amount,
@@ -149,6 +161,14 @@ class ReplayQuoteClient:
             SOLANA_MINTS.ui_to_raw(output_mint, out_ui),
             slippage_bps=slippage_bps,
             label="replay",
+        )
+
+    def _bps(self) -> Decimal:
+        assert self.tick is not None
+        if self.slippage_scale is None:
+            return self._cost_bps  # a mesma soma de sempre
+        return self.fee_bps + self.slippage_bps * self.slippage_scale(
+            self.tick.timestamp
         )
 
     async def aclose(self) -> None:
@@ -294,7 +314,9 @@ class ReplayPerpsVenue(SimulatedPerpsVenue):
 
     O tick é o oráculo (`ReplayPrices`) e o relógio; a carteira do replay não
     tem SOL, então a taxa de rede vira custo da perna, como no
-    `ReplayExecutor`.
+    `ReplayExecutor`. O rent da conta da posição também (A25): a primeira
+    abertura do mercado e lado o leva em `rent_lamports`, como o real; ele
+    nunca volta (a Jupiter não fecha a conta).
     """
 
     def __init__(
@@ -310,18 +332,35 @@ class ReplayPerpsVenue(SimulatedPerpsVenue):
             fee_lamports=0,
             borrow_bps_hour=borrow_bps_hour,
             clock=lambda: prices.client.now,
+            position_rent_lamports=0,  # fora da carteira: `_with_rent`
         )
         self.network_fee_usd = network_fee_usd
         self.prices = prices
         self.sol_usd = prices.sol_usd
         self.fees_usd = ZERO
+        # o rent que a conta de uma posição cobra (A25)
+        self.rent_lamports = DEFAULT_PERP_POSITION_RENT_LAMPORTS
 
     async def open_perp(
         self, collateral_mint: str, terms: PerpTerms, collateral: Decimal, key: str
     ) -> ExecutionResult:
-        return self._charged(
+        # antes da abertura, que cria a conta da posição
+        opens = self.wallet.needs_perp_account(position_key(terms))
+        result = self._charged(
             await super().open_perp(collateral_mint, terms, collateral, key)
         )
+        return self._with_rent(result) if opens else result
+
+    async def open_sol_lamports(self, terms: PerpTerms) -> int | None:
+        return None  # a carteira do replay não tem SOL: os custos vão na perna (A26)
+
+    def _with_rent(self, result: ExecutionResult) -> ExecutionResult:
+        """A abertura que criou a conta da posição paga o rent dela (A25)."""
+        costs = replace(
+            result.costs or TradeCosts(REPLAY), rent_lamports=self.rent_lamports
+        )
+        self.fees_usd += Decimal(self.rent_lamports) / LAMPORTS_PER_SOL * self.sol_usd()
+        return replace(result, costs=costs)
 
     async def close_perp(
         self,
@@ -470,6 +509,8 @@ class Backtester:
         # uma perp (A9): o mercado, o lado e a alavancagem; None: spot
         perp: PerpTerms | None = None,
         borrow_bps_hour: Decimal = DEFAULT_BORROW_BPS_HOUR,
+        # o slippage x isso na hora do tick (A38, `--volume-slippage`)
+        slippage_scale: Callable[[datetime], Decimal] | None = None,
     ):
         self.token, self.quote = SOLANA_MINTS.get_pair(symbol)
         if not ticks:
@@ -494,6 +535,7 @@ class Backtester:
         self.max_loss_usd = max_loss_usd
         self.perp = perp
         self.borrow_bps_hour = borrow_bps_hour
+        self.slippage_scale = slippage_scale
 
     async def run(self) -> BacktestResult:
         with quiet_strategy_logs():
@@ -577,7 +619,9 @@ class Backtester:
         ReplayQuoteClient, ReplayExecutor, ReplayPerpsVenue | None, TradeService
     ]:
         """Mesmo caminho do paper trading: TradeService -> gateway -> carteira."""
-        client = ReplayQuoteClient(self.quote, self.fee_bps + self.slippage_bps)
+        client = ReplayQuoteClient(
+            self.quote, self.fee_bps, self.slippage_bps, self.slippage_scale
+        )
         prices = ReplayPrices(client, self.token, self.quote)
         wallet = SimulatedWallet(initial={self.quote.symbol: self._funding()})
         executor = ReplayExecutor(wallet, self.network_fee_usd, prices.sol_usd)

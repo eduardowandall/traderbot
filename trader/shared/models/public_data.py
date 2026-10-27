@@ -37,3 +37,5 @@ class TickerData:
     last: Decimal
     low: Decimal
     open: Decimal
+    # volume da barra (USD, como a API dá); None fora dos candles da Jupiter
+    volume: Decimal | None = None

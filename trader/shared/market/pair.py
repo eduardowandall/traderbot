@@ -25,6 +25,13 @@ def market_for(symbol: str, factory: Callable[[], MarketData]) -> MarketData:
     return PairMarketData(factory(), factory(), quote.mint)
 
 
+def pair_price(token_usd: Decimal, quote_usd: Decimal, quote: str) -> Decimal:
+    """O preço do token no token de cotação, dos dois preços USD."""
+    if quote_usd <= 0:
+        raise ValueError(f"preço USD inválido para {quote}: {quote_usd}")
+    return token_usd / quote_usd
+
+
 def candles_for(symbol: str, factory: Callable[[], CandleSource]) -> CandleSource:
     """Só os candles do par, em cotação (o aquecimento de um replay)."""
     _, quote = SOLANA_MINTS.get_pair(symbol)
@@ -67,9 +74,7 @@ class PairMarketData:
         token, quote = await asyncio.gather(
             self.token_feed.get_price(mint), self.quote_feed.get_price(self.quote)
         )
-        if quote <= 0:
-            raise ValueError(f"preço USD inválido para {self.quote}: {quote}")
-        return token / quote
+        return pair_price(token, quote, self.quote)
 
     async def get_candles(
         self, mint: str, interval: Interval, candle_qty: int
@@ -106,4 +111,5 @@ def _ratio(token: TickerData, quote: TickerData) -> TickerData:
         last=close,
         low=min(low, open_, close),
         open=open_,
+        volume=token.volume,
     )

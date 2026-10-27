@@ -53,10 +53,15 @@ from trader.shared.trading_service.protocol import (
 from trader.strategy.runner import find_connection, strategy_bot
 from trader.strategy.spec.models import StrategySpec
 from trader.strategy.spec.strategy import SpecStrategy
-from trader.strategy.trading_service.remote import RemoteCandles, RemoteTradeClient
+from trader.strategy.trading_service.remote import (
+    RemoteCandles,
+    RemoteTicks,
+    RemoteTradeClient,
+)
 
 USDC = SOLANA_MINTS.get_by_symbol("USDC")
 SOL = SOLANA_MINTS.get_by_symbol("SOL")
+JUP = SOLANA_MINTS.get_by_symbol("JUP")
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 LOOSE = Policy(
     max_trade_usd=Decimal(1000),
@@ -107,6 +112,13 @@ def test_the_wire_codec_round_trips():
     assert wire.snapshot_from_dict(through(wire.snapshot_to_dict(snapshot))) == snapshot
     assert wire.request_from_dict(through(wire.request_to_dict(request))) == request
     assert wire.reply_from_dict(through(wire.reply_to_dict(reply))) == reply
+    # A21: o bucket depois do fill viaja na resposta; um `serve` anterior não
+    # o manda
+    after = OrderReply(ReplyStatus.FILLED, order=_order(), snapshot=snapshot)
+    assert wire.reply_from_dict(through(wire.reply_to_dict(after))) == after
+    old = wire.reply_to_dict(reply)
+    del old["snapshot"]
+    assert wire.reply_from_dict(old).snapshot is None
 
 
 # --- trade-runner + cliente remoto --------------------------------------------------
@@ -441,6 +453,52 @@ async def test_strategy_runners_share_the_trade_runners_price_hub():
         await client.aclose()
 
 
+async def test_a_tick_is_the_hubs_prices_and_the_bucket_in_one_reply():
+    runner = _runner(price="150")
+    api = runner.hub.client
+    assert isinstance(api, PriceTable)
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        prices, snapshot = await client.tick([SOL.mint])
+        assert prices == {SOL.mint: Decimal(150)}
+        assert snapshot == await client.bucket()
+        await client.tick([SOL.mint])
+        assert api.calls == 1  # do hub, como o op `price`
+        # um mint sem preço recusa o tick todo, com o tipo do erro (F10)
+        with pytest.raises(PriceUnavailableError, match="StalePriceError"):
+            await client.tick([SOL.mint, USDC.mint])
+        await client.aclose()
+
+
+async def test_remote_ticks_divide_a_pair_by_its_quote():
+    runner = _runner(price="150")
+    runner.hub.client.prices[JUP.mint] = Decimal("0.75")  # type: ignore[attr-defined]
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        stable = RemoteTicks(client, "SOL-USDC", interval=0)
+        assert (await stable.tick(SOL.mint))[0] == Decimal(150)
+        pair = RemoteTicks(client, "JUP-SOL", interval=0)
+        price, snapshot = await pair.tick(JUP.mint)
+        assert price == Decimal("0.75") / Decimal(150)  # SOL por JUP
+        assert snapshot.bucket == client.bucket_name
+        await client.aclose()
+
+
+async def test_a_filled_submit_carries_the_bucket_after_the_fill():
+    runner = _runner()
+    async with await runner.start() as server:
+        client = await _client(runner, server)
+        reply = await client.submit(_buy(key="k"))
+        assert reply.filled and reply.snapshot is not None
+        assert reply.snapshot == await client.bucket()
+        assert reply.snapshot.position is not None
+        # uma recusa (aqui, a chave repetida) não traz: o bot só loga o
+        # bucket depois de um fill
+        again = await client.submit(_buy(key="k"))
+        assert not again.filled and again.snapshot is None
+        await client.aclose()
+
+
 async def test_concurrent_calls_on_one_connection_do_not_cross():
     # um par sem stablecoin pede o preço do token e o da cotação juntos
     runner = _runner(price="150")
@@ -531,6 +589,8 @@ def test_connect_takes_its_candles_from_the_trade_runner():
     assert isinstance(bot.market, HubMarketData)
     assert isinstance(bot.market.candles, RemoteCandles)
     assert bot.market.candles.trader is bot.trader
+    # um tick é uma ida e volta (A21)
+    assert isinstance(bot.ticks, RemoteTicks) and bot.ticks.trader is bot.trader
 
 
 async def test_serve_resolves_dead_intents_before_it_accepts_connections():

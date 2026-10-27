@@ -1,8 +1,9 @@
 """JSON do protocolo trade-runner <-> strategy-runner (camada core: só dados).
 
-Cada mensagem é um objeto JSON numa linha (ver `docs/plan.md` §3.3). Aqui
-ficam só as conversões de `BucketSnapshot`, `OrderRequest`, `OrderReply` e
-candles (`TickerData`, op `candles`) para dicts JSON e de volta; decimais
+Cada mensagem é um objeto JSON numa linha (ver `docs/architecture.md` §9). Aqui
+ficam só as conversões de `BucketSnapshot`, `OrderRequest`, `OrderReply`,
+candles (`TickerData`, op `candles`) e preços (op `tick`, A21) para dicts JSON
+e de volta; decimais
 viajam como string, datas em ISO, e ordens pelo codec do `Order`
 (`order_to_dict`).
 """
@@ -131,16 +132,30 @@ def reply_to_dict(r: OrderReply) -> dict:
         "order": _order(r.order),
         "reasons": list(r.reasons),
         "error": r.error,
+        "retry_after": r.retry_after,
+        "snapshot": None if r.snapshot is None else snapshot_to_dict(r.snapshot),
     }
 
 
 def reply_from_dict(d: dict) -> OrderReply:
+    # `retry_after` (A29) e `snapshot` (A21) faltam na de um `serve` anterior
+    snapshot = d.get("snapshot")
     return OrderReply(
         status=ReplyStatus(d["status"]),
         order=_order_back(d.get("order")),
         reasons=tuple(d.get("reasons", ())),
         error=d.get("error"),
+        retry_after=d.get("retry_after"),
+        snapshot=None if snapshot is None else snapshot_from_dict(snapshot),
     )
+
+
+def prices_to_dict(prices: dict[str, Decimal]) -> dict[str, str]:
+    return {mint: str(price) for mint, price in prices.items()}
+
+
+def prices_from_dict(d: dict[str, str]) -> dict[str, Decimal]:
+    return {mint: Decimal(price) for mint, price in d.items()}
 
 
 def candles_to_list(candles: list[TickerData]) -> list[dict]:

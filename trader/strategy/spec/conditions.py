@@ -23,32 +23,77 @@ HUNDRED = Decimal(100)
 
 
 class IndicatorBank:
-    """Barras do timeframe da spec + indicadores calculados uma vez por tick."""
+    """Barras do timeframe da spec + indicadores calculados uma vez por tick.
+
+    Os valores ficam por barra (`_values[número da barra]`): os da barra em
+    formação recomeçam a cada tick, então uma barra fechada guarda os do seu
+    último tick. `get(..., back)` lê esses (A22): `ema(9, 1)` é o `ema(9)` com
+    que a barra anterior fechou, não um recálculo sobre uma janela que já
+    andou (com a série cheia, a EMA e o RSI começam uma barra depois e mudam
+    um pouco, o bastante para errar um cruzamento por um fio). Uma barra
+    fechada sem valor (semeada, preenchida, ou não lida no último tick) é
+    calculada sobre os fechamentos até ela.
+    """
 
     def __init__(self, interval: Interval, maxlen: int):
         self.bars = ind.BarSeries(interval, maxlen)
-        self._closes: list[Decimal] = []
-        self._cache: dict[tuple, Decimal | None] = {}
+        # cópia dos fechamentos, só quando uma conta inteira precisa (A37)
+        self._closes: list[Decimal] | None = None
+        self._values: dict[int, dict[tuple[str, int], Decimal | None]] = {}
+        # `ind.PARTIAL`: o estado das barras fechadas, por (nome, janela); vale
+        # até a barra mudar
+        self._partial: dict[tuple[str, int], Any] = {}
+        self._closed: list[Decimal] | None = None
 
     def update(self, ts: datetime, price: Decimal) -> None:
-        self.bars.update(ts, price)
+        if self.bars.update(ts, price):
+            self._new_bar()
         self._refresh()
 
     def seed(
         self, candles: Sequence[TickerData], until: datetime | None = None
     ) -> None:
         self.bars.seed(candles, until)
+        self._new_bar()
         self._refresh()
 
-    def _refresh(self) -> None:
-        self._closes = self.bars.closes
-        self._cache.clear()
+    def _new_bar(self) -> None:
+        """Uma barra nova (ou um seed): esquece as que saíram da série (pela
+        janela ou um recomeço) e os estados da barra anterior."""
+        oldest = self.bars.bar - len(self.bars) + 1
+        for bar in [bar for bar in self._values if bar < oldest]:
+            del self._values[bar]
+        self._partial = {}
+        self._closed = None
 
-    def get(self, name: str, *params: int) -> Decimal | None:
-        key = (name, *params)
-        if key not in self._cache:
-            self._cache[key] = ind.INDICATORS[name](self._closes, *params)
-        return self._cache[key]
+    def _refresh(self) -> None:
+        self._closes = None
+        self._values[self.bars.bar] = {}  # a barra em formação mudou
+
+    def get(self, name: str, window: int, back: int = 0) -> Decimal | None:
+        """O indicador `back` barras antes da em formação (A22)."""
+        values = self._values.setdefault(self.bars.bar - back, {})
+        if (name, window) not in values:
+            values[name, window] = self._compute(name, window, back)
+        return values[name, window]
+
+    def _compute(self, name: str, window: int, back: int) -> Decimal | None:
+        if back == 0 and name in ind.PARTIAL and len(self.bars):
+            state = self._state(name, window)
+            if state is not None:
+                return ind.PARTIAL[name][1](state, self.bars.last, window)
+        if self._closes is None:
+            self._closes = self.bars.closes
+        closes = self._closes[:-back] if back else self._closes
+        return ind.INDICATORS[name](closes, window)
+
+    def _state(self, name: str, window: int) -> Any:
+        """O estado das barras fechadas: uma vez por barra."""
+        if (name, window) not in self._partial:
+            if self._closed is None:
+                self._closed = self.bars.closed
+            self._partial[name, window] = ind.PARTIAL[name][0](self._closed, window)
+        return self._partial[name, window]
 
     def __len__(self) -> int:
         return len(self.bars)
@@ -103,6 +148,25 @@ def _fast_ma_above_slow(c, ctx: TickContext) -> bool:
 
 def _fast_ma_below_slow(c, ctx: TickContext) -> bool:
     return _lt(ctx.bank.get(c.ma, c.fast), ctx.bank.get(c.ma, c.slow))
+
+
+def _le(a: Decimal | None, b: Decimal | None) -> bool:
+    return a is not None and b is not None and a <= b
+
+
+def _crossed(ctx: TickContext, ma: str, a: int, b: int) -> bool:
+    """MA(a) passou para cima de MA(b): acima agora, não acima uma barra
+    fechada atrás (A22)."""
+    get = ctx.bank.get
+    return _lt(get(ma, b), get(ma, a)) and _le(get(ma, a, 1), get(ma, b, 1))
+
+
+def _ma_crosses_above(c, ctx: TickContext) -> bool:
+    return _crossed(ctx, c.ma, c.fast, c.slow)
+
+
+def _ma_crosses_below(c, ctx: TickContext) -> bool:
+    return _crossed(ctx, c.ma, c.slow, c.fast)
 
 
 def _dip_from_high(c, ctx: TickContext) -> bool:
@@ -192,6 +256,8 @@ PREDICATES: dict[str, Callable[[Any, TickContext], bool]] = {
     "price_above_ma": _price_above_ma,
     "fast_ma_above_slow": _fast_ma_above_slow,
     "fast_ma_below_slow": _fast_ma_below_slow,
+    "ma_crosses_above": _ma_crosses_above,
+    "ma_crosses_below": _ma_crosses_below,
     "dip_from_high": _dip_from_high,
     "rebound_from_low": _rebound_from_low,
     "random_chance": _random_chance,

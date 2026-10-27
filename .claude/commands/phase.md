@@ -4,15 +4,15 @@ argument-hint: "[phase number or name]"
 ---
 
 Implement roadmap item: $ARGUMENTS (e.g. `A1`, `A3`; if empty, the first
-item in the progress table of `docs/plan.md` §5 that is not done, not an
+item in the progress table of `docs/plan.md` §2 (it lists only open items) that is not an
 owner task and not waiting for the owner; the roadmap in §4 is in order).
 
-1. **Read the plan.** Read `docs/plan.md` (the item in §4 and the progress
-   table in §5), then `docs/architecture.md` for the
+1. **Read the plan.** Read `docs/plan.md` (the item in §2 and the progress
+   table there), then `docs/architecture.md` for the
    current layout. Check the code
    for anything the docs claim that is no longer true.
-2. **Plan in `docs/` first.** Write the item's design (a "Design" bullet
-   under it) in `docs/plan.md` §4 before touching code. The plan must live in the
+2. **Plan in `docs/` first.** Write the item's design (a "Design" sub-bullet
+   under it) in `docs/plan.md` §2 before touching code. The plan must live in the
    repo docs, never only in a plan file. If the scope is ambiguous, ask before
    implementing.
 3. **Implement in small steps**, following `AGENTS.md`:

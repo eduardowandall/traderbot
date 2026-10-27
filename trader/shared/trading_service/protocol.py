@@ -64,6 +64,12 @@ class OrderReply:
     order: Order | None = None
     reasons: tuple[str, ...] = ()
     error: str | None = None
+    # A29: uma recusa por janela móvel (limite diário, trades por hora, perda
+    # diária) diz em quantos segundos ela libera; None: sem janela
+    retry_after: float | None = None
+    # A21: o bucket depois da ordem, de um trade-runner (o `submit` o manda
+    # junto); None no serviço local ou de um `serve` anterior
+    snapshot: BucketSnapshot | None = None
 
     @property
     def filled(self) -> bool:
@@ -74,8 +80,10 @@ class OrderReply:
         return cls(ReplyStatus.FILLED, order=order)
 
     @classmethod
-    def of_denial(cls, reasons: tuple[str, ...]) -> OrderReply:
-        return cls(ReplyStatus.DENIED, reasons=reasons)
+    def of_denial(
+        cls, reasons: tuple[str, ...], retry_after: float | None = None
+    ) -> OrderReply:
+        return cls(ReplyStatus.DENIED, reasons=reasons, retry_after=retry_after)
 
     @classmethod
     def of_rejection(cls, reason: str) -> OrderReply:

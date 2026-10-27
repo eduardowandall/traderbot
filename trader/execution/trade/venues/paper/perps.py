@@ -3,8 +3,9 @@
 Uma posição por mercado e lado (como na Jupiter), guardada em `perps` no
 `paper-wallet.json`; o colateral sai e volta pelo token de cotação da
 carteira simulada, e cada envio paga a taxa de rede em SOL como o spot do
-paper. O preço é o do oráculo do processo (o hub): o preço spot faz o papel
-do oráculo do venue.
+paper; a primeira abertura de um mercado e lado paga também o rent da conta
+da posição, que a Jupiter nunca fecha (A25). O preço é o do oráculo do
+processo (o hub): o preço spot faz o papel do oráculo do venue.
 
 As contas são as de `trader/shared/models/perp.py`: 0.06% do tamanho em
 cada ponta mais um impacto linear no tamanho, o empréstimo por hora sobre o
@@ -40,7 +41,12 @@ from trader.execution.models.intent import (
     SentTx,
     announce_send,
 )
-from trader.execution.models.perp import PerpTerms, stop_level
+from trader.execution.models.perp import (
+    PERP_POSITION_RENT_LAMPORTS,
+    PerpTerms,
+    open_sol_lamports,
+    stop_level,
+)
 from trader.execution.models.venue import Liquidation, PerpSweep
 from trader.execution.trade.venues.paper.executor import DEFAULT_FEE_LAMPORTS
 from trader.execution.trade.venues.paper.wallet import (
@@ -73,6 +79,8 @@ BORROW_RATE_TTL = timedelta(minutes=5)
 BORROW_READ_TIMEOUT_SECONDS = 5
 # impacto: bps do tamanho a cada 10 mil USD de tamanho
 DEFAULT_IMPACT_BPS_PER_10K = Decimal(1)
+# o rent da conta de uma posição (A25)
+DEFAULT_PERP_POSITION_RENT_LAMPORTS = PERP_POSITION_RENT_LAMPORTS
 ONE = Decimal(1)
 
 
@@ -108,6 +116,7 @@ class SimulatedPerpsVenue:
         clock: Callable[[], datetime] = partial(datetime.now, UTC),
         # a taxa de verdade do mercado (A10); None: `borrow_bps_hour` sempre
         borrow_rates: BorrowRates | None = None,
+        position_rent_lamports: int = DEFAULT_PERP_POSITION_RENT_LAMPORTS,
     ):
         self.wallet = wallet
         self.price_of = price_fn(prices)
@@ -118,11 +127,17 @@ class SimulatedPerpsVenue:
         self.impact_bps_per_10k = impact_bps_per_10k
         self.clock = clock
         self.borrow_rates = borrow_rates
+        self.position_rent_lamports = position_rent_lamports
         # mint -> (taxa, quando foi lida): a última leitura boa
         self._rates: dict[str, tuple[Decimal, datetime]] = {}
         # posição -> raw do colateral que volta: saídas do venue (o stop dele,
         # uma liquidação) informadas e ainda não registradas (`acknowledge`)
         self._exits: dict[str, int] = {}
+        # id do dict `fill` de um registro -> (o dict, a entrada, opened_at):
+        # decodificar a cada tick custava ~40% de um backtest de perp (A37).
+        # Registros nunca mudam no lugar (um novo vem com outro dict), e o
+        # paper relê o arquivo em dicts novos: a identidade não engana
+        self._decoded: dict[int, tuple[dict, PerpFill, datetime]] = {}
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.wallet.path})"
@@ -145,12 +160,19 @@ class SimulatedPerpsVenue:
             "collateral_mint": collateral_mint,
             "size_raw": size_raw,
         }
+        held = position_key(terms)
+        # a primeira abertura do mercado e lado cria a conta da posição (A25)
+        rent = (
+            self.position_rent_lamports if self.wallet.needs_perp_account(held) else 0
+        )
         result = self._result(
-            _signature(), collateral_mint, terms, posted, size_raw, fill
+            _signature(), collateral_mint, terms, posted, size_raw, fill, rent=rent
         )
         self._announce(result, PerpSendKind.OPEN)
-        moves = {collateral_mint: -posted, SOL_MINT: -self.fee_lamports}
-        self.wallet.apply_perp(position_key(terms), record, moves, result.signature)
+        moves = {collateral_mint: -posted, SOL_MINT: -self.fee_lamports - rent}
+        self.wallet.apply_perp(
+            held, record, moves, result.signature, rent_lamports=rent
+        )
         return result
 
     async def close_perp(
@@ -199,11 +221,8 @@ class SimulatedPerpsVenue:
     def _held(self, record: dict) -> PerpFill:
         """A posição agora: o colateral menos o empréstimo até aqui, e a
         liquidação desse colateral."""
-        entry = perp_from_dict(record["fill"])
-        assert entry is not None
-        borrow = entry.borrow_at(
-            datetime.fromisoformat(record["opened_at"]), self.clock()
-        )
+        entry, opened_at = self._decode(record)
+        borrow = entry.borrow_at(opened_at, self.clock())
         return with_collateral(entry, -borrow, self._fees(entry.size_usd))
 
     async def check_fresh(self, terms: PerpTerms) -> None:
@@ -247,6 +266,14 @@ class SimulatedPerpsVenue:
 
     async def has_position(self, terms: PerpTerms) -> bool:
         return position_key(terms) in self.wallet.perps()
+
+    async def open_sol_lamports(self, terms: PerpTerms) -> int | None:
+        """O SOL que o real travaria e pagaria (A26): o paper confere o mesmo
+        contra a carteira dele."""
+        new = self.wallet.needs_perp_account(position_key(terms))
+        return open_sol_lamports(
+            self.position_rent_lamports if new else 0, self.fee_lamports
+        )
 
     async def open_markets(self) -> list[tuple[str, Direction]]:
         return [_market_of(key) for key in self.wallet.perps()]
@@ -329,17 +356,19 @@ class SimulatedPerpsVenue:
         self, sent: SentTx, terms: PerpTerms
     ) -> ExecutionResult | None:
         """O envio está no registro da carteira (quem chama já conferiu): o
-        resultado é o que foi gravado antes dele."""
+        resultado é o que foi gravado antes dele, com o rent que o registro
+        tem (a abertura que criou a conta da posição, A25)."""
         perp = sent.perp
         if perp is None:
             raise ValueError(f"envio {sent.signature} sem o pedido da perp")
+        applied = self.wallet.applied(sent.signature) or {}
         return ExecutionResult(
             sent.signature,
             sent.input_mint,
             sent.output_mint,
             sent.in_amount,
             sent.out_amount,
-            costs=self._costs(),
+            costs=self._costs(applied.get("rent", 0)),
             perp=perp_from_dict(perp.fill),
             venue_order=perp.request,
         )
@@ -405,9 +434,7 @@ class SimulatedPerpsVenue:
 
     def _exit(self, record: dict, price: Decimal) -> PerpFill:
         """A saída a `price` agora: o que volta, ou a liquidação (nada volta)."""
-        entry = perp_from_dict(record["fill"])
-        assert entry is not None
-        opened_at = datetime.fromisoformat(record["opened_at"])
+        entry, opened_at = self._decode(record)
         borrow = entry.borrow_at(opened_at, self.clock())
         fees = self._fees(entry.size_usd)
         equity = entry.equity(price, borrow, fees)
@@ -422,6 +449,19 @@ class SimulatedPerpsVenue:
             liquidated=liquidated,
         )
 
+    def _decode(self, record: dict) -> tuple[PerpFill, datetime]:
+        """A entrada do registro e quando abriu, decodificadas uma vez."""
+        fill = record["fill"]
+        hit = self._decoded.get(id(fill))
+        if hit is None or hit[0] is not fill:
+            entry = perp_from_dict(fill)
+            assert entry is not None
+            if len(self._decoded) > 64:  # o paper relê o arquivo: só dicts mortos
+                self._decoded.clear()
+            hit = (fill, entry, datetime.fromisoformat(record["opened_at"]))
+            self._decoded[id(fill)] = hit
+        return hit[1], hit[2]
+
     async def _price(self, market_mint: str) -> Decimal:
         price = await self.price_of(market_mint)
         if not price:
@@ -429,11 +469,12 @@ class SimulatedPerpsVenue:
             raise SwapRejectedError(f"sem preço de {symbol} para a perp")
         return price
 
-    def _costs(self) -> TradeCosts:
+    def _costs(self, rent: int = 0) -> TradeCosts:
         return TradeCosts(
             source=SIMULATED,
             fee_lamports=self.fee_lamports,
             priority_fee_lamports=self.priority_fee_lamports,
+            rent_lamports=rent,
         )
 
     def _result(
@@ -445,6 +486,7 @@ class SimulatedPerpsVenue:
         out_amount: int,
         fill: PerpFill,
         closing: bool = False,
+        rent: int = 0,
     ) -> ExecutionResult:
         # entrada: colateral -> mercado; saída: mercado -> colateral
         spend, receive = collateral_mint, terms.market_mint
@@ -456,7 +498,7 @@ class SimulatedPerpsVenue:
             receive,
             in_amount,
             out_amount,
-            costs=self._costs(),
+            costs=self._costs(rent),
             perp=fill,
         )
 

@@ -12,11 +12,13 @@ porque não há dinheiro de verdade em jogo.
 
 import hashlib
 import logging
+import math
 import os
 import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -96,6 +98,13 @@ class PolicyState:
     daily_realized_pnl_usd: Decimal = Decimal("0")
     consecutive_failures: int = 0
     unresolved_intent_ids: tuple[str, ...] = ()
+    # A29: quando os agregados foram lidos e o registro mais antigo que cada
+    # janela móvel conta (None: desconhecido; a recusa não diz quando passa)
+    as_of: datetime | None = None
+    daily_notional_since: datetime | None = None
+    trades_last_hour_since: datetime | None = None
+    account_trades_last_hour_since: datetime | None = None
+    daily_loss_since: datetime | None = None  # a perda realizada mais antiga
 
 
 def _decimal(key: str, value) -> Decimal:
@@ -333,6 +342,27 @@ def _perp_entry(c: _Check) -> Iterator[str]:
         yield f"mercado perp não permitido: {market}"
 
 
+_DAY = timedelta(hours=24)
+_HOUR = timedelta(hours=1)
+# A29: as regras de janela móvel e o que cada uma conta: a recusa passa
+# quando o registro mais antigo sai da janela (um piso: no fim dele a ordem
+# pergunta de novo). As outras recusas (valor máximo, mints...) não têm janela.
+_WINDOWS: dict[Rule, Callable[[PolicyState], tuple[datetime | None, timedelta]]] = {
+    _daily_notional: lambda s: (s.daily_notional_since, _DAY),
+    _trades_per_hour: lambda s: (s.trades_last_hour_since, _HOUR),
+    _bucket_trades_per_hour: lambda s: (s.account_trades_last_hour_since, _HOUR),
+    _daily_loss: lambda s: (s.daily_loss_since, _DAY),
+}
+
+
+def _window_wait(rule: Rule, state: PolicyState) -> float | None:
+    """Segundos (>= 1) até a janela da regra liberar; None sem janela conhecida."""
+    since, window = _WINDOWS[rule](state) if rule in _WINDOWS else (None, _DAY)
+    if since is None or state.as_of is None:
+        return None
+    return max(1.0, math.ceil((since + window - state.as_of).total_seconds()))
+
+
 # valem para todo envio da carteira, swap ou não (A15: fechar uma conta)
 _SEND_RULES = (_real_mode, _unresolved, _circuit_breaker)
 # valem para toda intenção, inclusive vendas
@@ -373,10 +403,20 @@ def evaluate(
     real_mode: bool,
 ) -> PolicyDecision:
     check = _Check(policy, state, real_mode, intent)
-    rules = _rules_for(intent.side)
-    reasons = tuple(reason for rule in rules for reason in rule(check))
+    reasons: list[str] = []
+    waits: list[float] = []
+    for rule in _rules_for(intent.side):
+        refused = tuple(rule(check))
+        reasons += refused
+        wait = _window_wait(rule, state) if refused else None
+        if wait is not None:
+            waits.append(wait)
     return PolicyDecision(
-        allowed=not reasons, reasons=reasons, policy_version=policy.version
+        allowed=not reasons,
+        reasons=tuple(reasons),
+        policy_version=policy.version,
+        # A29: a recusa por janela móvel diz quando a mais longa libera
+        retry_after=max(waits, default=None),
     )
 
 

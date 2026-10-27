@@ -14,8 +14,8 @@ from decimal import Decimal
 
 from trader.shared import logging_config
 from trader.shared.models import SOLANA_MINTS
-from trader.shared.models.costs import describe_costs
-from trader.shared.models.order import Order
+from trader.shared.models.costs import describe_costs, sol_text
+from trader.shared.models.order import Order, OrderSide
 from trader.shared.models.perp import describe_fill
 from trader.shared.models.position import Position
 from trader.shared.trading_service.protocol import (
@@ -33,6 +33,20 @@ bot_logger = logging.getLogger("bot")
 
 # falhas seguidas de inicialização antes de avisar o dono
 STARTUP_ALERT_AFTER = 5
+# A29: a espera mais longa que uma recusa com janela impõe; no fim dela a
+# ordem pergunta de novo (e recebe a espera nova)
+MAX_DENIAL_WAIT = 3600.0
+
+
+def wait_text(seconds: float) -> str:
+    """Uma espera legível: `30s`, `12 min`, `1h05`."""
+    total = round(seconds)
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{round(total / 60)} min"
+    hours, rest = divmod(total, 3600)
+    return f"{hours}h{rest // 60:02d}"
 
 
 class TradingBot:
@@ -47,6 +61,7 @@ class TradingBot:
         self.trader = config.trader
         self.notification_service = config.notifier
         self.on_tick = config.on_tick
+        self.ticks = config.ticks
         self.is_running = False
         self._opened = False  # bucket aberto (uma vez só)
         self._resumed = False  # estado da estratégia restaurado (uma vez só)
@@ -64,11 +79,17 @@ class TradingBot:
         # recebendo os preços normalmente)
         self.denial_cooldown = 30.0
         self.monotonic = time.monotonic
-        self._orders_paused_until = 0.0
+        # por lado (A29): uma compra recusada por uma janela de 24 h não
+        # pode segurar o stop de uma venda
+        self._orders_paused_until: dict[OrderSide, float] = {}
         # preço e posição vão ao log uma vez por barra (F3), não por tick
         self.wall_clock = time.time
         self._bar_seconds = 1
         self._logged_bar: int | None = None
+        # a linha do bucket só sai quando muda (A32: repetia a cada barra)
+        self._logged_bucket: str | None = None
+        # A21: o bucket depois do último fill, se a resposta o trouxe
+        self._after_fill: BucketSnapshot | None = None
 
     async def process_market_data(
         self, current_price: Decimal, snapshot: BucketSnapshot
@@ -78,23 +99,36 @@ class TradingBot:
             self.is_running = False
             return None
         request = order_for(self.strategy, current_price, snapshot)
-        if request is None or self.monotonic() < self._orders_paused_until:
+        if request is None:
             return None
-        return await self._handle_reply(await self.trader.submit(request))
+        if self.monotonic() < self._orders_paused_until.get(request.side, 0.0):
+            return None
+        reply = await self.trader.submit(request)
+        return await self._handle_reply(reply, request.side)
 
-    async def _handle_reply(self, reply: OrderReply) -> Order | None:
+    async def _handle_reply(self, reply: OrderReply, side: OrderSide) -> Order | None:
         if reply.status == ReplyStatus.ERROR:
             # falha inesperada: passa pelo backoff do loop
             raise TradeServiceError(reply.error or "erro no serviço de trading")
+        self._after_fill = reply.snapshot
         if not reply.filled:
             # recusa esperada (política, saldo, orçamento): não é erro do bot
+            wait = self._denial_wait(reply)
             self.logger.warning(
                 f"Ordem {reply.status}: {'; '.join(reply.reasons)} "
-                f"(novas ordens em {self.denial_cooldown:.0f}s)"
+                f"(novas ordens em {wait_text(wait)})"
             )
-            self._orders_paused_until = self.monotonic() + self.denial_cooldown
+            self._orders_paused_until[side] = self.monotonic() + wait
             return None
         return reply.order
+
+    def _denial_wait(self, reply: OrderReply) -> float:
+        """Quanto não pedir ordens do lado: a janela da recusa (A29, até 1 h), ou
+        `denial_cooldown` para uma recusa sem janela (orçamento, valor
+        máximo, saldo) ou de um `serve` que não a manda."""
+        if reply.retry_after is None:
+            return self.denial_cooldown
+        return min(max(reply.retry_after, 1.0), MAX_DENIAL_WAIT)
 
     def stop(self):
         """Para o bot"""
@@ -185,10 +219,17 @@ class TradingBot:
             last_exit_price=snapshot.last_exit_price,
         )
 
-    async def _tick(self):
-        # no token de cotação do par (o feed divide, num par sem stablecoin)
+    async def _read_tick(self) -> tuple[Decimal, BucketSnapshot]:
+        """O preço (no token de cotação do par) e o bucket: uma ida e volta
+        com `ticks` (A21), senão o feed e o bucket em separado."""
+        if self.ticks is not None:
+            return await self.ticks.tick(self.output_mint)
+        # o feed divide, num par sem stablecoin
         current_price = await self.market.get_price(self.output_mint)
-        snapshot = await self.trader.bucket()
+        return current_price, await self.trader.bucket()
+
+    async def _tick(self):
+        current_price, snapshot = await self._read_tick()
         if self.on_tick is not None:
             # o replay mede o patrimônio em USD com o USD da cotação
             self.on_tick(datetime.now(UTC), current_price, snapshot.quote_usd)
@@ -196,7 +237,7 @@ class TradingBot:
 
         order = await self.process_market_data(current_price, snapshot)
         if order:
-            await self._report_order(order, current_price)
+            await self._report_order(order, current_price, snapshot.position)
 
     def _log_bar(self, price: Decimal, snapshot: BucketSnapshot):
         """Preço e posição no primeiro tick de cada barra do timeframe."""
@@ -204,15 +245,24 @@ class TradingBot:
         if bar == self._logged_bar:
             return
         self._logged_bar = bar
-        log_ticker(self.symbol, price, snapshot.pnl_summary)
-        if snapshot.position:
-            log_position(snapshot.position, price, snapshot.quote_usd)
+        bucket = with_entry_costs(snapshot)
+        if bucket != self._logged_bucket:
+            self._logged_bucket = bucket
+            log_bucket(bucket)
+        log_ticker(self.symbol, price, snapshot.position, snapshot.quote_usd)
 
-    async def _report_order(self, order: Order, current_price: Decimal):
-        log_placed_order(order)
-        # o bucket depois do fill: PnL realizado e, com posição, a marcação
-        after = await self.trader.bucket()
+    async def _report_order(
+        self, order: Order, current_price: Decimal, held: Position | None = None
+    ):
+        """`held`: a posição antes do fill; numa venda de perp, a linha diz o
+        que o fechamento fez no preço e pagou ao venue (A31)."""
+        closed = round_trip_line(held, order)
+        log_placed_order(order, closed)
+        # o bucket depois do fill: PnL realizado e, com posição, a marcação;
+        # o trade-runner o manda na resposta (A21)
+        after = self._after_fill or await self.trader.bucket()
         perp = "" if order.perp is None else f"\n{describe_fill(order.perp)}"
+        perp += f"\n{closed}" if closed else ""
         self.notification_service.send_message(
             f"Ordem executada: {order.side.upper()} "
             f"{order.quantity:.8f} {self.symbol} @ "
@@ -254,22 +304,60 @@ def format_price(price: Decimal, digits: int = PRICE_DIGITS) -> str:
     return f"{price:.{places}f}"
 
 
-def log_ticker(symbol: str, price: Decimal, pnl_summary: str | None = None):
-    # no token de cotação do par (USD em USDC/USDT)
-    suffix = f" {pnl_summary}" if pnl_summary else ""
+def log_ticker(
+    symbol: str,
+    price: Decimal,
+    position: Position | None = None,
+    quote_usd: Decimal | None = None,
+):
+    """Uma linha por barra (A32): o preço (no token de cotação) e a posição."""
+    held = "sem posição"
+    if position is not None:
+        held = position_text(position, price, quote_usd, datetime.now(UTC))
     bot_logger.debug(
-        f"[blue]{symbol}[/blue] @ {format_price(price)}.{suffix}",
+        f"[blue]{symbol}[/blue] {format_price(price)} | {held}",
         extra={"markup": True},
     )
 
 
-def log_placed_order(order: Order):
+def log_bucket(summary: str) -> None:
+    """O PnL realizado do bucket (e os custos da entrada aberta)."""
+    bot_logger.info(f"bucket: {summary}")
+
+
+def short_signature(signature: str) -> str:
+    """O começo e o fim de uma assinatura (a inteira vai na linha dos custos)."""
+    if len(signature) <= 16:
+        return signature
+    return f"{signature[:8]}...{signature[-6:]}"
+
+
+def log_placed_order(order: Order, closed: str | None = None):
+    suffix = f" {closed}" if closed else ""
     bot_logger.info(
-        f"[gray]{order.side.upper()}[/gray] {order.quantity:.8f} @ "
-        f"${order.price:.8f} [gray]({order.order_id})[/gray]",
+        f"[bold]{order.side.upper()}[/bold] {order.quantity:.8f} @ "
+        f"${format_price(order.price)} [gray]({short_signature(order.order_id)})"
+        f"[/gray]{suffix}",
         extra={"markup": True},
     )
-    bot_logger.debug(describe_costs(order.costs, order.sol_usd))
+    bot_logger.debug(
+        f"{describe_costs(order.costs, order.sol_usd)}; tx {order.order_id}"
+    )
+
+
+def round_trip_line(held: Position | None, order: Order) -> str | None:
+    """Numa venda de perp, o que o fechamento fez (A31): o bruto aberto em
+    preço, taxas do venue (abertura e fechamento) e empréstimo, e a rede em
+    SOL. None no spot, numa compra ou sem os valores das pernas."""
+    if held is None or order.side != OrderSide.SELL:
+        return None
+    pnl = Position(held.entry_order, order).realized_pnl_detail()
+    if pnl is None or pnl.price_quote is None:
+        return None
+    return (
+        f"fechamento: bruto {pnl.gross_quote:+.6f} {pnl.quote_symbol}"
+        f"{pnl.perp_split()}, rede {pnl.costs_sol:.9f} SOL"
+    )
 
 
 def bucket_line(snapshot: BucketSnapshot, price: Decimal) -> str:
@@ -278,26 +366,75 @@ def bucket_line(snapshot: BucketSnapshot, price: Decimal) -> str:
     `price` é no token de cotação; a marcação é em USD (sem o preço USD da
     cotação, fica de fora).
     """
-    line = snapshot.pnl_summary
+    line = with_entry_costs(snapshot)
+    now = datetime.now(UTC)
     if snapshot.position is not None and snapshot.quote_usd:
-        unrealized = snapshot.position.unrealized_usd(price * snapshot.quote_usd)
+        # numa perp, com o empréstimo acumulado (A31)
+        unrealized = snapshot.position.unrealized_usd(price * snapshot.quote_usd, now)
         line += f"; aberto ~${unrealized:+.4f} a {price:.8f}"
-    perp = snapshot.position and snapshot.position.perp_line(datetime.now(UTC))
+    perp = snapshot.position and snapshot.position.perp_line(now)
     return f"{line}; {perp}" if perp else line
 
 
-def log_position(position: Position, current_price: Decimal, quote_usd: Decimal | None):
-    # a posição aberta do bucket (o snapshot nunca traz uma fechada)
-    pnl = position.unrealized_pnl_percent(current_price)
-    pnl_style = "green" if pnl > 0 else "red"
-    pnl_str = f"[{pnl_style}]{pnl:.2f}%[/{pnl_style}]"
-    usd = position.unrealized_usd(current_price * quote_usd) if quote_usd else None
-    unrealized = "" if usd is None else f" (~${usd:+.4f})"
+def with_entry_costs(snapshot: BucketSnapshot) -> str:
+    """O PnL realizado e, com posição aberta, os custos da entrada (A27): o
+    resumo do bucket só os conta no fechamento, e leria `custos 0` até lá."""
+    entry = entry_costs(snapshot.position)
+    if not entry:
+        return snapshot.pnl_summary
+    return f"{snapshot.pnl_summary}; {entry}" if snapshot.pnl_summary else entry
 
+
+def entry_costs(position: Position | None) -> str | None:
+    """Os custos da entrada aberta: rede e rent em SOL, as taxas da perp."""
+    if position is None:
+        return None
+    order = position.entry_order
+    parts = []
+    if order.costs is not None and order.costs.known:
+        costs = order.costs
+        rent = f" (rent {sol_text(costs.rent_lamports)})" if costs.rent_lamports else ""
+        parts.append(f"custos {sol_text(costs.native_cost_lamports)} SOL{rent}")
+    if order.perp is not None:
+        parts.append(f"taxas perp ${order.perp.fees_usd:.4f}")
+    return f"entrada: {', '.join(parts)}" if parts else None
+
+
+def _styled(percent: Decimal) -> str:
+    style = "green" if percent > 0 else "red"
+    return f"[{style}]{percent:.2f}%[/{style}]"
+
+
+def position_pnl(
+    position: Position, price: Decimal, quote_usd: Decimal | None, now: datetime
+) -> str:
+    """O PnL aberto: o movimento do preço e, numa perp, o retorno sobre o
+    colateral postado (A31), com a marcação em USD. A da perp já desconta o
+    empréstimo até agora e as taxas (a da abertura e a de fechar agora)."""
+    move = _styled(position.unrealized_pnl_percent(price))
+    if not quote_usd:
+        return move
+    usd = position.unrealized_usd(price * quote_usd, now)
+    roc = position.return_on_collateral(price * quote_usd, now)
+    if roc is None:
+        return f"{move} (~${usd:+.4f})"
+    # o USD já desconta as taxas e o empréstimo (docs/specs.md, A32)
+    return f"preço {move}, colateral {_styled(roc)} ~${usd:+.4f}"
+
+
+def position_text(
+    position: Position, price: Decimal, quote_usd: Decimal | None, now: datetime
+) -> str:
+    """A posição aberta: lado, tamanho, entrada, PnL e, numa perp, a
+    liquidação e o empréstimo."""
+    pnl = position_pnl(position, price, quote_usd, now)
+    entry = position.entry_order
     side = str(position.direction).upper()
-    perp = position.perp_line(datetime.now(UTC))
-    extra = f" [{perp}]" if perp else ""
-    bot_logger.debug(
-        f"{side} {position.entry_order.quantity:.8f} @ {format_price(position.entry_order.quote_price)}. PNL: {pnl_str}{unrealized}{extra}",
-        extra={"markup": True},
-    )
+    held = f"{entry.quantity:.8f} @ {format_price(entry.quote_price)}"
+    perp = entry.perp
+    if perp is None:
+        return f"{side} {held} | {pnl}"
+    borrow = perp.borrow_at(entry.timestamp, now)
+    liquidation = perp.liquidation_price
+    risk = "" if liquidation is None else f"liq {format_price(liquidation, 6)}, "
+    return f"{side} {perp.leverage}x {held} | {pnl} | {risk}empréstimo ${borrow:.4f}"

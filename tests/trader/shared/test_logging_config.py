@@ -65,8 +65,22 @@ def test_console_filter_allows_bot_logs_and_warnings_only():
 
     assert f.filter(record("bot", logging.DEBUG))
     assert f.filter(record("trader.strategy.spec.strategy", logging.DEBUG))
-    assert not f.filter(record("trader.execution.trade.accounts.spot", logging.INFO))
-    assert f.filter(record("trader.execution.trade.accounts.spot", logging.WARNING))
+    # A32: os fills do `serve` (INFO nas contas) aparecem; o DEBUG delas não
+    assert f.filter(record("trader.execution.trade.accounts.spot", logging.INFO))
+    assert not f.filter(record("trader.execution.trade.accounts.spot", logging.DEBUG))
+    assert not f.filter(record("trader.execution.trade.gateway.fills", logging.INFO))
+    assert f.filter(record("trader.execution.trade.gateway.fills", logging.WARNING))
+
+
+def test_the_file_gets_plain_text_without_rich_markup():
+    # A32: o arquivo mostrava `[blue]SOL-USDC[/blue]`
+    formatter = logging_config.PlainFileFormatter("%(message)s")
+    record = logging.LogRecord("bot", logging.DEBUG, __file__, 1, "x", None, None)
+    record.msg = "[blue]SOL-USDC[/blue] 104.5 | [red]-2.46%[/red] [1/2]"
+    record.markup = True
+    assert formatter.format(record) == "SOL-USDC 104.5 | -2.46% [1/2]"
+    plain = logging.LogRecord("x", logging.INFO, __file__, 1, "[blue]a", None, None)
+    assert formatter.format(plain) == "[blue]a"  # sem `markup`, como veio
 
 
 def test_file_lines_carry_the_bot_name(tmp_path):

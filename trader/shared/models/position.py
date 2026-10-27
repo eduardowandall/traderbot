@@ -6,7 +6,11 @@ from trader.shared.models.costs import PnLResult
 from trader.shared.models.direction import Direction
 from trader.shared.models.mints import SOLANA_MINTS
 from trader.shared.models.order import Order
-from trader.shared.models.perp import describe_open
+from trader.shared.models.perp import (
+    describe_open,
+    return_on_collateral,
+    venue_costs,
+)
 
 ZERO = Decimal("0")
 
@@ -72,16 +76,17 @@ class Position:
         move = current_price - self.entry_order.quote_price
         return self.direction.sign * move * self.entry_order.quantity
 
-    def unrealized_usd(self, price: Decimal) -> Decimal:
+    def unrealized_usd(self, price: Decimal, now: datetime | None = None) -> Decimal:
         """Marcação a mercado: o que vender agora realizaria, em USD.
 
         Valor ao preço menos o custo da entrada em USD e os custos conhecidos
         dela; os custos da saída ainda não existem. Sem taxas na ordem, o
-        custo é preço x quantidade da entrada.
+        custo é preço x quantidade da entrada. Numa perp, `now` desconta o
+        empréstimo acumulado até ali (A31; sem ele, fica de fora).
         """
         entry = self.entry_order
         if entry.perp is not None:
-            return _perp_unrealized(entry, price)
+            return _perp_unrealized(entry, price, now)
         cost = None
         if entry.quote_amount is not None:
             cost = _times(entry.quote_amount, entry.quote_usd)
@@ -129,7 +134,17 @@ class Position:
             ),
             costs_usd=_plus(entry_costs[2], exit_costs[2]),
             complete=_complete(entry_costs, exit_costs),
+            **_perp_costs(entry, exit_, fraction),
         )
+
+    def return_on_collateral(self, price: Decimal, now: datetime) -> Decimal | None:
+        """Numa perp, a marcação (com o empréstimo e as taxas) em % do
+        colateral postado (A31): a 150x, 0.5% de preço são ~75% dele. None no
+        spot ou sem o colateral. `price` em USD."""
+        entry = self.entry_order
+        if entry.perp is None or entry.quote_amount is None:
+            return None
+        return return_on_collateral(self.unrealized_usd(price, now), entry.quote_amount)
 
     def unrealized_pnl_percent(self, current_price: Decimal) -> Decimal:
         """Calcula o PnL não realizado em percentual"""
@@ -146,16 +161,27 @@ class Position:
         )
 
 
-def _perp_unrealized(entry: Order, price: Decimal) -> Decimal:
-    """Perp: o patrimônio a `price` (sem o empréstimo) menos o colateral postado.
+def _perp_unrealized(entry: Order, price: Decimal, now: datetime | None) -> Decimal:
+    """Perp: o patrimônio a `price` menos o colateral postado e a rede.
 
-    O colateral é o token de cotação, uma stablecoin (USD).
+    O patrimônio desconta a taxa de fechamento e, com `now`, o empréstimo
+    acumulado (A31). O colateral é o token de cotação, uma stablecoin (USD).
     """
     perp = entry.perp
     assert perp is not None
     posted = entry.quote_amount if entry.quote_amount is not None else ZERO
     fees = _times(entry.costs.native_cost_sol, entry.sol_usd) if entry.costs else None
-    return perp.equity(price) - posted - (fees or ZERO)
+    borrow = ZERO if now is None else perp.borrow_at(entry.timestamp, now)
+    return perp.equity(price, borrow) - posted - (fees or ZERO)
+
+
+def _perp_costs(entry: Order, exit_: Order, fraction: Decimal) -> dict:
+    """Numa perp, as taxas do venue e o empréstimo do fechamento (A31), no
+    token de cotação (o colateral, uma stablecoin); vazio no spot."""
+    if entry.perp is None or exit_.perp is None or entry.quote_amount is None:
+        return {}
+    fees, borrow = venue_costs(entry.quote_amount, entry.perp, exit_.perp, fraction)
+    return {"perp_fees_quote": fees, "perp_borrow_quote": borrow}
 
 
 def _complete(entry_costs, exit_costs) -> bool:

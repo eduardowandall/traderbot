@@ -7,7 +7,7 @@ errors in the spec; the mode's policy limits are checked by the trade-runner
 
 Usage (from the project root):
     uv run --no-sync python .claude/scripts/spec_check.py SPEC.json
-        [--candles 1000 | --ticks FILE]
+        [--candles 1000 | --ticks FILE | --scenario ID|tag:NAME|all ...]
 """
 
 import argparse
@@ -41,6 +41,8 @@ def _parse_args() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--candles", type=int, default=1000)
     source.add_argument("--ticks", type=Path)
+    # A35: windows of the catalog (docs/scenarios.json); repeatable
+    source.add_argument("--scenario", action="append")
     return parser.parse_args()
 
 
@@ -59,17 +61,42 @@ def _backtest(spec: Path, source: list[str]) -> dict:
         return {"ok": False, "errors": [{"path": "", "msg": stderr[-2000:]}]}
 
 
+def _source(args: argparse.Namespace) -> list[str]:
+    if args.scenario:
+        return [arg for name in args.scenario for arg in ("--scenario", name)]
+    if args.ticks:
+        return ["--ticks", str(args.ticks)]
+    return ["--candles", str(args.candles)]
+
+
+def _print_scenarios(result: dict) -> None:
+    """One line per window (its return, drawdown, trades and flags), then the
+    summary."""
+    for row in result["windows"]:
+        if "error" in row:
+            print(f"{row['id']}: error: {row['error'][:200]}")
+            continue
+        r = row["result"]
+        print(
+            f"{row['id']}: return {r['return_pct']}%, drawdown "
+            f"{r['max_drawdown_pct']}%, {r['closed_trades']} trades, pair "
+            f"{row['stats']['return_pct']:+.1f}%, vs hold {row['vs_hold_pct']:+.1f}%, "
+            f"flags {row['flags']}"
+        )
+    print("summary:", json.dumps(result["summary"], indent=2))
+
+
 def main() -> int:
     # the Windows console is cp1252; Claude reads UTF-8 and nothing may crash
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     args = _parse_args()
-    source = (
-        ["--ticks", str(args.ticks)] if args.ticks else ["--candles", str(args.candles)]
-    )
-    result = _backtest(args.spec, source)
+    result = _backtest(args.spec, _source(args))
     if not result.get("ok"):
         print("backtest:", json.dumps(result, indent=2))
         return 1
+    if args.scenario:
+        _print_scenarios(result)
+        return 0
     print("backtest:", json.dumps({k: result.get(k) for k in METRICS}, indent=2))
     trades = result.get("trades", [])
     print(f"trades ({len(trades)}, first {SHOWN_TRADES}):")

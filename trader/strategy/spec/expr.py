@@ -2,8 +2,9 @@
 
 O `ast` do Python faz a leitura (`ast.parse(mode="eval")`: precedência,
 parênteses, espaços); daqui só sai uma árvore que passou por uma lista
-branca: números, as variáveis de `VARIABLES`, `FUNÇÃO(INTEIRO)` de
-`FUNCTIONS`, `+ - * /`, `-` unário, uma comparação (`< <= > >=`) por par de
+branca: números, as variáveis de `VARIABLES`, `FUNÇÃO(JANELA)` ou
+`FUNÇÃO(JANELA, ATRÁS)` de `FUNCTIONS` (o indicador `ATRÁS` barras fechadas
+antes, A22), `+ - * /`, `-` unário, uma comparação (`< <= > >=`) por par de
 valores, `and`, `or`, `not`. Nada mais (atributos, chamadas livres, nomes
 soltos) passa, e a árvore é avaliada aqui, nó a nó, nunca compilada.
 
@@ -15,10 +16,11 @@ três valores (desconhecido `and` falso = falso, `not` desconhecido =
 desconhecido), e só uma expressão verdadeira dispara.
 
 O texto guardado é o normalizado (`render`, o `ast.unparse`), então espaços e
-parênteses redundantes não mudam o id da spec.
+parênteses redundantes não mudam o id da spec; `ema(9, 0)` vira `ema(9)`.
 """
 
 import ast
+import copy
 import operator
 from collections.abc import Callable
 from decimal import Decimal
@@ -28,6 +30,7 @@ from trader.shared import indicators as ind
 
 MAX_LENGTH = 200
 MIN_WINDOW, MAX_WINDOW = 2, 500
+MAX_BACK = 50
 
 # atributos do contexto do tick
 VARIABLES = frozenset({"price", "entry_price", "peak", "last_exit_price"})
@@ -139,18 +142,20 @@ def _call(node: ast.Call) -> None:
     if not isinstance(node.func, ast.Name):
         raise ExprError(f"não permitido: {ast.unparse(node)!r}", _pos(node))
     _known(node.func.id, FUNCTIONS, node)
+    if node.keywords or not 1 <= len(node.args) <= 2:
+        raise ExprError("esperava (janela) ou (janela, barras atrás)", _pos(node))
+    _bars(node.args[0], "janela", MIN_WINDOW, MAX_WINDOW)
+    if len(node.args) == 2:
+        _bars(node.args[1], "barras atrás", 0, MAX_BACK)
+
+
+def _bars(node: ast.expr, what: str, low: int, high: int) -> None:
     match node:
-        case ast.Call(args=[ast.Constant(value=int() as window)], keywords=[]) if (
-            not isinstance(window, bool)
-        ):
-            if not MIN_WINDOW <= window <= MAX_WINDOW:
-                raise ExprError(
-                    f"janela {window} fora de {MIN_WINDOW}-{MAX_WINDOW}",
-                    _pos(node.args[0]),
-                )
+        case ast.Constant(value=int() as bars) if not isinstance(bars, bool):
+            if not low <= bars <= high:
+                raise ExprError(f"{what} {bars} fora de {low}-{high}", _pos(node))
         case _:
-            pos = _pos(node.args[0]) if node.args else _pos(node)
-            raise ExprError("esperava um número inteiro de barras", pos)
+            raise ExprError("esperava um número inteiro de barras", _pos(node))
 
 
 def _pos(node: ast.expr) -> int:
@@ -158,28 +163,39 @@ def _pos(node: ast.expr) -> int:
 
 
 def render(tree: ast.expr) -> str:
+    """O texto normalizado (o id da spec sai dele), sem mudar `tree`: o
+    `ast.unparse`, e `ema(9, 0)` como `ema(9)` (o mesmo comportamento)."""
+    tree = copy.deepcopy(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _indicator(node)[2] == 0:
+            del node.args[1:]
     return ast.unparse(tree)
 
 
 # --- o aquecimento ---------------------------------------------------------------
 
 
-def _calls(tree: ast.expr) -> list[tuple[str, int]]:
-    return [
-        (node.func.id, node.args[0].value)  # type: ignore[attr-defined]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-    ]
+def _indicator(node: ast.Call) -> tuple[str, int, int]:
+    """`(nome, janela, atrás)` de uma chamada conferida (sem atrás: 0)."""
+    bars = [arg.value for arg in node.args]  # type: ignore[attr-defined]
+    back = bars[1] if len(bars) > 1 else 0
+    return node.func.id, bars[0], back  # type: ignore[attr-defined]
+
+
+def _calls(tree: ast.expr) -> list[tuple[str, int, int]]:
+    return [_indicator(node) for node in ast.walk(tree) if isinstance(node, ast.Call)]
 
 
 def lookback(tree: ast.expr) -> int:
-    """Barras para todos os indicadores da expressão terem valor."""
-    return max((ind.lookback(*c) for c in _calls(tree)), default=1)
+    """Barras para todos os indicadores da expressão terem valor (`back` a mais)."""
+    calls = _calls(tree)
+    return max((ind.lookback(n, w) + back for n, w, back in calls), default=1)
 
 
 def history(tree: ast.expr) -> int:
     """Barras para todos convergirem."""
-    return max((ind.history(*c) for c in _calls(tree)), default=1)
+    calls = _calls(tree)
+    return max((ind.history(n, w) + back for n, w, back in calls), default=1)
 
 
 # --- a avaliação (só árvores que passaram por `parse`) ---------------------------
@@ -191,8 +207,8 @@ def value(node: ast.expr, ctx: Any) -> Decimal | None:
             return Decimal(repr(number))
         case ast.Name(id=name):
             return getattr(ctx, name)
-        case ast.Call(func=ast.Name(id=name), args=[ast.Constant(value=window)]):
-            return ctx.bank.get(name, window)
+        case ast.Call():
+            return ctx.bank.get(*_indicator(node))
         case ast.UnaryOp(operand=operand):
             v = value(operand, ctx)
             return None if v is None else -v

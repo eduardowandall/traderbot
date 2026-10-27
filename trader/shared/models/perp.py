@@ -7,7 +7,7 @@ tamanho no token base, `fill_price` o preço do oráculo e `quote_amount` o
 colateral postado (entrada) ou devolvido (saída); o PnL de sempre vira
 colateral devolvido - colateral postado.
 
-As taxas são as da Jupiter Perps (§8.2 do plano): 0.06% do tamanho em cada
+As taxas são as da Jupiter Perps (§8.2 em docs/history.md): 0.06% do tamanho em cada
 ponta, o empréstimo por hora sobre o tamanho e a liquidação na margem de
 manutenção (0.2% do tamanho).
 """
@@ -67,6 +67,28 @@ class PerpFill:
         """
         fee = self.close_fee() if close_fee is None else close_fee
         return self.collateral_usd + self.pnl_usd(price) - borrow - fee
+
+
+def open_fees(posted: Decimal, entry: PerpFill) -> Decimal:
+    """As taxas da abertura ainda na posição: o postado menos o colateral que
+    ficou (A31). Vale depois de colateral a mais, cujo fill repete o da
+    entrada com o colateral maior: nada conta duas vezes."""
+    return max(posted - entry.collateral_usd, ZERO)
+
+
+def venue_costs(
+    posted: Decimal, entry: PerpFill, exit_: PerpFill, fraction: Decimal
+) -> tuple[Decimal, Decimal]:
+    """(taxas, empréstimo) que um fechamento de `fraction` da posição pagou ao
+    venue (A31): a parte dela das taxas da abertura mais as do fechamento, e
+    o empréstimo cobrado no fechamento. `posted` é o da posição inteira."""
+    return open_fees(posted, entry) * fraction + exit_.fees_usd, exit_.borrow_usd
+
+
+def return_on_collateral(pnl: Decimal, posted: Decimal) -> Decimal | None:
+    """O PnL em % do colateral postado (A31; a alavancagem multiplica o
+    movimento do preço); None sem colateral."""
+    return None if not posted else pnl / posted * 100
 
 
 def liquidation_price(fill: PerpFill, close_fee: Decimal | None = None) -> Decimal:

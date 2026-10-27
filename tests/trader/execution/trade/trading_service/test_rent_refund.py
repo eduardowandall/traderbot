@@ -93,7 +93,9 @@ class TestClosesTheAccountOfARetiredBucket:
         service, wallet = _setup()
         await _round_trip(service, "a")
         sol_before = wallet.raw_balance(SOL.mint)
-        realized_before = service._bucket("a").account.book.realized_usd
+        before = service._bucket("a").account.book
+        realized_before = before.realized_usd
+        native_before = (before.costs_sol, before.net_quote)
         service.retire("a", "teste")
 
         refund = await service.close_token_account("a")
@@ -113,6 +115,12 @@ class TestClosesTheAccountOfARetiredBucket:
         book = service._bucket("a").account.book
         assert book.realized_usd == realized_before + NET_USD
         assert "rent devolvido" in book.summary()
+        # A30: o rent volta para o PnL nativo também (USDC: o USD do líquido)
+        net_sol = Decimal(RENT - FEE) / 10**9
+        assert (book.costs_sol, book.net_quote) == (
+            native_before[0] - net_sol,
+            native_before[1] + NET_USD,
+        )
 
     async def test_the_refund_comes_off_the_round_trip_cost(self):
         service, _ = _setup()

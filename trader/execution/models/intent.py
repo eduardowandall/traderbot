@@ -122,6 +122,8 @@ class PolicyDecision:
     allowed: bool
     reasons: tuple[str, ...] = ()
     policy_version: str = "defaults"
+    # A29: segundos até a janela móvel que recusou liberar (None: sem janela)
+    retry_after: float | None = None
 
 
 @dataclass

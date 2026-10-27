@@ -1,19 +1,25 @@
 """Relatórios do ledger: PnL e custos por conta (bucket).
 
 Taxas de transações que falharam na rede (`failed_tx_fee`, eventos: não há
-intenção executada para elas) entram nos custos e saem do `net_usd`, como o
-livro do bucket faz em memória. O rent devolvido ao fechar uma conta de token
-(`rent_refund`, A15) faz o caminho inverso.
+intenção executada para elas) e do stop do venue (`perp_stop_fee`) entram nos
+custos e saem do PnL, nativo e em USD, como o livro do bucket faz em memória
+(A30). O rent devolvido ao fechar uma conta de token (`rent_refund`, A15) faz
+o caminho inverso.
+
+Numa perp, as taxas do venue e o empréstimo de cada fechamento (A31) saem das
+pernas (`order_json`): a entrada é seguida por colateral a mais e vendas
+parciais, como o livro faz, sem coluna nova.
 """
 
 import json
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from trader.execution.models.book import added_entry, remainder_entry
 from trader.execution.models.intent import (
     POSITION_SIDES,
     TRADE_SIDES,
@@ -30,7 +36,17 @@ from trader.execution.trade.ledger.events import (
 )
 from trader.execution.trade.ledger.store import LedgerStore, _int, _window
 from trader.shared.models import SOLANA_MINTS
-from trader.shared.models.costs import RoundTripCosts
+from trader.shared.models.costs import (
+    LAMPORTS_PER_SOL,
+    RoundTripCosts,
+    lamports_usd,
+    outside_cost_quote,
+)
+from trader.shared.models.order import Order, order_from_json
+from trader.shared.models.position import Position
+
+ZERO = Decimal(0)
+ONE = Decimal(1)
 
 
 @dataclass
@@ -39,12 +55,17 @@ class AccountPnL:
 
     account: str
     quote_symbol: str = "?"
+    # converte os custos fora das pernas (A30); o dos fills vence
+    quote_mint: str | None = None
     trades: int = 0  # pernas executadas (compras e vendas)
     closed: int = 0  # posições fechadas
-    incomplete: int = 0  # fechadas sem custos convertidos (ou sem dados nativos)
+    # fechadas sem custos convertidos (ou sem dados nativos), mais custos fora
+    # das pernas sem conversão para o token de cotação
+    incomplete: int = 0
     gross_quote: Decimal = Decimal("0")
     net_quote: Decimal = Decimal("0")
-    costs_sol: Decimal = Decimal("0")  # custos das posições fechadas
+    # custos das posições fechadas e os de fora das pernas (A30)
+    costs_sol: Decimal = Decimal("0")
     net_usd: Decimal = Decimal("0")
     # tudo que foi pago em SOL (inclui posições abertas)
     fee_lamports: int = 0
@@ -60,10 +81,17 @@ class AccountPnL:
     # rent devolvido ao fechar contas de token (a taxa do fechamento está em
     # `fee_lamports`)
     rent_refund_lamports: int = 0
+    # perps fechadas (A31): o que o venue cobrou, dentro de `gross_quote`
+    perp_closes: int = 0
+    perp_fees_quote: Decimal = Decimal("0")
+    perp_borrow_quote: Decimal = Decimal("0")
+    # a entrada perp aberta, seguida pelas pernas
+    _perp_entry: Order | None = field(default=None, repr=False)
 
     def add(self, row: sqlite3.Row) -> None:
         self.trades += 1
         if row["quote_mint"]:
+            self.quote_mint = row["quote_mint"]
             self.quote_symbol = SOLANA_MINTS.symbol_of(row["quote_mint"])
         self.fee_lamports += _int(row["fee_lamports"])
         self.priority_fee_lamports += _int(row["priority_fee_lamports"])
@@ -74,6 +102,30 @@ class AccountPnL:
         self.unknown_costs += row["costs_source"] in (None, "quote")
         if row["realized_pnl_usd"] is not None:
             self._add_closed(row)
+        if row["perp_json"] is not None and row["order_json"] is not None:
+            self._follow_perp(
+                IntentSide(row["side"]), order_from_json(row["order_json"])
+            )
+
+    def _follow_perp(self, side: IntentSide, order: Order) -> None:
+        """Uma perna perp: abre, cresce (colateral a mais) ou fecha a entrada."""
+        entry = self._perp_entry
+        if side == IntentSide.BUY:
+            self._perp_entry = order
+        elif entry is not None and side == IntentSide.ADD:
+            self._perp_entry = added_entry(entry, order)
+        elif entry is not None and side == IntentSide.SELL:
+            self._add_perp_close(entry, order)
+
+    def _add_perp_close(self, entry: Order, exit_: Order) -> None:
+        """As taxas e o empréstimo de um fechamento, como o livro os conta."""
+        pnl = Position(entry, exit_).realized_pnl_detail()
+        if pnl is not None and pnl.price_quote is not None:
+            self.perp_closes += 1
+            self.perp_fees_quote += pnl.perp_fees_quote or ZERO
+            self.perp_borrow_quote += pnl.perp_borrow_quote or ZERO
+        rest = None if exit_.closes_position else remainder_entry(entry, exit_.quantity)
+        self._perp_entry = rest
 
     def _add_closed(self, row: sqlite3.Row) -> None:
         self.closed += 1
@@ -91,8 +143,10 @@ class AccountPnL:
     def add_failed_fee(self, payload: dict) -> None:
         """Um evento `failed_tx_fee`: custo do bucket sem trade."""
         self.failed_tx += len(payload.get("signatures") or ()) or 1
-        self.failed_fee_lamports += int(payload["fee_lamports"])
+        lamports = int(payload["fee_lamports"])
+        self.failed_fee_lamports += lamports
         usd = payload.get("fee_usd")
+        self._outside(lamports, None if usd is None else Decimal(usd))
         if usd is None:
             self.unknown_costs += 1  # sem preço do SOL
             return
@@ -101,11 +155,24 @@ class AccountPnL:
 
     def add_stop_fee(self, payload: dict) -> None:
         """Um evento `perp_stop_fee`: a taxa do stop do venue (A11c F2)."""
-        self.fee_lamports += int(payload["fee_lamports"])
+        lamports = int(payload["fee_lamports"])
+        self.fee_lamports += lamports
         usd = self._known(payload.get("fee_usd"))
+        self._outside(lamports, usd)
         if usd is not None:
             self.costs_usd += usd
             self.net_usd -= usd
+
+    def _outside(self, lamports: int, usd: Decimal | None) -> None:
+        """Um custo fora das pernas no PnL nativo (A30; negativo: devolvido)."""
+        sol = Decimal(lamports) / LAMPORTS_PER_SOL
+        self.costs_sol += sol
+        quote = SOLANA_MINTS.get(self.quote_mint or "")
+        value = None if quote is None else outside_cost_quote(quote, sol, usd)
+        if value is None:
+            self.incomplete += 1
+            return
+        self.net_quote -= value
 
     def _known(self, usd: Any) -> Decimal | None:
         """O valor USD de um custo fora das pernas; sem preço do SOL, None e
@@ -117,9 +184,12 @@ class AccountPnL:
 
     def add_rent_refund(self, payload: dict) -> None:
         """Um evento `rent_refund`: o rent volta, a taxa do fechamento sai."""
-        self.rent_refund_lamports += int(payload["refund_lamports"])
-        self.fee_lamports += int(payload["fee_lamports"])
+        refund = int(payload["refund_lamports"])
+        fee = int(payload["fee_lamports"])
+        self.rent_refund_lamports += refund
+        self.fee_lamports += fee
         usd = payload.get("net_usd")
+        self._outside(fee - refund, None if usd is None else -Decimal(usd))
         if usd is None:
             self.unknown_costs += 1  # sem preço do SOL
             return
@@ -133,9 +203,13 @@ class Reports(LedgerStore):
         account: str,
         start: datetime | None = None,
         end: datetime | None = None,
+        quote_mint: str | None = None,
     ) -> AccountPnL:
-        """PnL e custos da conta (no intervalo `[start, end)`, UTC, se dado)."""
-        totals = AccountPnL(account)
+        """PnL e custos da conta (no intervalo `[start, end)`, UTC, se dado).
+
+        `quote_mint`: o token de cotação, se a conta ainda não tem fill que o
+        diga (converte os custos fora das pernas, A30)."""
+        totals = AccountPnL(account, quote_mint=quote_mint)
         window, params = _window("created_at", start, end)
         for row in self.conn.execute(
             f"SELECT * FROM intents WHERE status = ? AND account = ?{window} "
@@ -237,9 +311,8 @@ class Reports(LedgerStore):
             if row["side"] == str(IntentSide.BUY):
                 entry = row
                 continue
-            leg = None if entry is None else _sell_cost(entry, row)
-            if leg is not None and _since(row, start):
-                totals.add(*leg, closes=bool(row["closes_position"]))
+            if entry is not None and _since(row, start):
+                _add_leg(totals, entry, row)
             if row["closes_position"]:
                 entry = None
         self._outside_legs(totals, account, start, end)
@@ -282,6 +355,41 @@ def _since(row: sqlite3.Row, start: datetime | None) -> bool:
     return start is None or row["created_at"] >= start.astimezone(UTC).isoformat()
 
 
+def _add_leg(totals: RoundTripCosts, entry: _Fields, sell: _Fields) -> None:
+    """Uma venda contra a compra da posição; o rent de uma perp, à parte (A25)."""
+    leg = _sell_cost(entry, sell)
+    if leg is None:
+        return
+    rent = _perp_rent_usd(entry, sell)
+    totals.add(leg[0] - rent, leg[1], closes=bool(sell["closes_position"]))
+    totals.deposit(rent)
+
+
+def _perp_rent_usd(entry: _Fields, sell: _Fields) -> Decimal:
+    """O rent de contas de posição perp que o PnL desta venda descontou, em USD.
+
+    A parte da entrada que a venda fecha, mais o da própria venda; sem preço do
+    SOL, o da outra perna (como o PnL faz). Spot: 0, o rent da conta do token
+    volta no encerramento (A15).
+    """
+    if entry["perp_json"] is None:
+        return ZERO
+    share = _share(entry, sell)
+    return _rent_usd(entry, sell, share) + _rent_usd(sell, entry, ONE)
+
+
+def _rent_usd(leg: _Fields, other: _Fields, share: Decimal) -> Decimal:
+    rent = _int(leg["rent_lamports"])
+    sol_usd = leg["sol_usd_price"] or other["sol_usd_price"]
+    usd = lamports_usd(rent, None if sol_usd is None else Decimal(sol_usd))
+    return ZERO if not rent or usd is None else usd * share
+
+
+def _share(entry: _Fields, sell: _Fields) -> Decimal:
+    """A fração da entrada que a venda fecha (valores raw)."""
+    return Decimal(sell["in_amount"] or entry["out_amount"]) / entry["out_amount"]
+
+
 def _sell_cost(entry: _Fields, sell: _Fields) -> tuple[Decimal, Decimal] | None:
     """(custo, gasto) em USD de uma venda contra a compra da posição.
 
@@ -291,7 +399,7 @@ def _sell_cost(entry: _Fields, sell: _Fields) -> tuple[Decimal, Decimal] | None:
     """
     if not (entry["price"] and sell["price"] and entry["out_amount"]):
         return None
-    share = Decimal(sell["in_amount"] or entry["out_amount"]) / entry["out_amount"]
+    share = _share(entry, sell)
     leverage, sign = _exposure(entry)
     move = (Decimal(sell["price"]) / Decimal(entry["price"]) - 1) * sign
     net_quote = sell["net_pnl_quote"]
