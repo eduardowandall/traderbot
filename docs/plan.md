@@ -22,29 +22,70 @@ costs, perps.
 **Next focus: the backtest.** A34–A38 (2026-10-21) gave it past windows
 (paged, cached), a scenario catalog, parameter variants ranked off the
 holdout windows, ~2x faster replays with cells in parallel, and stresses.
-What is left to trust it: costs at the time of the candles, the intrabar
-path, the perp model, and a live-vs-backtest check from any start (the gaps
-below). No item is scheduled; the next ones come from those gaps, from A39.
+What is left to trust it is planned as A39–A43 below (2026-10-27), from the
+gaps A38 left.
 
 ## 2. Roadmap
 
 In order. Each item ships with `/check` green. Size: **S** < 1 h, **M**
 several modules, **L** a design change.
 
-### Backtest: gaps left after A38
-- **Walk-forward** (A36 follow-up): rank variants on earlier windows, check
-  on the next; today only `holdout` guards against tuning to the catalog.
-- **Perp stresses**: `--costs`/`--volume-slippage` are refused for perps;
-  scaling the perp engine's fee and impact would let them run.
-- **Costs at the time of the candles.** Fees are measured on Jupiter now (or
-  flags) and reused for every window; the network fee is a fixed USD per
-  leg.
-- **Intrabar path.** Each candle replays as open -> low -> high -> close; a
-  stop and a target in the same bar always resolve in that order.
-- **Perp model.** Spot candles stand in for the venue oracle, borrow is a
-  flat `--borrow-bps-hour`, the impact fee is linear.
-- **Live vs backtest.** `live_vs_backtest.py` assumes the bucket started the
-  window flat with its whole budget.
+### Backtest trust (A39–A43, planned 2026-10-27)
+
+From the gaps A38 left. Order: A39 -> A40 -> A41 -> A42 -> A43. A39 and A40
+change what a tuning run concludes; A41 is cheap; A42 and A43 are bigger.
+
+#### A39. Walk-forward ranking — S/M
+- Today only the `holdout` tag guards against tuning to the catalog. With
+  `--walk-forward` (on `--rolling` or any windows, ordered by start), fold k
+  picks the best variant on the windows before k (`--train N`: the last N;
+  default all before) by the same rank as A36, and records that variant's
+  result on window k: out of sample.
+- No new replays: every variant already ran on every window, so this reads
+  the `run_matrix` rows. Output: the out-of-sample median and worst next to
+  the base spec's on the same windows, and how often the pick changed (a
+  pick that jumps every fold is noise).
+
+#### A40. Intrabar path from finer candles — M
+- A candle replays as open -> low -> high -> close (open -> high -> low ->
+  close on a down bar), so a stop and a target inside one bar always resolve
+  in that order. For a 1 m or 1 h spec, `--intrabar fine` builds each bar's
+  path from the 15 s (or 1 m) candles inside it, in their real order (the
+  same history cache, A34); the indicators still see the spec's bars.
+- For a 15 s spec (nothing finer): `--intrabar worst` puts the adverse
+  extreme first (low first for a long), a pessimistic bound.
+- Every result counts the exits where a stop and a target were both inside
+  one bar (`ambiguous_exits`), so the order's effect is visible even
+  without the flags.
+
+#### A41. Network fee at the window's SOL price — S
+- The network fee is a fixed USD per leg measured at today's SOL price.
+  Keep it in lamports (5000 + the priority cap) and price it at the SOL
+  price of the tick: the pair's own when a side is SOL, else SOL's candles
+  for the window (a third series, cached). `REPLAY_SOL_USD` then only covers
+  a `--ticks` file without SOL.
+- The pool fee and slippage stay measured now (no history exists for them);
+  `--volume-slippage` (A38) is the proxy for thinner markets.
+
+#### A42. Live vs backtest from any start — M
+- `live_vs_backtest.py` assumes the bucket started the window flat with its
+  whole budget. Seed the replay with the bucket's state at the first tick,
+  as the bot does at a restart: the ledger's legs before the window go into
+  the replay's in-memory ledger and wallet, and the strategy resumes from
+  them (`resume(last_exit_at, opened_at, last_exit_price)`, the open
+  position and its peak).
+- Then any recorded window compares, not only one that started flat.
+
+#### A43. Perp model and perp stresses — L
+- Spot candles stand in for the venue's oracle, borrow is a flat
+  `--borrow-bps-hour`, and the impact fee is linear. Read the custody's
+  impact parameters (A10's reader) and apply Jupiter's formula, and take the
+  borrow rate from the custody's utilization curve at the live rate as the
+  default instead of 1 bps/h.
+- Then `--costs` scales the perp fee and impact (and borrow), so a perp
+  takes cost stresses too; `--volume-slippage` stays spot-only.
+- The oracle stays the spot candles (the Doves feed has no history);
+  documented as the remaining gap.
 
 ### Backlog
 - A service entrypoint (systemd, Docker or a Windows service).
